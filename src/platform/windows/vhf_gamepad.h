@@ -21,7 +21,8 @@ namespace platf {
     xbox_one,
     dualshock4,
     dualsense,
-    switch_pro
+    switch_pro,
+    steam_controller  ///< Valve Steam Controller (2026): two pads, motion, battery, grips.
   };
 
   /**

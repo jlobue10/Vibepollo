@@ -149,6 +149,12 @@ namespace platf {
             return true;
           }
           return false;
+        case vhf_profile_e::steam_controller:
+          if (offers(client, lvg::profile::steam_controller)) {
+            selected = lvg::profile::steam_controller;
+            return true;
+          }
+          return false;
         case vhf_profile_e::automatic:
           break;
       }
@@ -165,10 +171,22 @@ namespace platf {
       return profile == lvg::profile::dualshock_4 || profile == lvg::profile::dualsense;
     }
 
+    bool is_steam_controller(const lvg::profile profile) {
+      return profile == lvg::profile::steam_controller;
+    }
+
+    // Profiles whose controller has at least one touchpad. The PlayStation pad
+    // is one two-finger surface; the Steam Controller has two single-touch pads
+    // addressed by the client's touchpad index.
+    bool has_touch(const lvg::profile profile) {
+      return is_playstation(profile) || is_steam_controller(profile);
+    }
+
     // Profiles whose controller carries motion sensors and a battery. The
     // Switch Pro has both but no touchpad, so the two are not the same set.
     bool has_motion(const lvg::profile profile) {
-      return is_playstation(profile) || profile == lvg::profile::switch_pro;
+      return is_playstation(profile) || profile == lvg::profile::switch_pro ||
+             is_steam_controller(profile);
     }
 
     /**
@@ -188,6 +206,8 @@ namespace platf {
           return "a DualShock 4 controller"sv;
         case lvg::profile::switch_pro:
           return "a Switch Pro Controller"sv;
+        case lvg::profile::steam_controller:
+          return "a Steam Controller (2026)"sv;
         default:
           return "an unsupported gamepad profile"sv;
       }
@@ -542,14 +562,18 @@ namespace platf {
     // Exclusive: the pointer-to-contact mapping is mutated here.
     std::unique_lock lock {impl->lifetime};
     auto &slot = impl->slots[nr];
-    if (!slot.active || !is_playstation(slot.profile)) {
+    if (!slot.active || !has_touch(slot.profile)) {
       return;
     }
 
     const std::uint8_t event = vhf_gamepad::to_protocol_touch_event(touch_event.eventType);
     std::uint8_t contact = 0;
 
-    if (event == static_cast<std::uint8_t>(lvg::touch_event::cancel_all)) {
+    if (is_steam_controller(slot.profile)) {
+      // Each pad is single-touch, so the pad index is the contact: 0 left, 1 right.
+      // Pointer ids are irrelevant and a third finger cannot exist.
+      contact = touch_event.touchpadIndex != 0 ? 1 : 0;
+    } else if (event == static_cast<std::uint8_t>(lvg::touch_event::cancel_all)) {
       slot.contact_of_pointer.clear();
       slot.free_contacts = 0x3;
     } else if (event == static_cast<std::uint8_t>(lvg::touch_event::down)) {

@@ -90,5 +90,5 @@
 	branch = master
 [submodule "third-party/libvirtualgamepad"]
 	path = third-party/libvirtualgamepad
-	url = https://github.com/Nonary/libvirtualgamepad.git
-	branch = main
+	url = https://github.com/jlobue10/libvirtualgamepad.git
+	branch = feat/steam-controller-profile

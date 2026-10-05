@@ -161,6 +161,7 @@ export function getConfigSelectOptions(
         vhf_ds4: 'config.gamepad_vhf_ds4',
         vhf_ds5: 'config.gamepad_vhf_ds5',
         vhf_switch: 'config.gamepad_vhf_switch',
+        vhf_steam: 'config.gamepad_vhf_steam',
       };
       const prioritizedByPlatform: Record<string, string[]> = {
         freebsd: ['switch', 'xone'],
@@ -174,6 +175,7 @@ export function getConfigSelectOptions(
           'vhf_ds4',
           'vhf_ds5',
           'vhf_switch',
+          'vhf_steam',
         ],
       };
       const fallbackOrder = ['x360', 'ds5', 'ds4'];

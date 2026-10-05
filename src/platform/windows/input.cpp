@@ -27,6 +27,11 @@
 #include "vhf_gamepad.h"
 #include "vhf_gamepad_policy.h"
 
+// moonlight-common-c grew LI_CTYPE_STEAM after the revision pinned here; the wire value is fixed.
+#ifndef LI_CTYPE_STEAM
+  #define LI_CTYPE_STEAM 0x04
+#endif
+
 #ifdef __MINGW32__
 // DECLARE_HANDLE(HSYNTHETICPOINTERDEVICE);
 WINUSERAPI HSYNTHETICPOINTERDEVICE WINAPI CreateSyntheticPointerDevice(POINTER_INPUT_TYPE pointerType, ULONG maxCount, POINTER_FEEDBACK_MODE mode);
@@ -525,15 +530,17 @@ namespace platf {
            config::input.gamepad == "vhf_xbox_one"sv ||
            config::input.gamepad == "vhf_ds4"sv ||
            config::input.gamepad == "vhf_ds5"sv ||
-           config::input.gamepad == "vhf_switch"sv;
+           config::input.gamepad == "vhf_switch"sv ||
+           config::input.gamepad == "vhf_steam"sv;
   }
 
   /**
    * @brief Reports whether the configured VHF controller has a touchpad.
-   * @return `true` when the selection always yields a PlayStation controller.
+   * @return `true` when the selection always yields a controller with one.
    */
   static bool vhf_gamepad_has_touchpad() {
-    return config::input.gamepad == "vhf_ds4"sv || config::input.gamepad == "vhf_ds5"sv;
+    return config::input.gamepad == "vhf_ds4"sv || config::input.gamepad == "vhf_ds5"sv ||
+           config::input.gamepad == "vhf_steam"sv;
   }
 
   /**
@@ -569,7 +576,15 @@ namespace platf {
     if (config::input.gamepad == "vhf_switch"sv) {
       return vhf_profile_e::switch_pro;
     }
+    if (config::input.gamepad == "vhf_steam"sv) {
+      return vhf_profile_e::steam_controller;
+    }
 
+    if (metadata.type == LI_CTYPE_STEAM) {
+      // A client that identifies a Steam Controller gets the real thing: two pads, grips,
+      // motion and Steam's own glyphs, instead of a DualSense approximation.
+      return vhf_profile_e::steam_controller;
+    }
     if (metadata.type == LI_CTYPE_PS) {
       return vhf_profile_e::dualsense;
     }
@@ -2014,6 +2029,7 @@ namespace platf {
         supported_gamepad_t {"vhf_ds4", false, ""},
         supported_gamepad_t {"vhf_ds5", false, ""},
         supported_gamepad_t {"vhf_switch", false, ""},
+        supported_gamepad_t {"vhf_steam", false, ""},
       };
 
       return gps;
@@ -2036,7 +2052,8 @@ namespace platf {
       supported_gamepad_t {"vhf_xbox_one", vhf_enabled, vhf_reason},
       supported_gamepad_t {"vhf_ds4", vhf_enabled, vhf_reason},
       supported_gamepad_t {"vhf_ds5", vhf_enabled, vhf_reason},
-      supported_gamepad_t {"vhf_switch", vhf_enabled, vhf_reason}
+      supported_gamepad_t {"vhf_switch", vhf_enabled, vhf_reason},
+      supported_gamepad_t {"vhf_steam", vhf_enabled, vhf_reason}
     };
 
     // A gamepad type that is unavailable only because its backend is not installed is not

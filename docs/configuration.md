@@ -400,6 +400,15 @@ editing the `conf` file in a text editor. Use the examples as reference.
             as ZL and ZR presses, and it has no touchpad.}</td>
     </tr>
     <tr>
+        <td>vhf_steam</td>
+        <td>Steam Controller (2026) on Vibepollo's own virtual gamepad driver
+            @note{This option applies to Windows only and requires a Vibepollo virtual gamepad
+            driver with the Steam Controller profile. Steam recognises it as a real Steam
+            Controller: two trackpads (the client's touchpad 0 and 1), four grip buttons, motion
+            sensors, battery and pad haptics rendered as rumble. Plain `vhf` and `auto` select it
+            for clients that report a Steam Controller.}</td>
+    </tr>
+    <tr>
         <td>vhf_xbox</td>
         <td>Xbox Series controller on Vibepollo's own virtual gamepad driver
             @note{This option applies to Windows only and requires the Vibepollo virtual gamepad

@@ -318,6 +318,9 @@ namespace platf {
     float x;
     float y;
     float pressure;
+    // Which physical touchpad the event belongs to (LI_CCAP_DUAL_TOUCHPAD clients send 0 and 1;
+    // everything else sends 0). Backends with a single pad ignore it.
+    std::uint8_t touchpadIndex;
   };
 
   struct gamepad_motion_t {

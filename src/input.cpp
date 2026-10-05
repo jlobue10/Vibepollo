@@ -1261,6 +1261,7 @@ namespace input {
       from_clamped_netfloat(packet->x, 0.0f, 1.0f),
       from_clamped_netfloat(packet->y, 0.0f, 1.0f),
       from_clamped_netfloat(packet->pressure, 0.0f, 1.0f),
+      packet->touchpadIndex,
     };
 
     platf::gamepad_touch(platf_input, touch);
