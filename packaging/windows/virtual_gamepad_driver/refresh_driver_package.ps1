@@ -467,7 +467,8 @@ function Write-ReleaseLock {
         driver_ver = $Manifest.driver_ver
         protocol_version = [uint16] $Manifest.protocol_version
         manifest_sha256 = Get-Sha256 -Path (Join-Path $Root 'manifest.json')
-        signed_downstream = @($Manifest.signing.signed_downstream)
+        # Absent for signed channels (local-test, external catalog signing).
+        signed_downstream = @($Manifest.signing.signed_downstream | Where-Object { $null -ne $_ })
         producer_payload_sha256 = $payloadHashes
         installer_script_sha256 = $scriptHashes
     }
@@ -505,7 +506,7 @@ function Assert-ReleaseLock {
         $lock.signing_channel -cne $Manifest.signing.channel) {
         throw '[VibeshineVhfGamepad] Release lock does not describe the driver manifest.'
     }
-    Assert-ExactList -Actual @($lock.signed_downstream) -Expected @($Manifest.signing.signed_downstream) -Name 'release-lock signed_downstream'
+    Assert-ExactList -Actual @($lock.signed_downstream | Where-Object { $null -ne $_ }) -Expected @($Manifest.signing.signed_downstream | Where-Object { $null -ne $_ }) -Name 'release-lock signed_downstream'
     foreach ($entry in @($Manifest.files)) {
         $property = $lock.producer_payload_sha256.PSObject.Properties[[string] $entry.path]
         if ($null -eq $property -or [string] $property.Value -cne [string] $entry.sha256) {
