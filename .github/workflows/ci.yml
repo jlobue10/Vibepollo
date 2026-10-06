@@ -13,6 +13,10 @@ on:
         description: Use the local Windows and Linux release runners
         type: boolean
         default: false
+      vhf_local_test_package:
+        description: Development installer only - build and locally sign the VHF gamepad driver from the pinned submodule (never for a release)
+        type: boolean
+        default: false
   push:
     branches:
       - '**'
@@ -269,6 +273,7 @@ jobs:
       symbol_release_draft: true
       symbol_release_prefix: polo
       require_truehdr_runtime: ${{ needs.release-candidate.outputs.should_release == 'true' }}
+      vhf_local_test_package: ${{ github.event_name == 'workflow_dispatch' && inputs.vhf_local_test_package }}
     secrets:
       symbol_token: ${{ secrets.SYMBOL_TOKEN }}
       truehdr_runtime_token: ${{ secrets.TRUEHDR_RUNTIME_TOKEN }}
