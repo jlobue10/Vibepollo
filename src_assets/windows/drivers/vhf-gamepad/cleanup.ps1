@@ -14,6 +14,26 @@ function Write-DriverMessage {
     Write-Host "[VibeshineVhfGamepad] $Message"
 }
 
+function Resolve-SystemToolPath {
+    param([Parameter(Mandatory = $true)][string] $ToolName)
+
+    # The MSI runs this script through a 32-bit custom action server, where
+    # System32 is redirected to SysWOW64 and pnputil.exe does not exist. Prefer
+    # the Sysnative alias so the native tool is found, as install.ps1 does.
+    $systemRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { 'C:\Windows' } else { $env:SystemRoot }
+    foreach ($candidate in @(
+        (Join-Path $systemRoot "Sysnative\$ToolName"),
+        (Join-Path $systemRoot "System32\$ToolName"),
+        (Join-Path $systemRoot "SysWOW64\$ToolName")
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+
+    throw "PnPUtil is unavailable: $(Join-Path $systemRoot "System32\$ToolName")"
+}
+
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -37,10 +57,7 @@ function Get-OwnedRootDeviceInstanceIds {
 }
 
 function Remove-OwnedRootDevices {
-    $pnputil = Join-Path $env:WINDIR 'System32\pnputil.exe'
-    if (-not (Test-Path -LiteralPath $pnputil -PathType Leaf)) {
-        throw "PnPUtil is unavailable: $pnputil"
-    }
+    $pnputil = Resolve-SystemToolPath -ToolName 'pnputil.exe'
 
     $rebootRequired = $false
     $instances = @(Get-OwnedRootDeviceInstanceIds)
@@ -68,10 +85,7 @@ function Remove-OwnedDriverStorePackages {
         throw 'Get-WindowsDriver is unavailable; refusing to guess Driver Store package names.'
     }
 
-    $pnputil = Join-Path $env:WINDIR 'System32\pnputil.exe'
-    if (-not (Test-Path -LiteralPath $pnputil -PathType Leaf)) {
-        throw "PnPUtil is unavailable: $pnputil"
-    }
+    $pnputil = Resolve-SystemToolPath -ToolName 'pnputil.exe'
 
     $rebootRequired = $false
     $packages = @(Get-WindowsDriver -Online -All | Where-Object {
