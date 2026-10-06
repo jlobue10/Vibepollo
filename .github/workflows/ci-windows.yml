@@ -69,6 +69,15 @@ on:
         required: false
         type: boolean
         default: false
+      vhf_local_test_package:
+        # Development installers only: build the VHF gamepad driver from the
+        # pinned libvirtualgamepad submodule and sign it with a throwaway
+        # local-test certificate instead of fetching the unsigned producer
+        # release. The MSI then trusts that certificate on the test host
+        # (-AllowLocalTestCertificate 1). Never use for a release.
+        required: false
+        type: boolean
+        default: false
       truehdr_runtime_release_repo:
         required: false
         type: string
@@ -221,8 +230,10 @@ jobs:
         with:
           ref: ${{ inputs.release_commit }}
           fetch-depth: 1
+          submodules: ${{ inputs.vhf_local_test_package && 'true' || 'false' }}
 
       - name: Download and verify immutable producer release
+        if: ${{ !inputs.vhf_local_test_package }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -249,6 +260,55 @@ jobs:
             -ExpectedProtocolVersion $env:VHF_PROTOCOL_VERSION `
             -OutDir $packageRoot `
             -GitHubToken $env:GH_TOKEN
+
+      - name: Build and locally sign the VHF package (development only)
+        if: inputs.vhf_local_test_package
+        shell: pwsh
+        env:
+          RELEASE_COMMIT: ${{ inputs.release_commit }}
+          VHF_DRIVER_VER: 10/05/2026,0.1.0.68
+          VHF_PROTOCOL_VERSION: '2'
+          VHF_SOURCE_REVISION: ce39de4df79fcaffa4e601b9ac20293ccfd21239
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gitlink = (git rev-parse "$($env:RELEASE_COMMIT):third-party/libvirtualgamepad").Trim()
+          if ($LASTEXITCODE -ne 0 -or $gitlink -cne $env:VHF_SOURCE_REVISION) {
+            throw "Release commit does not pin libvirtualgamepad $($env:VHF_SOURCE_REVISION); got '$gitlink'."
+          }
+          $driverRepo = Join-Path $env:GITHUB_WORKSPACE 'third-party\libvirtualgamepad'
+          $head = (git -C $driverRepo rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:VHF_SOURCE_REVISION) {
+            throw "Submodule checkout is $head, expected $($env:VHF_SOURCE_REVISION)."
+          }
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $instancePath = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($instancePath)) { throw 'No MSBuild instance found.' }
+          $msbuild = Join-Path $instancePath 'MSBuild\Current\Bin\MSBuild.exe'
+          if (-not (Test-Path -LiteralPath $msbuild -PathType Leaf)) { throw "MSBuild not found at '$msbuild'." }
+          $signTool = Get-ChildItem -Path (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin\10.*\x64\signtool.exe') -ErrorAction SilentlyContinue |
+            Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          if ([string]::IsNullOrWhiteSpace($signTool)) { throw 'signtool.exe was not found in the Windows Kits.' }
+
+          $packageRoot = Join-Path $env:RUNNER_TEMP 'vhf-gamepad-producer-release'
+          & (Join-Path $driverRepo 'tools\build-driver.ps1') `
+            -Configuration Release `
+            -Platform x64 `
+            -SigningMode LocalTest `
+            -DriverVer $env:VHF_DRIVER_VER `
+            -PackageDir $packageRoot `
+            -MSBuildPath $msbuild `
+            -SignToolPath $signTool
+          # Writes manifest.json (signing.channel = self-signed-local-test).
+          & (Join-Path $driverRepo 'tools\verify-driver-package.ps1') `
+            -PackageDir $packageRoot `
+            -Platform x64 `
+            -DriverVer $env:VHF_DRIVER_VER `
+            -SourceRevision $env:VHF_SOURCE_REVISION `
+            -ProtocolVersion ([uint16] $env:VHF_PROTOCOL_VERSION) `
+            -SignToolPath $signTool `
+            -AllowLocalTestCertificate
+          Get-ChildItem -Recurse -File $packageRoot | Select-Object -ExpandProperty FullName
 
       - name: Upload verified producer package for Windows build
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -353,6 +413,7 @@ jobs:
       - name: Revalidate VHF producer package for packaging
         shell: pwsh
         env:
+          VHF_LOCAL_TEST_PACKAGE: ${{ inputs.vhf_local_test_package }}
           VHF_ARCHIVE_SHA256: 4a717c63ab1343166d2c8f2360aa7629d4fa1bcc1ff6381443eb03442cd043f1
           VHF_DRIVER_VER: 10/05/2026,0.1.0.68
           VHF_PROTOCOL_VERSION: '2'
@@ -361,15 +422,19 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $packageRoot = Join-Path $env:RUNNER_TEMP 'vhf-gamepad-producer-release'
-          .\scripts\download_libvirtualgamepad_release.ps1 `
-            -ValidateOnly `
-            -Repository jlobue10/libvirtualgamepad `
-            -Tag $env:VHF_TAG `
-            -ExpectedArchiveSha256 $env:VHF_ARCHIVE_SHA256 `
-            -ExpectedSourceRevision $env:VHF_SOURCE_REVISION `
-            -ExpectedDriverVer $env:VHF_DRIVER_VER `
-            -ExpectedProtocolVersion $env:VHF_PROTOCOL_VERSION `
-            -OutDir $packageRoot
+          if ($env:VHF_LOCAL_TEST_PACKAGE -eq 'true') {
+            Write-Host 'Local-test VHF package: the CMake refresh target validates it against the consumer contract.'
+          } else {
+            .\scripts\download_libvirtualgamepad_release.ps1 `
+              -ValidateOnly `
+              -Repository jlobue10/libvirtualgamepad `
+              -Tag $env:VHF_TAG `
+              -ExpectedArchiveSha256 $env:VHF_ARCHIVE_SHA256 `
+              -ExpectedSourceRevision $env:VHF_SOURCE_REVISION `
+              -ExpectedDriverVer $env:VHF_DRIVER_VER `
+              -ExpectedProtocolVersion $env:VHF_PROTOCOL_VERSION `
+              -OutDir $packageRoot
+          }
           "VHF_PACKAGE_ROOT=$packageRoot" >> $env:GITHUB_ENV
 
       - name: Resolve Windows build version
@@ -442,16 +507,13 @@ jobs:
             src_assets/common/assets/web/package-lock.json
             src_assets/common/assets/web-legacy/package-lock.json
 
-      - name: Resolve managed tool paths
+      - name: NodeJS Path
         shell: pwsh
         run: |
           $nodeBinaryPath = (Get-Command node).Source
           $nodePath = Split-Path -Path $nodeBinaryPath -Parent
-          $dotnetBinaryPath = (Get-Command dotnet).Source
           "NODEJS_PATH=$nodePath" >> $env:GITHUB_ENV
-          "DOTNET_PATH=$dotnetBinaryPath" >> $env:GITHUB_ENV
           "nodejs-path=$nodePath"
-          "dotnet-path=$dotnetBinaryPath"
 
       - name: Install WiX Toolset
         if: runner.environment != 'self-hosted'
@@ -560,17 +622,15 @@ jobs:
           BRANCH: ${{ github.head_ref || github.ref_name }}
           COMMIT: ${{ inputs.release_commit }}
           REQUIRE_TRUEHDR_RUNTIME: ${{ inputs.require_truehdr_runtime }}
+          VHF_LOCAL_TEST_PACKAGE: ${{ inputs.vhf_local_test_package }}
         run: |
           echo "Using BUILD_VERSION=${BUILD_VERSION}"
 
           NODEJS_PATH=$(cygpath -u "$NODEJS_PATH")
-          DOTNET_PATH=$(cygpath -m "$DOTNET_PATH")
           export PATH="${NODEJS_PATH}:$PATH"
           NPM_PATH="$(cygpath -m "${NODEJS_PATH}/npm.cmd")"
           echo "Using node: $(command -v node) ($(node --version))"
           echo "Using npm: ${NPM_PATH} ($(npm --version))"
-          DOTNET_VERSION="$("${DOTNET_PATH}" --version)"
-          echo "Using dotnet: ${DOTNET_PATH} (${DOTNET_VERSION})"
 
           vdd_prebuilt_arg=()
           if [[ -n "${VDD_PREBUILT_PACKAGE_DIR:-}" ]]; then
@@ -581,16 +641,25 @@ jobs:
             echo "Verified VHF producer package path is missing." >&2
             exit 1
           fi
-          vhf_gamepad_package_arg=(
-            -DSUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER=ON
-            -DSUNSHINE_LIBVIRTUALGAMEPAD_PREBUILT_DIR="$(cygpath -u "${VHF_PACKAGE_ROOT}")"
-            -DSUNSHINE_VHF_GAMEPAD_RELEASE_TAG=v0.1.0-beta.101
-            -DSUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256=4a717c63ab1343166d2c8f2360aa7629d4fa1bcc1ff6381443eb03442cd043f1
-            -DSUNSHINE_VHF_GAMEPAD_SOURCE_REVISION=ce39de4df79fcaffa4e601b9ac20293ccfd21239
-            -DSUNSHINE_VHF_GAMEPAD_DRIVER_VER=10/05/2026,0.1.0.68
-            -DSUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION=2
-          )
-          echo "Using verified VHF producer release v0.1.0-beta.101"
+          if [[ "${VHF_LOCAL_TEST_PACKAGE}" == "true" ]]; then
+            vhf_gamepad_package_arg=(
+              -DSUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER=ON
+              -DSUNSHINE_LIBVIRTUALGAMEPAD_PREBUILT_DIR="$(cygpath -u "${VHF_PACKAGE_ROOT}")"
+              -DSUNSHINE_ALLOW_LOCAL_VHF_GAMEPAD_TEST_PACKAGE=ON
+            )
+            echo "Using a locally signed VHF test package (development installer, not for release)"
+          else
+            vhf_gamepad_package_arg=(
+              -DSUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER=ON
+              -DSUNSHINE_LIBVIRTUALGAMEPAD_PREBUILT_DIR="$(cygpath -u "${VHF_PACKAGE_ROOT}")"
+              -DSUNSHINE_VHF_GAMEPAD_RELEASE_TAG=v0.1.0-beta.101
+              -DSUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256=4a717c63ab1343166d2c8f2360aa7629d4fa1bcc1ff6381443eb03442cd043f1
+              -DSUNSHINE_VHF_GAMEPAD_SOURCE_REVISION=ce39de4df79fcaffa4e601b9ac20293ccfd21239
+              -DSUNSHINE_VHF_GAMEPAD_DRIVER_VER=10/05/2026,0.1.0.68
+              -DSUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION=2
+            )
+            echo "Using verified VHF producer release v0.1.0-beta.101"
+          fi
           truehdr_runtime_arg=()
           if [[ "${REQUIRE_TRUEHDR_RUNTIME}" == "true" ]]; then
             truehdr_runtime_arg=(
@@ -623,7 +692,6 @@ jobs:
             -DWEBRTC_MSYS2_BIN="$(cygpath -u "${WEBRTC_MSYS2_BIN}")" \
             -DWEBRTC_VS_PATH="$(cygpath -u "${WEBRTC_VS_PATH}")" \
             -DWEBRTC_WINSDK_DIR="$(cygpath -u "${WEBRTC_WINSDK_DIR}")" \
-            -DSUNSHINE_DOTNET_EXECUTABLE="${DOTNET_PATH}" \
             -DSUNSHINE_NPM_EXECUTABLE="${NPM_PATH}" \
             -DSUNSHINE_ASSETS_DIR=assets \
             -DSUNSHINE_PUBLISHER_NAME="${GITHUB_REPOSITORY_OWNER}" \
@@ -830,6 +898,7 @@ jobs:
         shell: pwsh
         env:
           MSI_NAME: ${{ steps.package-windows-msi.outputs.msi_name }}
+          VHF_LOCAL_TEST_PACKAGE: ${{ inputs.vhf_local_test_package }}
         run: |
           $ErrorActionPreference = 'Stop'
           $extractRoot = Join-Path $env:RUNNER_TEMP 'unsigned-vhf-msi-extract'
@@ -840,15 +909,24 @@ jobs:
             throw "Administrative extraction of unsigned MSI failed with exit code $($process.ExitCode)."
           }
           $packageDir = Join-Path $extractRoot 'Apollo\drivers\vhf-gamepad'
-          .\packaging\windows\virtual_gamepad_driver\refresh_driver_package.ps1 `
-            -ValidateOnly `
-            -PrebuiltPackageDir $env:VHF_PACKAGE_ROOT `
-            -PackageDir $packageDir `
-            -ReleaseTag v0.1.0-beta.101 `
-            -ExpectedReleaseAssetSha256 4a717c63ab1343166d2c8f2360aa7629d4fa1bcc1ff6381443eb03442cd043f1 `
-            -ExpectedSourceRevision ce39de4df79fcaffa4e601b9ac20293ccfd21239 `
-            -ExpectedDriverVer '10/05/2026,0.1.0.68' `
-            -ExpectedProtocolVersion 2
+          $localTest = $env:VHF_LOCAL_TEST_PACKAGE -eq 'true'
+          if ($localTest) {
+            .\packaging\windows\virtual_gamepad_driver\refresh_driver_package.ps1 `
+              -ValidateOnly `
+              -AllowLocalTestPackage `
+              -PrebuiltPackageDir $env:VHF_PACKAGE_ROOT `
+              -PackageDir $packageDir
+          } else {
+            .\packaging\windows\virtual_gamepad_driver\refresh_driver_package.ps1 `
+              -ValidateOnly `
+              -PrebuiltPackageDir $env:VHF_PACKAGE_ROOT `
+              -PackageDir $packageDir `
+              -ReleaseTag v0.1.0-beta.101 `
+              -ExpectedReleaseAssetSha256 4a717c63ab1343166d2c8f2360aa7629d4fa1bcc1ff6381443eb03442cd043f1 `
+              -ExpectedSourceRevision ce39de4df79fcaffa4e601b9ac20293ccfd21239 `
+              -ExpectedDriverVer '10/05/2026,0.1.0.68' `
+              -ExpectedProtocolVersion 2
+          }
           $expected = @(
             'cleanup.ps1',
             'driver/VibeshineVhfGamepad.cat',
@@ -859,6 +937,9 @@ jobs:
             'release-lock.json',
             'tools/VibeshineVhfGamepadDeviceSetup.exe'
           )
+          if ($localTest) {
+            $expected = @($expected + 'driver/VibeshineVhfGamepad.cer' | Sort-Object)
+          }
           $actual = @(Get-ChildItem -LiteralPath $packageDir -Recurse -File | ForEach-Object {
             $_.FullName.Substring($packageDir.Length).TrimStart('\', '/').Replace('\', '/')
           } | Sort-Object)
@@ -1436,7 +1517,7 @@ jobs:
             'sunshine.exe','uninstall.exe','libwebrtc.dll','zlib1.dll',
             'sunshinesvc.exe','dxgi-info.exe','audio-info.exe',
             'playnite-launcher.exe','sunshine_wgc_capture.exe','sunshine_display_helper.exe',
-            'virtualdisplay_probe.exe','VkLayer_sunshine_hdr.dll','VibepolloPlaynite.dll'
+            'virtualdisplay_probe.exe','VkLayer_sunshine_hdr.dll'
           )
           $optionalFirstParty = @('vibeshine_truehdr.dll')
           $vendorSkip = @(
