@@ -91,6 +91,11 @@ namespace platf {
   constexpr std::uint32_t PADDLE4 = 0x080000;
   constexpr std::uint32_t TOUCHPAD_BUTTON = 0x100000;
   constexpr std::uint32_t MISC_BUTTON = 0x200000;
+  // Moonlight extension (LI_CCAP_GRIP_SENSE): the Steam Controller (2026)'s capacitive
+  // grip sensors, "held" rather than pressed. Only the VHF Steam Controller profile
+  // consumes them; every other backend ignores the two bits.
+  constexpr std::uint32_t LEFT_GRIP_TOUCH = 0x400000;
+  constexpr std::uint32_t RIGHT_GRIP_TOUCH = 0x800000;
 
   struct supported_gamepad_t {
     std::string name;
