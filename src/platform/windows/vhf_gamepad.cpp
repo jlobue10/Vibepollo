@@ -62,6 +62,10 @@ namespace platf {
     static_assert(PADDLE4 == lvg::button_mask::paddle_4);
     static_assert(TOUCHPAD_BUTTON == lvg::button_mask::touchpad);
     static_assert(MISC_BUTTON == lvg::button_mask::misc);
+    // Grip sense (LI_CCAP_GRIP_SENSE) rides along in the same button word; the driver
+    // treats it as the Steam Controller's capacitive grips, not as buttons.
+    static_assert(LEFT_GRIP_TOUCH == lvg::button_mask::left_grip_touch);
+    static_assert(RIGHT_GRIP_TOUCH == lvg::button_mask::right_grip_touch);
 
     // Global indices address driver slots directly, so the two limits have to agree.
     static_assert(MAX_GAMEPADS <= lvg::k_max_controllers);
