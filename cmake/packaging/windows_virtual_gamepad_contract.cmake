@@ -44,15 +44,15 @@ set(SUNSHINE_VHF_GAMEPAD_REQUIRED_FILES
     release-lock.json)
 set(SUNSHINE_VHF_GAMEPAD_DRIVER_DESTINATION "drivers/vhf-gamepad")
 set(SUNSHINE_VHF_GAMEPAD_REPOSITORY "jlobue10/libvirtualgamepad")
-set(SUNSHINE_VHF_GAMEPAD_RELEASE_TAG "v0.1.0-beta.101" CACHE STRING
+set(SUNSHINE_VHF_GAMEPAD_RELEASE_TAG "v0.1.0-beta.102" CACHE STRING
     "Pinned immutable libvirtualgamepad release tag.")
 set(SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256
-    "4a717c63ab1343166d2c8f2360aa7629d4fa1bcc1ff6381443eb03442cd043f1" CACHE STRING
+    "11bec8577e4932723ba7b4af9f1c0c2263e6983e79ab315e72692a6c5758275f" CACHE STRING
     "SHA-256 of the pinned libvirtualgamepad Windows x64 release archive.")
 set(SUNSHINE_VHF_GAMEPAD_SOURCE_REVISION
-    "ce39de4df79fcaffa4e601b9ac20293ccfd21239" CACHE STRING
+    "8c75150ae93aacf62a197bdfc55854cc651185cd" CACHE STRING
     "Commit targeted by the pinned lightweight libvirtualgamepad release tag.")
-set(SUNSHINE_VHF_GAMEPAD_DRIVER_VER "10/05/2026,0.1.0.68" CACHE STRING
+set(SUNSHINE_VHF_GAMEPAD_DRIVER_VER "10/07/2026,0.1.0.74" CACHE STRING
     "DriverVer recorded by the pinned libvirtualgamepad release.")
 set(SUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION 2 CACHE STRING
     "Protocol version recorded by the pinned libvirtualgamepad release.")
