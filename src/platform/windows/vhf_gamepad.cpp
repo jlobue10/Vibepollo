@@ -9,6 +9,7 @@
 #include <Windows.h>
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -75,6 +76,8 @@ namespace platf {
       // on the slot it went down on.
       std::map<std::uint32_t, std::uint8_t> contact_of_pointer;
       std::uint8_t free_contacts {0x3};
+      // The client's LI_CCAP_* flags for this controller (0 when unknown).
+      std::uint16_t client_capabilities {};
       feedback_queue_t feedback_queue;
 
       // Written while only the shared lock is held, so concurrent input threads cannot race.
@@ -90,6 +93,7 @@ namespace platf {
         profile = {};
         contact_of_pointer.clear();
         free_contacts = 0x3;
+        client_capabilities = 0;
         feedback_queue.reset();
         submit_failed.store(false, std::memory_order_relaxed);
         have_feedback = false;
@@ -448,7 +452,8 @@ namespace platf {
   int vhf_gamepad_t::alloc(
     const gamepad_id_t &id,
     feedback_queue_t &feedback_queue,
-    const vhf_profile_e desired) {
+    const vhf_profile_e desired,
+    const std::uint16_t client_capabilities) {
     if (id.globalIndex < 0 || id.globalIndex >= MAX_GAMEPADS) {
       BOOST_LOG(error) << "VHF gamepad index out of range: "sv << id.globalIndex;
       return -1;
@@ -497,6 +502,7 @@ namespace platf {
     slot.active = true;
     slot.profile = profile;
     slot.client_relative_index = id.clientRelativeIndex;
+    slot.client_capabilities = client_capabilities;
     slot.feedback_queue = std::move(feedback_queue);
     impl->active_count.fetch_add(1, std::memory_order_acq_rel);
 
@@ -568,11 +574,32 @@ namespace platf {
 
     const std::uint8_t event = vhf_gamepad::to_protocol_touch_event(touch_event.eventType);
     std::uint8_t contact = 0;
+    float x = touch_event.x;
 
-    if (is_steam_controller(slot.profile)) {
+    if (is_steam_controller(slot.profile) && (slot.client_capabilities & LI_CCAP_DUAL_TOUCHPAD)) {
       // Each pad is single-touch, so the pad index is the contact: 0 left, 1 right.
       // Pointer ids are irrelevant and a third finger cannot exist.
       contact = touch_event.touchpadIndex != 0 ? 1 : 0;
+    } else if (is_steam_controller(slot.profile)) {
+      // A client without LI_CCAP_DUAL_TOUCHPAD sends both pads as one DualShock-style
+      // touchpad: the left half is the left pad and the right half the right pad (how
+      // Steam Input splits a DualShock 4 pad). Choose the pad where the finger went
+      // down and keep it for the pointer's moves and release, since a release carries
+      // no position. Each half stretches back to its pad's full width.
+      if (event == static_cast<std::uint8_t>(lvg::touch_event::cancel_all)) {
+        slot.contact_of_pointer.clear();
+      } else if (event == static_cast<std::uint8_t>(lvg::touch_event::down) ||
+                 slot.contact_of_pointer.find(touch_event.pointerId) == slot.contact_of_pointer.end()) {
+        contact = x >= 0.5f ? 1 : 0;
+        slot.contact_of_pointer[touch_event.pointerId] = contact;
+      } else {
+        contact = slot.contact_of_pointer[touch_event.pointerId];
+      }
+      if (event == static_cast<std::uint8_t>(lvg::touch_event::up) ||
+          event == static_cast<std::uint8_t>(lvg::touch_event::cancel)) {
+        slot.contact_of_pointer.erase(touch_event.pointerId);
+      }
+      x = std::clamp(contact ? (x - 0.5f) * 2.0f : x * 2.0f, 0.0f, 1.0f);
     } else if (event == static_cast<std::uint8_t>(lvg::touch_event::cancel_all)) {
       slot.contact_of_pointer.clear();
       slot.free_contacts = 0x3;
@@ -613,7 +640,7 @@ namespace platf {
     request.controller_id = static_cast<std::uint32_t>(nr);
     request.contact_index = contact;
     request.event_type = event;
-    request.x = vhf_gamepad::to_normalized_touch(touch_event.x);
+    request.x = vhf_gamepad::to_normalized_touch(x);
     request.y = vhf_gamepad::to_normalized_touch(touch_event.y);
     request.pressure = vhf_gamepad::to_normalized_touch(touch_event.pressure);
 

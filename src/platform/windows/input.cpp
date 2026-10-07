@@ -1361,7 +1361,7 @@ namespace platf {
         BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will use the Vibepollo virtual gamepad driver"sv
                         << (automatic_vhf_fallback ? " (automatic fallback)"sv : ""sv);
 
-        if (raw->vhf->alloc(id, feedback_queue, desired) == 0) {
+        if (raw->vhf->alloc(id, feedback_queue, desired, metadata.capabilities) == 0) {
           raw->gamepad_backend[id.globalIndex] = gamepad_backend_e::vhf;
           return 0;
         }
