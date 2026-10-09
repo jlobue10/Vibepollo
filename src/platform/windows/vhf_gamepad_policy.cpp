@@ -17,6 +17,32 @@ extern "C" {
 
 namespace platf::vhf_gamepad {
 
+  std::optional<std::uint8_t> map_steam_touch(
+    std::map<std::uint32_t, std::uint8_t> &pointers,
+    std::uint8_t event, std::uint32_t pointer, float x) {
+    const auto kind = static_cast<lvg::touch_event>(event);
+    if (kind == lvg::touch_event::cancel_all) {
+      pointers.clear();
+      return 0;
+    }
+    auto existing = pointers.find(pointer);
+    if (existing == pointers.end()) {
+      if (kind != lvg::touch_event::down || !std::isfinite(x)) {
+        return std::nullopt;
+      }
+      const std::uint8_t contact = x >= 0.5f ? 1 : 0;
+      for (const auto &[id, occupied] : pointers) {
+        if (occupied == contact) return std::nullopt;
+      }
+      existing = pointers.emplace(pointer, contact).first;
+    }
+    const auto contact = existing->second;
+    if (kind == lvg::touch_event::up || kind == lvg::touch_event::cancel) {
+      pointers.erase(existing);
+    }
+    return contact;
+  }
+
   std::optional<lvg::profile> select_automatic_profile(
     const lvg::profile_mask_t available_profiles
   ) noexcept {

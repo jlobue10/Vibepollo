@@ -531,4 +531,27 @@ namespace {
     EXPECT_EQ(rumble.right, 0);
   }
 
+
+  TEST_F(VhfGamepadPolicyTest, SteamSplitPadsKeepExactlyOneOwnerPerHalf) {
+    std::map<std::uint32_t, std::uint8_t> pointers;
+    const auto send = [&](lvg::touch_event event, std::uint32_t pointer, float x) {
+      return platf::vhf_gamepad::map_steam_touch(pointers, static_cast<std::uint8_t>(event), pointer, x);
+    };
+    EXPECT_EQ(send(lvg::touch_event::down, 10, .2f), 0);
+    EXPECT_EQ(send(lvg::touch_event::down, 20, .8f), 1);
+    for (std::uint32_t i = 100; i < 10000; ++i) {
+      EXPECT_FALSE(send(lvg::touch_event::down, i, .1f));
+      EXPECT_FALSE(send(lvg::touch_event::up, i, 0));
+    }
+    EXPECT_EQ(pointers.size(), 2);
+    EXPECT_EQ(send(lvg::touch_event::move, 10, .9f), 0);
+    EXPECT_EQ(send(lvg::touch_event::down, 10, .9f), 0);
+    EXPECT_EQ(send(lvg::touch_event::up, 20, 0), 1);
+    EXPECT_FALSE(send(lvg::touch_event::move, 20, 0));
+    EXPECT_EQ(pointers.size(), 1);
+    EXPECT_EQ(send(lvg::touch_event::down, 30, .9f), 1);
+    EXPECT_EQ(send(lvg::touch_event::cancel_all, 0, 0), 0);
+    EXPECT_TRUE(pointers.empty());
+    EXPECT_FALSE(send(lvg::touch_event::down, 1, std::numeric_limits<float>::quiet_NaN()));
+  }
 }  // namespace
