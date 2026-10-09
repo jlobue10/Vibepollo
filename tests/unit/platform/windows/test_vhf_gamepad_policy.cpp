@@ -4,7 +4,9 @@
  */
 #include "../../../tests_common.h"
 
+#include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <cstring>
 #include <limits>
 
@@ -18,6 +20,14 @@ namespace {
 
   using platf::vhf_gamepad::backend_e;
   using platf::vhf_gamepad::decode_rumble_rgb;
+  using platf::vhf_gamepad::decode_steam_haptic;
+  using platf::vhf_gamepad::steam_haptic_t;
+  using platf::vhf_gamepad::synthesize_steam_rumble;
+  using platf::vhf_gamepad::synthesized_rumble_t;
+  using platf::vhf_gamepad::STEAM_HAPTIC_CLICK_HOLD_MS;
+  using platf::vhf_gamepad::STEAM_HAPTIC_LEFT;
+  using platf::vhf_gamepad::STEAM_HAPTIC_MIN_HOLD_MS;
+  using platf::vhf_gamepad::STEAM_HAPTIC_RIGHT;
   using platf::vhf_gamepad::make_input_state;
   using platf::vhf_gamepad::normalized_state_t;
   using platf::vhf_gamepad::rumble_rgb_t;
@@ -412,6 +422,113 @@ namespace {
 
     rumble_rgb_t feedback {};
     EXPECT_FALSE(decode_rumble_rgb(event, feedback));
+  }
+
+  lvg::feedback_event make_steam_haptic_event(std::initializer_list<std::uint8_t> report) {
+    lvg::steam_haptic_feedback payload {};
+    payload.length = static_cast<std::uint8_t>(report.size());
+    std::copy(report.begin(), report.end(), payload.report);
+
+    lvg::feedback_event event {};
+    event.header.size = sizeof(event);
+    event.header.version = lvg::k_protocol_version;
+    event.controller_id = 3;
+    event.type = lvg::feedback_type::steam_haptic;
+    event.payload_size = sizeof(payload);
+    std::memcpy(event.payload, &payload, sizeof(payload));
+    return event;
+  }
+
+  steam_haptic_t make_steam_haptic(std::initializer_list<std::uint8_t> report) {
+    steam_haptic_t haptic {};
+    haptic.length = static_cast<std::uint8_t>(report.size());
+    std::copy(report.begin(), report.end(), haptic.report.begin());
+    return haptic;
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticEventIsDecodedVerbatim) {
+    steam_haptic_t haptic {};
+    ASSERT_TRUE(decode_steam_haptic(make_steam_haptic_event({0x82, 0x01, 0x02, 0xf2}), haptic));
+    EXPECT_EQ(haptic.length, 4);
+    EXPECT_EQ(haptic.report[0], 0x82);
+    EXPECT_EQ(haptic.report[1], 0x01);
+    EXPECT_EQ(haptic.report[2], 0x02);
+    EXPECT_EQ(haptic.report[3], 0xf2);
+
+    rumble_rgb_t rumble {};
+    EXPECT_FALSE(decode_rumble_rgb(make_steam_haptic_event({0x82, 0x01, 0x02, 0xf2}), rumble));
+
+    auto truncated = make_steam_haptic_event({0x82, 0x01, 0x02, 0xf2});
+    truncated.payload_size = sizeof(lvg::steam_haptic_feedback) - 1;
+    EXPECT_FALSE(decode_steam_haptic(truncated, haptic));
+    EXPECT_FALSE(decode_steam_haptic(make_steam_haptic_event({0x82}), haptic));
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticRumbleReportBecomesMotorSpeeds) {
+    synthesized_rumble_t rumble {};
+    EXPECT_EQ(synthesize_steam_rumble(
+                make_steam_haptic({0x80, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0xff, 0x3f, 0x00}), rumble),
+              STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.left, 0x8000);
+    EXPECT_EQ(rumble.right, 0x3fff);
+    EXPECT_EQ(rumble.left_hold_ms, 0u);
+    EXPECT_EQ(rumble.right_hold_ms, 0u);
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x80, 0x00, 0x00}), rumble), 0);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticPulseBecomesDutyCycleForTheTrainsLength) {
+    synthesized_rumble_t rumble {};
+    // 10 ms on, 10 ms off, ten times, on the left pad: half magnitude for 200 ms.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x01, 0x10, 0x27, 0x10, 0x27, 0x0a, 0x00}), rumble),
+              STEAM_HAPTIC_LEFT);
+    EXPECT_EQ(rumble.left, 32767);
+    EXPECT_EQ(rumble.left_hold_ms, 200u);
+    EXPECT_EQ(rumble.right, 0);
+
+    // Steam's UI click: one 400 us pulse at full magnitude, held long enough to be felt.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x00, 0x90, 0x01, 0x00, 0x00, 0x01, 0x00}), rumble),
+              STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.right, 65535);
+    EXPECT_EQ(rumble.right_hold_ms, STEAM_HAPTIC_MIN_HOLD_MS);
+    EXPECT_EQ(rumble.left, 32767);
+
+    // A long train does not overflow 32-bit microseconds and is capped.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}), rumble),
+              STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.right_hold_ms, 10'000u);
+
+    // A zero-repeat pulse is Steam's per-side stop.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x01, 0, 0, 0, 0, 0, 0}), rumble), STEAM_HAPTIC_LEFT);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.left_hold_ms, 0u);
+    EXPECT_EQ(rumble.right, 32767);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticClickBecomesTimedRumbleFromItsGain) {
+    synthesized_rumble_t rumble {};
+    // Steam's test screen: a click at -14 dB on side 0 (right), every 100 ms.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x00, 0x02, 0xf2}), rumble), STEAM_HAPTIC_RIGHT);
+    EXPECT_NEAR(rumble.right, 65535 * 0.1995, 64);
+    EXPECT_EQ(rumble.right_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
+    EXPECT_EQ(rumble.left, 0);
+
+    // A tone at +3 dB clips to full scale and runs until its off.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x01, 0x03, 0x03}), rumble), STEAM_HAPTIC_LEFT);
+    EXPECT_EQ(rumble.left, 65535);
+    EXPECT_EQ(rumble.left_hold_ms, 0u);
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x01, 0x00, 0x00}), rumble), STEAM_HAPTIC_LEFT);
+    EXPECT_EQ(rumble.left, 0);
+
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x00}), rumble), 0);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticEffectsWithoutARumbleEquivalentAreNotRendered) {
+    synthesized_rumble_t rumble {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x83, 0, 0, 0, 0, 0, 0, 0, 0, 0}), rumble), 0);
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x84, 0, 0, 0, 0, 0, 0, 0, 0}), rumble), 0);
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x85, 0, 0, 0}), rumble), 0);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.right, 0);
   }
 
 }  // namespace

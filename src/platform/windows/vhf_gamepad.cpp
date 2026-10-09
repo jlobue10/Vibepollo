@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -31,6 +32,12 @@
 #include "vhf_gamepad.h"
 #include "vhf_gamepad_policy.h"
 
+// A Moonlight client that can replay the Steam Controller's haptic reports on the real pads
+// (the jlobue10 moonlight-common-c fork); the submodule pinned here predates the flag.
+#ifndef LI_CCAP_STEAM_HAPTIC
+  #define LI_CCAP_STEAM_HAPTIC 0x800
+#endif
+
 namespace platf {
   using namespace std::literals;
 
@@ -38,6 +45,7 @@ namespace platf {
     // The driver coalesces output reports into one pending slot per controller, so the poll rate
     // only bounds how quickly rumble reaches the client. 8ms keeps that under a frame at 120 FPS.
     constexpr auto k_feedback_poll_interval = 8ms;
+    constexpr int k_feedback_drain_per_poll = 4;
 
     // The wire protocol reuses Vibepollo's normalized button values verbatim. Pin that here so a
     // change on either side breaks the build instead of silently remapping every controller.
@@ -79,7 +87,10 @@ namespace platf {
 
       // A client pointer id is an arbitrary handle; the touchpad has two
       // numbered contacts. Reserving a contact per pointer keeps a moved touch
-      // on the slot it went down on.
+      // on the slot it went down on. Guarded by touch_lock under the shared
+      // lifetime lock, so a stream of pad events does not serialize every other
+      // session's input and the feedback thread behind an exclusive lock.
+      std::mutex touch_lock;
       std::map<std::uint32_t, std::uint8_t> contact_of_pointer;
       std::uint8_t free_contacts {0x3};
       // The client's LI_CCAP_* flags for this controller (0 when unknown).
@@ -92,6 +103,11 @@ namespace platf {
       // Only the feedback thread touches these.
       bool have_feedback {};
       vhf_gamepad::rumble_rgb_t last_feedback {};
+      // Rumble stood in for Steam Controller haptics on a client without the pads, with the
+      // moment each side falls silent on its own (no deadline while the hold is 0).
+      vhf_gamepad::synthesized_rumble_t synth_rumble {};
+      std::optional<std::chrono::steady_clock::time_point> synth_left_until;
+      std::optional<std::chrono::steady_clock::time_point> synth_right_until;
 
       void reset() {
         active = false;
@@ -102,6 +118,9 @@ namespace platf {
         client_capabilities = 0;
         feedback_queue.reset();
         submit_failed.store(false, std::memory_order_relaxed);
+        synth_rumble = {};
+        synth_left_until.reset();
+        synth_right_until.reset();
         have_feedback = false;
         last_feedback = {};
       }
@@ -243,6 +262,8 @@ namespace platf {
 
     void feedback_loop();
     void raise_feedback(int nr, const vhf_gamepad::rumble_rgb_t &feedback);
+    void raise_steam_haptic(int nr, const vhf_gamepad::steam_haptic_t &haptic, std::chrono::steady_clock::time_point now);
+    void expire_synthesized_rumble(int nr, std::chrono::steady_clock::time_point now);
   };
 
   /**
@@ -325,6 +346,91 @@ namespace platf {
   }
 
   /**
+   * @brief Forwards a Steam Controller haptic report, or stands rumble in for it.
+   * @details A client that advertised `LI_CCAP_STEAM_HAPTIC` gets every report as it came
+   *          (Steam re-sends the same click to keep a buzz going, so nothing is deduplicated);
+   *          any other client gets the rumble `synthesize_steam_rumble` derives, with a timer
+   *          that silences a side once its hold runs out. Runs on the feedback thread.
+   */
+  void vhf_gamepad_t::impl_t::raise_steam_haptic(const int nr, const vhf_gamepad::steam_haptic_t &haptic, const std::chrono::steady_clock::time_point now) {
+    auto &slot = slots[nr];
+    if (!slot.active || !slot.feedback_queue) {
+      return;
+    }
+    if (slot.client_capabilities & LI_CCAP_STEAM_HAPTIC) {
+      auto msg = gamepad_feedback_msg_t::make_steam_haptic(
+        slot.client_relative_index,
+        haptic.length,
+        haptic.report
+      );
+      if (haptic.report[0] == 0x80) {
+        // Rumble is a state the host re-sends every 40-50 ms: only the newest matters,
+        // and a queue that fills with them would be cleared wholesale, zeros included.
+        // Pulses and commands are events and stay in order.
+        const auto id = slot.client_relative_index;
+        std::ignore = slot.feedback_queue->raise_latest(std::move(msg), [id](const gamepad_feedback_msg_t &pending) {
+          return pending.type == gamepad_feedback_e::steam_haptic && pending.id == id &&
+                 pending.data.steam_haptic.report[0] == 0x80;
+        });
+      } else {
+        slot.feedback_queue->raise(std::move(msg));
+      }
+      return;
+    }
+
+    const std::uint8_t sides = vhf_gamepad::synthesize_steam_rumble(haptic, slot.synth_rumble);
+    if (sides == 0) {
+      return;
+    }
+    // Only the sides this report addressed restart their holds: a right-pad click must
+    // not keep a finished left pulse going, and a repeated click restarts its own hold
+    // even though the magnitude did not change.
+    auto &rumble = slot.synth_rumble;
+    if (sides & vhf_gamepad::STEAM_HAPTIC_LEFT) {
+      slot.synth_left_until = rumble.left_hold_ms == 0 || rumble.left == 0 ?
+                                std::nullopt :
+                                std::optional {now + std::chrono::milliseconds(rumble.left_hold_ms)};
+    }
+    if (sides & vhf_gamepad::STEAM_HAPTIC_RIGHT) {
+      slot.synth_right_until = rumble.right_hold_ms == 0 || rumble.right == 0 ?
+                                 std::nullopt :
+                                 std::optional {now + std::chrono::milliseconds(rumble.right_hold_ms)};
+    }
+    vhf_gamepad::rumble_rgb_t feedback {};
+    feedback.low_frequency = rumble.left;
+    feedback.high_frequency = rumble.right;
+    raise_feedback(nr, feedback);
+  }
+
+  /**
+   * @brief Silences a synthesized rumble side whose hold has run out.
+   * @details Runs on the feedback thread on every poll, so a side goes quiet within one poll
+   *          interval of its deadline whether or not the driver has anything new.
+   */
+  void vhf_gamepad_t::impl_t::expire_synthesized_rumble(const int nr, const std::chrono::steady_clock::time_point now) {
+    auto &slot = slots[nr];
+    bool changed = false;
+    if (slot.synth_left_until && now >= *slot.synth_left_until) {
+      slot.synth_left_until.reset();
+      slot.synth_rumble.left = 0;
+      slot.synth_rumble.left_hold_ms = 0;
+      changed = true;
+    }
+    if (slot.synth_right_until && now >= *slot.synth_right_until) {
+      slot.synth_right_until.reset();
+      slot.synth_rumble.right = 0;
+      slot.synth_rumble.right_hold_ms = 0;
+      changed = true;
+    }
+    if (changed) {
+      vhf_gamepad::rumble_rgb_t feedback {};
+      feedback.low_frequency = slot.synth_rumble.left;
+      feedback.high_frequency = slot.synth_rumble.right;
+      raise_feedback(nr, feedback);
+    }
+  }
+
+  /**
    * @brief Drains driver output reports for every owned controller.
    * @details The driver has no completion notification, so feedback is polled. The loop sleeps
    *          until a controller exists so an idle host does not wake on a timer.
@@ -354,27 +460,39 @@ namespace platf {
         continue;
       }
 
+      const auto now = std::chrono::steady_clock::now();
       for (int nr = 0; nr < MAX_GAMEPADS; ++nr) {
         if (!slots[nr].active) {
           continue;
         }
 
-        lvg::feedback_event event {};
-        const DWORD status = client.poll_feedback(static_cast<std::uint32_t>(nr), &event);
-        if (status != ERROR_SUCCESS) {
-          if (status != ERROR_NO_MORE_ITEMS) {
-            BOOST_LOG(debug) << "VHF gamepad "sv << nr << " feedback poll failed ["sv
-                             << util::hex(status).to_string_view() << ']';
+        // The driver queues a Steam Controller's haptic reports (Steam's per-side stops
+        // arrive 0.7 ms apart); take a few per poll so they are not spread over 8 ms each.
+        for (int drained = 0; drained < k_feedback_drain_per_poll; ++drained) {
+          lvg::feedback_event event {};
+          const DWORD status = client.poll_feedback(static_cast<std::uint32_t>(nr), &event);
+          if (status != ERROR_SUCCESS) {
+            if (status != ERROR_NO_MORE_ITEMS) {
+              BOOST_LOG(debug) << "VHF gamepad "sv << nr << " feedback poll failed ["sv
+                               << util::hex(status).to_string_view() << ']';
+            }
+            break;
           }
-          continue;
-        }
 
-        vhf_gamepad::rumble_rgb_t feedback {};
-        if (!vhf_gamepad::decode_rumble_rgb(event, feedback)) {
-          continue;
-        }
+          vhf_gamepad::steam_haptic_t haptic {};
+          if (vhf_gamepad::decode_steam_haptic(event, haptic)) {
+            raise_steam_haptic(nr, haptic, now);
+            continue;
+          }
 
-        raise_feedback(nr, feedback);
+          vhf_gamepad::rumble_rgb_t feedback {};
+          if (vhf_gamepad::decode_rumble_rgb(event, feedback)) {
+            raise_feedback(nr, feedback);
+          }
+        }
+        // After the poll: a click that was just re-sent has restarted its hold, so it is
+        // not switched off and straight back on in the same pass.
+        expire_synthesized_rumble(nr, now);
       }
     }
   }
@@ -385,6 +503,11 @@ namespace platf {
 
   vhf_gamepad_t::~vhf_gamepad_t() {
     impl->stopping.store(true, std::memory_order_release);
+    {
+      // Under the wait's mutex, or a notify between the predicate and the wait is lost
+      // and join() hangs.
+      std::lock_guard wake_guard {impl->wake_mutex};
+    }
     impl->wake.notify_all();
     if (impl->feedback_thread.joinable()) {
       impl->feedback_thread.join();
@@ -526,6 +649,11 @@ namespace platf {
         impl->feedback_loop();
       }};
     }
+    {
+      // Under the wait's mutex, or a notify between the predicate and the wait is lost
+      // and the thread sleeps through the whole session.
+      std::lock_guard wake_guard {impl->wake_mutex};
+    }
     impl->wake.notify_all();
 
     BOOST_LOG(info) << "VHF gamepad "sv << id.globalIndex << " created as "sv
@@ -571,12 +699,13 @@ namespace platf {
       return;
     }
 
-    // Exclusive: the pointer-to-contact mapping is mutated here.
-    std::unique_lock lock {impl->lifetime};
+    // Shared like the other input paths; the pointer-to-contact mapping has its own lock.
+    std::shared_lock lock {impl->lifetime};
     auto &slot = impl->slots[nr];
     if (!slot.active || !has_touch(slot.profile)) {
       return;
     }
+    std::lock_guard touch_guard {slot.touch_lock};
 
     const std::uint8_t event = vhf_gamepad::to_protocol_touch_event(touch_event.eventType);
     std::uint8_t contact = 0;

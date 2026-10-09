@@ -100,6 +100,7 @@ extern "C" {
 #define IDX_SET_CLIPBOARD 16
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 17
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
+#define IDX_STEAM_HAPTIC 19
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -121,6 +122,7 @@ static const short packetTypes[] = {
   0x3001,  // Set Clipboard (Apollo protocol extension)
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
+  0x5504,  // Steam Controller haptic report (Vibepollo protocol extension)
 };
 
 namespace asio = boost::asio;
@@ -434,6 +436,18 @@ namespace stream {
     std::uint8_t type_right;
     std::uint8_t left[DS_EFFECT_PAYLOAD_SIZE];
     std::uint8_t right[DS_EFFECT_PAYLOAD_SIZE];
+  };
+
+  /**
+   * A Steam Controller (2026) haptic output report for a client with the real pads
+   * (LI_CCAP_STEAM_HAPTIC): `report` holds it as the host wrote it, id first, `length` bytes.
+   */
+  struct control_steam_haptic_t {
+    control_header_v2 header;
+
+    std::uint16_t id;
+    std::uint8_t length;
+    std::uint8_t report[12];
   };
 
   struct control_hdr_mode_t {
@@ -1340,6 +1354,19 @@ namespace stream {
       std::ranges::copy(msg.data.adaptive_triggers.left, plaintext.left);
       plaintext.type_right = msg.data.adaptive_triggers.type_right;
       std::ranges::copy(msg.data.adaptive_triggers.right, plaintext.right);
+
+      std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+        encrypted_payload;
+
+      payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    } else if (msg.type == platf::gamepad_feedback_e::steam_haptic) {
+      control_steam_haptic_t plaintext {};
+      plaintext.header.type = packetTypes[IDX_STEAM_HAPTIC];
+      plaintext.header.payloadLength = sizeof(plaintext) - sizeof(control_header_v2);
+
+      plaintext.id = util::endian::little(msg.id);
+      plaintext.length = msg.data.steam_haptic.length;
+      std::ranges::copy(msg.data.steam_haptic.report, plaintext.report);
 
       std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
         encrypted_payload;
