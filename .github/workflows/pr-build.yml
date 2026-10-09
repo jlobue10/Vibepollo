@@ -1,0 +1,27 @@
+---
+name: Validate Windows pull request
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-pr-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    uses: ./.github/workflows/ci-windows.yml
+    with:
+      use_self_hosted: false
+      build_only: true
+      build_tests: true
+      release_commit: ${{ github.sha }}
+      # A valid, explicitly non-release version for the existing MSI build checks.
+      release_version: '0.0.1'
+      symbol_product_name: Vibepollo
+      symbol_release_prefix: polo

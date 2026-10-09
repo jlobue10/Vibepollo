@@ -7,12 +7,20 @@
 // standard includes
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 
 // lib includes
 #include <libvirtualgamepad/protocol.h>
 
 namespace platf::vhf_gamepad {
+
+  // Single-touch Steam pads transported as the two halves of a DS4 touchpad.
+  // A pointer owns its original half until release. Unknown releases/moves and
+  // additional fingers on an occupied pad must not affect the existing owner.
+  [[nodiscard]] std::optional<std::uint8_t> map_steam_touch(
+    std::map<std::uint32_t, std::uint8_t> &pointers,
+    std::uint8_t event, std::uint32_t pointer, float x);
 
   enum class backend_e {
     unavailable,

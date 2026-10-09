@@ -721,19 +721,10 @@ namespace platf {
       // Steam Input splits a DualShock 4 pad). Choose the pad where the finger went
       // down and keep it for the pointer's moves and release, since a release carries
       // no position. Each half stretches back to its pad's full width.
-      if (event == static_cast<std::uint8_t>(lvg::touch_event::cancel_all)) {
-        slot.contact_of_pointer.clear();
-      } else if (event == static_cast<std::uint8_t>(lvg::touch_event::down) ||
-                 slot.contact_of_pointer.find(touch_event.pointerId) == slot.contact_of_pointer.end()) {
-        contact = x >= 0.5f ? 1 : 0;
-        slot.contact_of_pointer[touch_event.pointerId] = contact;
-      } else {
-        contact = slot.contact_of_pointer[touch_event.pointerId];
-      }
-      if (event == static_cast<std::uint8_t>(lvg::touch_event::up) ||
-          event == static_cast<std::uint8_t>(lvg::touch_event::cancel)) {
-        slot.contact_of_pointer.erase(touch_event.pointerId);
-      }
+      const auto mapped = vhf_gamepad::map_steam_touch(slot.contact_of_pointer, event,
+                                                      touch_event.pointerId, x);
+      if (!mapped) return;
+      contact = *mapped;
       x = std::clamp(contact ? (x - 0.5f) * 2.0f : x * 2.0f, 0.0f, 1.0f);
     } else if (event == static_cast<std::uint8_t>(lvg::touch_event::cancel_all)) {
       slot.contact_of_pointer.clear();
