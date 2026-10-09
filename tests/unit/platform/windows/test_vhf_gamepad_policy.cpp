@@ -25,6 +25,7 @@ namespace {
   using platf::vhf_gamepad::synthesize_steam_rumble;
   using platf::vhf_gamepad::synthesized_rumble_t;
   using platf::vhf_gamepad::STEAM_HAPTIC_CLICK_HOLD_MS;
+  using platf::vhf_gamepad::STEAM_HAPTIC_RUMBLE_TIMEOUT_MS;
   using platf::vhf_gamepad::STEAM_HAPTIC_LEFT;
   using platf::vhf_gamepad::STEAM_HAPTIC_MIN_HOLD_MS;
   using platf::vhf_gamepad::STEAM_HAPTIC_RIGHT;
