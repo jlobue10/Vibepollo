@@ -94,6 +94,16 @@ namespace {
     EXPECT_EQ(make_input_state(0, state).buttons, supported_button_mask);
   }
 
+  TEST_F(VhfGamepadPolicyTest, GripSenseBitsSurviveTheMask) {
+    // Moonlight's LI_CCAP_GRIP_SENSE bits ride in the button word; the Steam Controller
+    // profile follows the client's grips for good once it has seen one of them.
+    normalized_state_t state {};
+    state.button_flags = lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch;
+
+    EXPECT_EQ(make_input_state(0, state).buttons,
+              lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch);
+  }
+
   TEST_F(VhfGamepadPolicyTest, UnknownButtonBitsAreDropped) {
     normalized_state_t state {};
     state.button_flags = lvg::button_mask::south | 0x00000800u | 0x80000000u;
