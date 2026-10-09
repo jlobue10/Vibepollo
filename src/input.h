@@ -37,6 +37,12 @@ namespace input {
 
   std::shared_ptr<input_t> alloc(safe::mail_t mail);
 
+  /**
+   * @brief Whether any gamepad slot of this input context is currently allocated.
+   * @details Read without the input lock: a stale answer only shifts the control loop's wake-up.
+   */
+  bool has_gamepad(const std::shared_ptr<input_t> &input);
+
   struct touch_port_t: public platf::touch_port_t {
     int env_width;
     int env_height;

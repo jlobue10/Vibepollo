@@ -471,8 +471,8 @@ namespace {
               STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
     EXPECT_EQ(rumble.left, 0x8000);
     EXPECT_EQ(rumble.right, 0x3fff);
-    EXPECT_EQ(rumble.left_hold_ms, 0u);
-    EXPECT_EQ(rumble.right_hold_ms, 0u);
+    EXPECT_EQ(rumble.left_hold_ms, STEAM_HAPTIC_RUMBLE_TIMEOUT_MS);
+    EXPECT_EQ(rumble.right_hold_ms, STEAM_HAPTIC_RUMBLE_TIMEOUT_MS);
     EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x80, 0x00, 0x00}), rumble), 0);
   }
 

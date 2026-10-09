@@ -372,8 +372,11 @@ namespace platf {
           return pending.type == gamepad_feedback_e::steam_haptic && pending.id == id &&
                  pending.data.steam_haptic.report[0] == 0x80;
         });
-      } else {
-        slot.feedback_queue->raise(std::move(msg));
+      } else if (!slot.feedback_queue->try_raise(std::move(msg))) {
+        // raise() clears a full queue wholesale, stops included, which is worse than
+        // losing this one event: the control loop has not drained the queue in time.
+        BOOST_LOG(debug) << "VHF gamepad "sv << nr << ": Steam haptic queue full, dropping report 0x"sv
+                         << std::hex << int(haptic.report[0]) << std::dec;
       }
       return;
     }

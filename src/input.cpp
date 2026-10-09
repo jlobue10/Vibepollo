@@ -2012,6 +2012,18 @@ namespace input {
     return true;
   }
 
+  bool has_gamepad(const std::shared_ptr<input_t> &input) {
+    if (!input) {
+      return false;
+    }
+    for (const auto &gamepad : input->gamepads) {
+      if (gamepad.id >= 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   std::shared_ptr<input_t> alloc(safe::mail_t mail) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
