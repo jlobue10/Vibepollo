@@ -236,19 +236,20 @@ namespace platf::vhf_gamepad {
       return static_cast<std::uint16_t>(std::lround(65535.0 * std::pow(10.0, gain_db / 20.0)));
     }
 
-    // The firmware numbers the sides 1 = left, 0 = right.
-    void set_side(synthesized_rumble_t &rumble, const std::uint8_t side, const std::uint16_t magnitude, const std::uint32_t hold_ms) noexcept {
+    // The firmware numbers the sides 1 = left, 0 = right. Returns the side touched.
+    std::uint8_t set_side(synthesized_rumble_t &rumble, const std::uint8_t side, const std::uint16_t magnitude, const std::uint32_t hold_ms) noexcept {
       if (side == 1) {
         rumble.left = magnitude;
         rumble.left_hold_ms = hold_ms;
-      } else {
-        rumble.right = magnitude;
-        rumble.right_hold_ms = hold_ms;
+        return STEAM_HAPTIC_LEFT;
       }
+      rumble.right = magnitude;
+      rumble.right_hold_ms = hold_ms;
+      return STEAM_HAPTIC_RIGHT;
     }
   }  // namespace
 
-  bool synthesize_steam_rumble(const steam_haptic_t &haptic, synthesized_rumble_t &rumble) noexcept {
+  std::uint8_t synthesize_steam_rumble(const steam_haptic_t &haptic, synthesized_rumble_t &rumble) noexcept {
     const auto &report = haptic.report;
     switch (report[0]) {
       case 0x80: {
@@ -256,51 +257,50 @@ namespace platf::vhf_gamepad {
         // The speeds are already the client's motor range; the host keeps re-sending while
         // it rumbles and sends zeros to stop, so no hold.
         if (haptic.length < 10) {
-          return false;
+          return 0;
         }
         rumble.left = read_le16(&report[4]);
         rumble.right = read_le16(&report[7]);
         rumble.left_hold_ms = 0;
         rumble.right_hold_ms = 0;
-        return true;
+        return STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT;
       }
       case 0x81: {
         // Pulse: side u8, on_us u16, off_us u16, repeat u16. The duty cycle is the magnitude
-        // and the train's length the hold, so Steam's single 400 us UI click is a blip and
-        // a zero-repeat pulse (Steam's stop) silences the side.
+        // and the train's length the hold (never shorter than a motor can show), and a
+        // zero-repeat pulse (Steam's stop) silences the side.
         if (haptic.length < 8) {
-          return false;
+          return 0;
         }
-        const std::uint32_t on_us = read_le16(&report[2]);
-        const std::uint32_t off_us = read_le16(&report[4]);
-        const std::uint32_t repeat = read_le16(&report[6]);
+        const std::uint64_t on_us = read_le16(&report[2]);
+        const std::uint64_t off_us = read_le16(&report[4]);
+        const std::uint64_t repeat = read_le16(&report[6]);
         std::uint16_t magnitude = 0;
         std::uint32_t hold_ms = 0;
         if (repeat != 0 && on_us != 0) {
-          const std::uint32_t period_us = on_us + off_us;
+          const std::uint64_t period_us = on_us + off_us;
           magnitude = static_cast<std::uint16_t>(on_us * 65535u / period_us);
-          hold_ms = std::max<std::uint32_t>(1, (repeat * period_us + 999) / 1000);
+          const std::uint64_t train_ms = (repeat * period_us + 999) / 1000;
+          hold_ms = static_cast<std::uint32_t>(std::clamp<std::uint64_t>(train_ms, STEAM_HAPTIC_MIN_HOLD_MS, 10'000));
         }
-        set_side(rumble, report[1], magnitude, hold_ms);
-        return true;
+        return set_side(rumble, report[1], magnitude, hold_ms);
       }
       case 0x82: {
         // Command: side u8, command u8 (0 off, 1 tick, 2 click, 3 tone, 4 rumble, 5 noise,
         // 6 script, 7 sweep), gain_db s8. Steam's test screen re-sends a click every 100 ms
         // for as long as it wants the pad to buzz and never sends an off, so a tick or click
-        // holds for one such interval; the continuous effects run until their off.
+        // holds a little longer than that interval; the continuous effects run until their off.
         if (haptic.length < 4) {
-          return false;
+          return 0;
         }
         const std::uint8_t command = report[2];
         const std::uint16_t magnitude = command == 0 ? 0 : magnitude_from_db(static_cast<std::int8_t>(report[3]));
-        const std::uint32_t hold_ms = (command == 1 || command == 2) ? 100 : 0;
-        set_side(rumble, report[1], magnitude, hold_ms);
-        return true;
+        const std::uint32_t hold_ms = (command == 1 || command == 2) ? STEAM_HAPTIC_CLICK_HOLD_MS : 0;
+        return set_side(rumble, report[1], magnitude, hold_ms);
       }
       default:
         // LFO tone, log sweep, script: nothing a rumble motor can stand in for.
-        return false;
+        return 0;
     }
   }
 

@@ -195,11 +195,22 @@ namespace platf::vhf_gamepad {
     std::uint32_t right_hold_ms {};
   };
 
+  /// Sides a haptic report addressed (`synthesize_steam_rumble`).
+  constexpr std::uint8_t STEAM_HAPTIC_LEFT = 0x1;
+  constexpr std::uint8_t STEAM_HAPTIC_RIGHT = 0x2;
+  /// A rendered pulse shorter than this is lost between two feedback polls, and a motor
+  /// needs about that long to spin up: Steam's single 400 us UI click becomes this.
+  constexpr std::uint32_t STEAM_HAPTIC_MIN_HOLD_MS = 50;
+  /// Steam re-sends a test-screen click every 100 ms; the hold outlasts one interval by a
+  /// few polls so the stream of clicks reads as one buzz, not an off/on stutter.
+  constexpr std::uint32_t STEAM_HAPTIC_CLICK_HOLD_MS = 150;
+
   /**
    * @brief Folds a haptic report into the synthesized rumble state.
-   * @return `true` when the report carried something a rumble motor can render.
+   * @return The sides the report addressed (`STEAM_HAPTIC_LEFT`/`RIGHT`), 0 when it carried
+   *         nothing a rumble motor can render. Only those sides' holds restart.
    */
-  [[nodiscard]] bool synthesize_steam_rumble(const steam_haptic_t &haptic, synthesized_rumble_t &rumble) noexcept;
+  [[nodiscard]] std::uint8_t synthesize_steam_rumble(const steam_haptic_t &haptic, synthesized_rumble_t &rumble) noexcept;
 
   /**
    * @brief Converts a client touch event type into the protocol's.
