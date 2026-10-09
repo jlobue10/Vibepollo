@@ -104,6 +104,14 @@ namespace {
               lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch);
   }
 
+  TEST_F(VhfGamepadPolicyTest, StickTouchBitsSurviveTheMask) {
+    normalized_state_t state {};
+    state.button_flags = lvg::button_mask::left_stick_touch | lvg::button_mask::right_stick_touch;
+
+    EXPECT_EQ(make_input_state(0, state).buttons,
+              lvg::button_mask::left_stick_touch | lvg::button_mask::right_stick_touch);
+  }
+
   TEST_F(VhfGamepadPolicyTest, UnknownButtonBitsAreDropped) {
     normalized_state_t state {};
     state.button_flags = lvg::button_mask::south | 0x00000800u | 0x80000000u;

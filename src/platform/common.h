@@ -96,6 +96,10 @@ namespace platf {
   // consumes them; every other backend ignores the two bits.
   constexpr std::uint32_t LEFT_GRIP_TOUCH = 0x400000;
   constexpr std::uint32_t RIGHT_GRIP_TOUCH = 0x800000;
+  // Moonlight extension (LI_CCAP_STICK_TOUCH): capacitive touch of the Steam Controller's
+  // sticks, held rather than pressed. Same consumer as the grips.
+  constexpr std::uint32_t LEFT_STICK_TOUCH = 0x1000000;
+  constexpr std::uint32_t RIGHT_STICK_TOUCH = 0x2000000;
 
   struct supported_gamepad_t {
     std::string name;
