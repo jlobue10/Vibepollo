@@ -124,7 +124,11 @@ namespace platf::vhf_gamepad {
     lvg::button_mask::west | lvg::button_mask::north |
     lvg::button_mask::paddle_1 | lvg::button_mask::paddle_2 |
     lvg::button_mask::paddle_3 | lvg::button_mask::paddle_4 |
-    lvg::button_mask::touchpad | lvg::button_mask::misc;
+    lvg::button_mask::touchpad | lvg::button_mask::misc |
+    // Grip sense (LI_CCAP_GRIP_SENSE): carried in the same word; the Steam Controller
+    // profile reports them as the capacitive grips and follows the client for good
+    // once it has seen one, so dropping them here left the grips dark on every stream.
+    lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch;
 
   /**
    * @brief Selects the preferred public console profile from a driver mask.
