@@ -6,6 +6,7 @@
 #include "vhf_gamepad_policy.h"
 
 // standard includes
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -205,6 +206,102 @@ namespace platf::vhf_gamepad {
     feedback.right_trigger = 0;
     feedback.has_triggers = false;
     return true;
+  }
+
+  bool decode_steam_haptic(const lvg::feedback_event &event, steam_haptic_t &haptic) noexcept {
+    if (event.type != lvg::feedback_type::steam_haptic ||
+        event.payload_size != sizeof(lvg::steam_haptic_feedback)) {
+      return false;
+    }
+    lvg::steam_haptic_feedback payload {};
+    std::memcpy(&payload, event.payload, sizeof(payload));
+    if (payload.length < 2 || payload.length > sizeof(payload.report)) {
+      return false;
+    }
+    haptic.length = payload.length;
+    std::memcpy(haptic.report.data(), payload.report, haptic.report.size());
+    return true;
+  }
+
+  namespace {
+    std::uint16_t read_le16(const std::uint8_t *bytes) noexcept {
+      return static_cast<std::uint16_t>(bytes[0] | (bytes[1] << 8));
+    }
+
+    // A gain in dB relative to full scale as a 16-bit magnitude; positive gains clip.
+    std::uint16_t magnitude_from_db(const std::int8_t gain_db) noexcept {
+      if (gain_db >= 0) {
+        return 65535;
+      }
+      return static_cast<std::uint16_t>(std::lround(65535.0 * std::pow(10.0, gain_db / 20.0)));
+    }
+
+    // The firmware numbers the sides 1 = left, 0 = right.
+    void set_side(synthesized_rumble_t &rumble, const std::uint8_t side, const std::uint16_t magnitude, const std::uint32_t hold_ms) noexcept {
+      if (side == 1) {
+        rumble.left = magnitude;
+        rumble.left_hold_ms = hold_ms;
+      } else {
+        rumble.right = magnitude;
+        rumble.right_hold_ms = hold_ms;
+      }
+    }
+  }  // namespace
+
+  bool synthesize_steam_rumble(const steam_haptic_t &haptic, synthesized_rumble_t &rumble) noexcept {
+    const auto &report = haptic.report;
+    switch (report[0]) {
+      case 0x80: {
+        // Rumble: type u8, intensity u16, left {speed u16, gain s8}, right {speed u16, gain s8}.
+        // The speeds are already the client's motor range; the host keeps re-sending while
+        // it rumbles and sends zeros to stop, so no hold.
+        if (haptic.length < 10) {
+          return false;
+        }
+        rumble.left = read_le16(&report[4]);
+        rumble.right = read_le16(&report[7]);
+        rumble.left_hold_ms = 0;
+        rumble.right_hold_ms = 0;
+        return true;
+      }
+      case 0x81: {
+        // Pulse: side u8, on_us u16, off_us u16, repeat u16. The duty cycle is the magnitude
+        // and the train's length the hold, so Steam's single 400 us UI click is a blip and
+        // a zero-repeat pulse (Steam's stop) silences the side.
+        if (haptic.length < 8) {
+          return false;
+        }
+        const std::uint32_t on_us = read_le16(&report[2]);
+        const std::uint32_t off_us = read_le16(&report[4]);
+        const std::uint32_t repeat = read_le16(&report[6]);
+        std::uint16_t magnitude = 0;
+        std::uint32_t hold_ms = 0;
+        if (repeat != 0 && on_us != 0) {
+          const std::uint32_t period_us = on_us + off_us;
+          magnitude = static_cast<std::uint16_t>(on_us * 65535u / period_us);
+          hold_ms = std::max<std::uint32_t>(1, (repeat * period_us + 999) / 1000);
+        }
+        set_side(rumble, report[1], magnitude, hold_ms);
+        return true;
+      }
+      case 0x82: {
+        // Command: side u8, command u8 (0 off, 1 tick, 2 click, 3 tone, 4 rumble, 5 noise,
+        // 6 script, 7 sweep), gain_db s8. Steam's test screen re-sends a click every 100 ms
+        // for as long as it wants the pad to buzz and never sends an off, so a tick or click
+        // holds for one such interval; the continuous effects run until their off.
+        if (haptic.length < 4) {
+          return false;
+        }
+        const std::uint8_t command = report[2];
+        const std::uint16_t magnitude = command == 0 ? 0 : magnitude_from_db(static_cast<std::int8_t>(report[3]));
+        const std::uint32_t hold_ms = (command == 1 || command == 2) ? 100 : 0;
+        set_side(rumble, report[1], magnitude, hold_ms);
+        return true;
+      }
+      default:
+        // LFO tone, log sweep, script: nothing a rumble motor can stand in for.
+        return false;
+    }
   }
 
 }  // namespace platf::vhf_gamepad

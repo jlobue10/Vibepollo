@@ -166,6 +166,42 @@ namespace platf::vhf_gamepad {
   [[nodiscard]] bool decode_rumble_rgb(const lvg::feedback_event &event, rumble_rgb_t &feedback) noexcept;
 
   /**
+   * @brief A Steam Controller (2026) haptic output report the driver forwarded verbatim.
+   * @details `report[0]` is the report id (0x80 rumble, 0x81 pulse, 0x82 command, 0x83 LFO,
+   *          0x84 sweep, 0x85 script) and `length` counts it. A client with the controller's
+   *          pads replays the report; for the others see `synthesize_steam_rumble`.
+   */
+  struct steam_haptic_t {
+    std::uint8_t length {};
+    std::array<std::uint8_t, 12> report {};
+  };
+
+  /**
+   * @brief Decodes a driver feedback event that carries a Steam Controller haptic report.
+   * @return `true` when `haptic` was populated.
+   */
+  [[nodiscard]] bool decode_steam_haptic(const lvg::feedback_event &event, steam_haptic_t &haptic) noexcept;
+
+  /**
+   * @brief Rumble rendered from haptic reports for a client without the controller's pads.
+   * @details Each side keeps its own hold: 0 means "until the next report for that side",
+   *          otherwise the side should fall silent after that many milliseconds. Steam's UI
+   *          sends single clicks and re-sends them while it wants a buzz, never an "off".
+   */
+  struct synthesized_rumble_t {
+    std::uint16_t left {};
+    std::uint16_t right {};
+    std::uint32_t left_hold_ms {};
+    std::uint32_t right_hold_ms {};
+  };
+
+  /**
+   * @brief Folds a haptic report into the synthesized rumble state.
+   * @return `true` when the report carried something a rumble motor can render.
+   */
+  [[nodiscard]] bool synthesize_steam_rumble(const steam_haptic_t &haptic, synthesized_rumble_t &rumble) noexcept;
+
+  /**
    * @brief Converts a client touch event type into the protocol's.
    * @param event_type The client event type.
    * @return The protocol value, or the cancel-all value for anything unmapped.

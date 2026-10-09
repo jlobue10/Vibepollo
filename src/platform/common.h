@@ -114,6 +114,7 @@ namespace platf {
     set_rgb_led,  ///< Set RGB LED
     set_adaptive_triggers,  ///< Set adaptive triggers
     haptics_pcm,  ///< 5 ms of 48 kHz S16LE stereo actuator samples
+    steam_haptic,  ///< A Steam Controller (2026) haptic output report, verbatim (Vibepollo extension)
   };
 
   struct gamepad_feedback_msg_t {
@@ -158,6 +159,20 @@ namespace platf {
       return msg;
     }
 
+    /**
+     * @brief A Steam Controller (2026) haptic output report for a client that has the real pads.
+     * @param length Bytes of `report` that carry the controller's report, its id included.
+     * @param report The report as the host wrote it: 0x80 rumble, 0x81 pulse, 0x82 command, ...
+     */
+    static gamepad_feedback_msg_t make_steam_haptic(std::uint16_t id, std::uint8_t length, const std::array<std::uint8_t, 12> &report) {
+      gamepad_feedback_msg_t msg;
+      msg.type = gamepad_feedback_e::steam_haptic;
+      msg.id = id;
+      msg.data.steam_haptic.length = length;
+      msg.data.steam_haptic.report = report;
+      return msg;
+    }
+
     gamepad_feedback_e type;
     std::uint16_t id;
 
@@ -195,6 +210,11 @@ namespace platf {
         std::array<uint8_t, 10> left;
         std::array<uint8_t, 10> right;
       } adaptive_triggers;
+
+      struct {
+        std::uint8_t length;
+        std::array<std::uint8_t, 12> report;
+      } steam_haptic;
     } data;
   };
 

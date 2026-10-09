@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -30,6 +31,12 @@
 #include "src/utility.h"
 #include "vhf_gamepad.h"
 #include "vhf_gamepad_policy.h"
+
+// A Moonlight client that can replay the Steam Controller's haptic reports on the real pads
+// (the jlobue10 moonlight-common-c fork); the submodule pinned here predates the flag.
+#ifndef LI_CCAP_STEAM_HAPTIC
+  #define LI_CCAP_STEAM_HAPTIC 0x800
+#endif
 
 namespace platf {
   using namespace std::literals;
@@ -92,6 +99,11 @@ namespace platf {
       // Only the feedback thread touches these.
       bool have_feedback {};
       vhf_gamepad::rumble_rgb_t last_feedback {};
+      // Rumble stood in for Steam Controller haptics on a client without the pads, with the
+      // moment each side falls silent on its own (no deadline while the hold is 0).
+      vhf_gamepad::synthesized_rumble_t synth_rumble {};
+      std::optional<std::chrono::steady_clock::time_point> synth_left_until;
+      std::optional<std::chrono::steady_clock::time_point> synth_right_until;
 
       void reset() {
         active = false;
@@ -102,6 +114,9 @@ namespace platf {
         client_capabilities = 0;
         feedback_queue.reset();
         submit_failed.store(false, std::memory_order_relaxed);
+        synth_rumble = {};
+        synth_left_until.reset();
+        synth_right_until.reset();
         have_feedback = false;
         last_feedback = {};
       }
@@ -243,6 +258,8 @@ namespace platf {
 
     void feedback_loop();
     void raise_feedback(int nr, const vhf_gamepad::rumble_rgb_t &feedback);
+    void raise_steam_haptic(int nr, const vhf_gamepad::steam_haptic_t &haptic, std::chrono::steady_clock::time_point now);
+    void expire_synthesized_rumble(int nr, std::chrono::steady_clock::time_point now);
   };
 
   /**
@@ -325,6 +342,83 @@ namespace platf {
   }
 
   /**
+   * @brief Forwards a Steam Controller haptic report, or stands rumble in for it.
+   * @details A client that advertised `LI_CCAP_STEAM_HAPTIC` gets every report as it came
+   *          (Steam re-sends the same click to keep a buzz going, so nothing is deduplicated);
+   *          any other client gets the rumble `synthesize_steam_rumble` derives, with a timer
+   *          that silences a side once its hold runs out. Runs on the feedback thread.
+   */
+  void vhf_gamepad_t::impl_t::raise_steam_haptic(const int nr, const vhf_gamepad::steam_haptic_t &haptic, const std::chrono::steady_clock::time_point now) {
+    auto &slot = slots[nr];
+    if (!slot.active || !slot.feedback_queue) {
+      return;
+    }
+    if (slot.client_capabilities & LI_CCAP_STEAM_HAPTIC) {
+      slot.feedback_queue->raise(gamepad_feedback_msg_t::make_steam_haptic(
+        slot.client_relative_index,
+        haptic.length,
+        haptic.report
+      ));
+      return;
+    }
+
+    const auto before = slot.synth_rumble;
+    if (!vhf_gamepad::synthesize_steam_rumble(haptic, slot.synth_rumble)) {
+      return;
+    }
+    auto &rumble = slot.synth_rumble;
+    if (rumble.left != before.left || rumble.left_hold_ms != before.left_hold_ms) {
+      slot.synth_left_until = rumble.left_hold_ms == 0 || rumble.left == 0 ?
+                                std::nullopt :
+                                std::optional {now + std::chrono::milliseconds(rumble.left_hold_ms)};
+    }
+    if (rumble.right != before.right || rumble.right_hold_ms != before.right_hold_ms) {
+      slot.synth_right_until = rumble.right_hold_ms == 0 || rumble.right == 0 ?
+                                 std::nullopt :
+                                 std::optional {now + std::chrono::milliseconds(rumble.right_hold_ms)};
+    }
+    // A repeated click restarts its hold even though the magnitudes did not change.
+    if (rumble.left != 0 && rumble.left_hold_ms != 0) {
+      slot.synth_left_until = now + std::chrono::milliseconds(rumble.left_hold_ms);
+    }
+    if (rumble.right != 0 && rumble.right_hold_ms != 0) {
+      slot.synth_right_until = now + std::chrono::milliseconds(rumble.right_hold_ms);
+    }
+    vhf_gamepad::rumble_rgb_t feedback {};
+    feedback.low_frequency = rumble.left;
+    feedback.high_frequency = rumble.right;
+    raise_feedback(nr, feedback);
+  }
+
+  /**
+   * @brief Silences a synthesized rumble side whose hold has run out.
+   * @details Runs on the feedback thread on every poll, so a side goes quiet within one poll
+   *          interval of its deadline whether or not the driver has anything new.
+   */
+  void vhf_gamepad_t::impl_t::expire_synthesized_rumble(const int nr, const std::chrono::steady_clock::time_point now) {
+    auto &slot = slots[nr];
+    bool changed = false;
+    if (slot.synth_left_until && now >= *slot.synth_left_until) {
+      slot.synth_left_until.reset();
+      slot.synth_rumble.left = 0;
+      slot.synth_rumble.left_hold_ms = 0;
+      changed = true;
+    }
+    if (slot.synth_right_until && now >= *slot.synth_right_until) {
+      slot.synth_right_until.reset();
+      slot.synth_rumble.right = 0;
+      slot.synth_rumble.right_hold_ms = 0;
+      changed = true;
+    }
+    if (changed) {
+      vhf_gamepad::rumble_rgb_t feedback {};
+      feedback.low_frequency = slot.synth_rumble.left;
+      feedback.high_frequency = slot.synth_rumble.right;
+      raise_feedback(nr, feedback);
+    }
+  }
+
+  /**
    * @brief Drains driver output reports for every owned controller.
    * @details The driver has no completion notification, so feedback is polled. The loop sleeps
    *          until a controller exists so an idle host does not wake on a timer.
@@ -354,10 +448,12 @@ namespace platf {
         continue;
       }
 
+      const auto now = std::chrono::steady_clock::now();
       for (int nr = 0; nr < MAX_GAMEPADS; ++nr) {
         if (!slots[nr].active) {
           continue;
         }
+        expire_synthesized_rumble(nr, now);
 
         lvg::feedback_event event {};
         const DWORD status = client.poll_feedback(static_cast<std::uint32_t>(nr), &event);
@@ -366,6 +462,12 @@ namespace platf {
             BOOST_LOG(debug) << "VHF gamepad "sv << nr << " feedback poll failed ["sv
                              << util::hex(status).to_string_view() << ']';
           }
+          continue;
+        }
+
+        vhf_gamepad::steam_haptic_t haptic {};
+        if (vhf_gamepad::decode_steam_haptic(event, haptic)) {
+          raise_steam_haptic(nr, haptic, now);
           continue;
         }
 
