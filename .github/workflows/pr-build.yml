@@ -39,6 +39,7 @@ jobs:
           python3 tests/input/test_announce_validation.py
           python3 tests/input/test_control_thread_lifecycle_gate.py
           python3 tests/input/test_audio_encode_failure.py
+          python3 tests/input/test_audio_surround_layout.py
       - name: Check PyroWave fence import and conversion timeout ordering
         run: python3 tests/input/test_pyrowave_sync.py
 
