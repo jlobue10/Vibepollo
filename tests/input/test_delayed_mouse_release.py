@@ -118,6 +118,9 @@ enum class button_state_e { NONE, DOWN, UP };
 struct gamepad_t {
   int id = -1;
   worker_t::task_id_t back_timeout_id = nullptr;
+  worker_t::task_id_t home_timeout_id = nullptr;
+  uint64_t home_generation = 0;
+  bool physical_home = false;
   platf::gamepad_state_t gamepad_state;
   button_state_e back_button_state = button_state_e::NONE;
 };

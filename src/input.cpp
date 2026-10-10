@@ -169,6 +169,9 @@ namespace input {
     platf::gamepad_state_t gamepad_state;
 
     thread_pool_util::ThreadPool::task_id_t back_timeout_id;
+    thread_pool_util::ThreadPool::task_id_t home_timeout_id {};
+    std::uint64_t home_generation {};
+    bool physical_home {};
 
     int id;
 
@@ -181,6 +184,12 @@ namespace input {
   };
 
   void reset_gamepad(gamepad_t &gamepad) {
+    ++gamepad.home_generation;
+    if (gamepad.home_timeout_id) {
+      task_pool.cancel(gamepad.home_timeout_id);
+      gamepad.home_timeout_id = nullptr;
+    }
+    gamepad.physical_home = false;
     if (gamepad.back_timeout_id) {
       task_pool.cancel(gamepad.back_timeout_id);
       gamepad.back_timeout_id = nullptr;
@@ -1391,6 +1400,11 @@ namespace input {
       packet->rightStickY
     };
 
+    // Keep the client's button separate from the timed synthetic press. Input
+    // continues during the hold and must neither shorten it nor lose a real HOME.
+    gamepad.physical_home = (gamepad_state.buttonFlags & platf::HOME) != 0;
+    if (gamepad.home_timeout_id) gamepad_state.buttonFlags |= platf::HOME;
+
     auto bf_new = gamepad_state.buttonFlags;
     switch (gamepad.back_button_state) {
       case button_state_e::UP:
@@ -1427,6 +1441,8 @@ namespace input {
             platf::gamepad_update(platf_input, gamepad.id, state);
 
             // Press Home button
+            if (gamepad.home_timeout_id) task_pool.cancel(gamepad.home_timeout_id);
+            const auto generation = ++gamepad.home_generation;
             state.buttonFlags |= platf::HOME;
             platf::gamepad_update(platf_input, gamepad.id, state);
 
@@ -1435,15 +1451,16 @@ namespace input {
             // Hold it long enough to be detected, then release from another task:
             // sleeping here would stall the only input worker, and with it every
             // other client's controller, pad and motion packets.
-            task_pool.pushDelayed([input, controller]() {
+            gamepad.home_timeout_id = task_pool.pushDelayed([input, controller, generation]() {
               auto &gamepad = input->gamepads[controller];
-              if (gamepad.id < 0) {
-                return;  // freed while the button was held
+              if (gamepad.id < 0 || gamepad.home_generation != generation) {
+                return;  // removed/replaced, or superseded by another synthetic press
               }
+              gamepad.home_timeout_id = nullptr;
               auto &state = gamepad.gamepad_state;
-              state.buttonFlags &= ~platf::HOME;
+              if (!gamepad.physical_home) state.buttonFlags &= ~platf::HOME;
               platf::gamepad_update(platf_input, gamepad.id, state);
-            }, std::chrono::milliseconds(100));
+            }, std::chrono::milliseconds(100)).task_id;
           };
 
           gamepad.back_timeout_id = task_pool.pushDelayed(std::move(f), config::input.back_button_timeout).task_id;
@@ -1659,17 +1676,17 @@ namespace input {
       return batch_result_e::not_batchable;
     }
 
+    // Don't batch beyond state changing events
+    if (src->eventType != LI_TOUCH_EVENT_MOVE &&
+        src->eventType != LI_TOUCH_EVENT_HOVER) {
+      return batch_result_e::terminate_batch;
+    }
+
     // Each physical pad is its own pointer space: a dual-touchpad Steam Controller
     // client sends pointer id 0 on both pads, so a move on pad 1 must not replace
     // the queued move on pad 0 (that froze the left pad under backlog).
     if (dest->touchpadIndex != src->touchpadIndex) {
       return batch_result_e::not_batchable;
-    }
-
-    // Don't batch beyond state changing events
-    if (src->eventType != LI_TOUCH_EVENT_MOVE &&
-        src->eventType != LI_TOUCH_EVENT_HOVER) {
-      return batch_result_e::terminate_batch;
     }
 
     // Batched events must be the same pointer ID

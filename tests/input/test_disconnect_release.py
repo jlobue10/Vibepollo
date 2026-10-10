@@ -258,6 +258,27 @@ int main(int argc, char **argv) {
     p.activeGamepadMask=0; passthrough(a, &p); assert(!has_gamepad(a));
     p.activeGamepadMask=2; passthrough(a, &p); assert(has_gamepad(a));
     disconnect(a); assert(!has_gamepad(a));
+  } else if (test == "home_hold_survives_input") {
+    controller_packet p {0, 1, platf::BACK};passthrough(a,&p);task_pool.fire();
+    p.leftStickX=1234;passthrough(a,&p);
+    assert(platf::gamepad_events.back().second.buttonFlags & platf::HOME);
+    task_pool.fire();
+    assert(!(platf::gamepad_events.back().second.buttonFlags & platf::HOME));
+    assert(platf::gamepad_events.back().second.lsX==1234);
+  } else if (test == "home_release_preserves_physical_button") {
+    controller_packet p {0, 1, platf::BACK};passthrough(a,&p);task_pool.fire();
+    p.buttonFlags=platf::HOME|platf::BACK;passthrough(a,&p);task_pool.fire();
+    assert(platf::gamepad_events.back().second.buttonFlags & platf::HOME);
+  } else if (test == "home_release_cancelled_on_removal") {
+    controller_packet p {0, 1, platf::BACK};passthrough(a,&p);task_pool.fire();
+    p.activeGamepadMask=0;passthrough(a,&p);assert(task_pool.timers.empty());
+  } else if (test == "stale_home_release_cannot_touch_reused_slot") {
+    controller_packet p {0, 1, platf::BACK};passthrough(a,&p);task_pool.fire();
+    auto stale=task_pool.take_timer();p.activeGamepadMask=0;passthrough(a,&p);
+    p.activeGamepadMask=1;p.buttonFlags=platf::HOME;passthrough(a,&p);
+    auto count=platf::gamepad_events.size();stale();
+    assert(platf::gamepad_events.size()==count);
+    assert(a->gamepads[0].gamepad_state.buttonFlags & platf::HOME);
   } else if (test == "controller_hold_disconnect") {
     controller_packet p {0, 1, platf::BACK, 0, 255, 255, 32767, -32768, 123, -456};
     passthrough(a, &p);
