@@ -101,6 +101,8 @@ namespace platf {
 
     gamepad_feedback_msg_t last_rumble;
     gamepad_feedback_msg_t last_rgb_led;
+    bool have_last_rumble = false;
+    bool have_last_rgb_led = false;
   };
 
   constexpr float EARTH_G = 9.80665f;
@@ -282,6 +284,8 @@ namespace platf {
       // otherwise never receive it, and a finger left down would own a stale contact.
       gamepad.last_rumble = {};
       gamepad.last_rgb_led = {};
+      gamepad.have_last_rumble = false;
+      gamepad.have_last_rgb_led = false;
       gamepad.pointer_id_map.clear();
       gamepad.last_report_ts = std::chrono::steady_clock::now();
       gamepad.last_accel_motion_ts = gamepad.last_report_ts;
@@ -402,7 +406,8 @@ namespace platf {
           uint16_t normalizedSmallMotor = smallMotor << 8;
 
           // Don't resend duplicate rumble data
-          if (normalizedSmallMotor != gamepad.last_rumble.data.rumble.highfreq ||
+          if (!gamepad.have_last_rumble ||
+              normalizedSmallMotor != gamepad.last_rumble.data.rumble.highfreq ||
               normalizedLargeMotor != gamepad.last_rumble.data.rumble.lowfreq) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(
@@ -414,6 +419,7 @@ namespace platf {
             // against for the rest of the session.
             if (raise_gamepad_feedback(*gamepad.feedback_queue, msg)) {
               gamepad.last_rumble = msg;
+              gamepad.have_last_rumble = true;
             }
           }
           return;
@@ -434,13 +440,15 @@ namespace platf {
 
         if (gamepad.gp.get() == target) {
           // Don't resend duplicate RGB data
-          if (r != gamepad.last_rgb_led.data.rgb_led.r ||
+          if (!gamepad.have_last_rgb_led ||
+              r != gamepad.last_rgb_led.data.rgb_led.r ||
               g != gamepad.last_rgb_led.data.rgb_led.g ||
               b != gamepad.last_rgb_led.data.rgb_led.b) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rgb_led(gamepad.client_relative_index, r, g, b);
             if (raise_gamepad_feedback(*gamepad.feedback_queue, msg)) {
               gamepad.last_rgb_led = msg;
+              gamepad.have_last_rgb_led = true;
             }
           }
           return;

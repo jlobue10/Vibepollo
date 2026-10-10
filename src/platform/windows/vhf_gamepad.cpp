@@ -280,11 +280,9 @@ namespace platf {
     if (!slot.active || !slot.feedback_queue) {
       return;
     }
-    // Same switch the ViGEm backend honours: the user asked for no rumble on the client.
-    // (RGB rides on the same message, so it is withheld too; it is cosmetic.)
-    if (!config::input.forward_rumble) {
-      return;
-    }
+    // Rumble and LEDs arrive in one driver packet but use separate client messages.
+    // Disabling motor feedback must not suppress the game's lightbar updates.
+    const bool forward_rumble = config::input.forward_rumble;
 
     if (slot.have_feedback && slot.last_feedback == feedback) {
       return;
@@ -297,13 +295,14 @@ namespace platf {
     // off the light on the client's real controller.
     const bool rgb_changed = feedback.has_rgb &&
                              (!slot.have_feedback ||
+                              !slot.last_feedback.has_rgb ||
                               slot.last_feedback.red != feedback.red ||
                               slot.last_feedback.green != feedback.green ||
                               slot.last_feedback.blue != feedback.blue);
 
     bool queued = true;
     // We have to use the client-relative index when communicating back to the client
-    if (rumble_changed) {
+    if (forward_rumble && rumble_changed) {
       queued &= raise_gamepad_feedback(*slot.feedback_queue, gamepad_feedback_msg_t::make_rumble(
         slot.client_relative_index,
         feedback.low_frequency,
@@ -319,7 +318,7 @@ namespace platf {
       ));
     }
 
-    if (feedback.has_trigger_effects) {
+    if (forward_rumble && feedback.has_trigger_effects) {
       const bool effects_changed =
         !slot.have_feedback ||
         !slot.last_feedback.has_trigger_effects ||
@@ -340,9 +339,10 @@ namespace platf {
 
     const bool triggers_changed = feedback.has_triggers &&
                                   (!slot.have_feedback ||
+                                   !slot.last_feedback.has_triggers ||
                                    slot.last_feedback.left_trigger != feedback.left_trigger ||
                                    slot.last_feedback.right_trigger != feedback.right_trigger);
-    if (triggers_changed) {
+    if (forward_rumble && triggers_changed) {
       queued &= raise_gamepad_feedback(*slot.feedback_queue, gamepad_feedback_msg_t::make_rumble_triggers(
         slot.client_relative_index,
         feedback.left_trigger,
@@ -350,7 +350,30 @@ namespace platf {
       ));
     }
 
-    slot.last_feedback = feedback;
+    // An absent category means "no update", not zero. Retain its last delivered
+    // state so a later explicit zero/stop is not discarded, and an unchanged
+    // colour is not needlessly resent after every motor-only packet.
+    if (forward_rumble) {
+      slot.last_feedback.low_frequency = feedback.low_frequency;
+      slot.last_feedback.high_frequency = feedback.high_frequency;
+      if (feedback.has_triggers) {
+        slot.last_feedback.has_triggers = true;
+        slot.last_feedback.left_trigger = feedback.left_trigger;
+        slot.last_feedback.right_trigger = feedback.right_trigger;
+      }
+      if (feedback.has_trigger_effects) {
+        slot.last_feedback.has_trigger_effects = true;
+        slot.last_feedback.trigger_event_flags = feedback.trigger_event_flags;
+        slot.last_feedback.left_effect = feedback.left_effect;
+        slot.last_feedback.right_effect = feedback.right_effect;
+      }
+    }
+    if (feedback.has_rgb) {
+      slot.last_feedback.has_rgb = true;
+      slot.last_feedback.red = feedback.red;
+      slot.last_feedback.green = feedback.green;
+      slot.last_feedback.blue = feedback.blue;
+    }
     slot.have_feedback = queued;
   }
 
