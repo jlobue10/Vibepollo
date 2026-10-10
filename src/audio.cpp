@@ -190,6 +190,7 @@ namespace audio {
     platf::set_thread_name("audio::encode");
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
+    int opus_error = 0;
     opus_t opus {opus_multistream_encoder_create(
       stream.sampleRate,
       stream.channelCount,
@@ -197,8 +198,14 @@ namespace audio {
       stream.coupledStreams,
       stream.mapping,
       OPUS_APPLICATION_RESTRICTED_LOWDELAY,
-      nullptr
+      &opus_error
     )};
+
+    if (!opus) {
+      BOOST_LOG(error) << "Couldn't initialize Opus: "sv << opus_strerror(opus_error);
+      shutdown_event->raise(true);
+      return;
+    }
 
     opus_multistream_encoder_ctl(opus.get(), OPUS_SET_BITRATE(stream.bitrate));
     opus_multistream_encoder_ctl(opus.get(), OPUS_SET_VBR(0));
