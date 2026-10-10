@@ -42,9 +42,14 @@ typedef int opus_int32;
 #define OPUS_SET_BITRATE(x) 4002, (opus_int32)(x)
 #define OPUS_SET_VBR(x) 4006, (opus_int32)(x)
 static int encodeResult = -1;
-OpusMSEncoder *opus_multistream_encoder_create(int, int, int, int, const unsigned char *, int, int *) { static int token; return (OpusMSEncoder *) &token; }
+static bool createFails = false;
+static int nullControls = 0;
+OpusMSEncoder *opus_multistream_encoder_create(int, int, int, int, const unsigned char *, int, int *error) {
+  if (error) *error = createFails ? -7 : 0;
+  static int token; return createFails ? nullptr : (OpusMSEncoder *) &token;
+}
 void opus_multistream_encoder_destroy(OpusMSEncoder *) {}
-int opus_multistream_encoder_ctl(OpusMSEncoder *, int, ...) { return 0; }
+int opus_multistream_encoder_ctl(OpusMSEncoder *encoder, int, ...) { nullControls += encoder == nullptr; return 0; }
 int opus_multistream_encode_float(OpusMSEncoder *, const float *, int, unsigned char *, opus_int32) { return encodeResult; }
 const char *opus_strerror(int) { return "bad arg"; }
 namespace platf { enum class thread_priority_e { high }; void set_thread_name(std::string_view) {} void adjust_thread_priority(thread_priority_e) {} }
@@ -88,6 +93,16 @@ int main() {
   check(packets->running(), "an encode failure leaves the shared audio packet queue running");
   check(shutdown_event->peek(), "an encode failure ends the failing session");
   check(!other_session_mail->event<bool>(mail::shutdown)->peek(), "other sessions are untouched");
+  auto failed_init_mail = std::make_shared<safe::mail_raw_t>();
+  auto failed_init_shutdown = failed_init_mail->event<bool>(mail::shutdown);
+  createFails = true;
+  samples->raise(std::vector<float>(480, 0.0f));
+  encodeThread(samples, config, std::make_shared<int>(3), failed_init_mail);
+  check(nullControls == 0, "a failed encoder creation never calls Opus with a null encoder");
+  check(failed_init_shutdown->peek(), "encoder initialization failure ends its session");
+  check(packets->running() && !other_session_mail->event<bool>(mail::shutdown)->peek(),
+        "encoder initialization failure leaves other sessions and their shared queue running");
+  createFails = false;
   encodeResult = 120;
   auto samples2 = std::make_shared<safe::queue_t<std::vector<float>>>(30);
   samples2->raise(std::vector<float>(480, 0.0f));

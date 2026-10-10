@@ -2315,7 +2315,8 @@ namespace rtsp_stream {
       // Coupled streams
       std::uint8_t m = session->surround_params[2] - '0';
       auto valid = false;
-      if ((c == 6 || c == 8) && c == config.audio.channels && n + m == c && session->surround_params.length() == c + 3) {
+      if ((c == 6 || c == 8) && c == config.audio.channels && n > 0 && m <= n &&
+          n + m == c && session->surround_params.length() == c + 3) {
         config.audio.customStreamParams.channelCount = c;
         config.audio.customStreamParams.streams = n;
         config.audio.customStreamParams.coupledStreams = m;
