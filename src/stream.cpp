@@ -595,6 +595,13 @@ namespace stream {
   };
 
   struct session_t {
+    packet_channel_t packet_channel = std::make_shared<packet_channel_state_t>(this);
+
+    ~session_t() {
+      // Also fence partially initialized sessions before any fields are destroyed.
+      packet_channel->close();
+    }
+
     std::shared_ptr<void> display_power_guard;
     std::shared_ptr<void> normal_display_capture;
     config_t config;
@@ -2080,7 +2087,7 @@ namespace stream {
       std::uint64_t cached_interface_id = 0;
       std::string cached_link_alias = "unavailable";
     };
-    std::unordered_map<session_t *, wire_timeline_state_t> wire_timeline_by_session;
+    std::unordered_map<packet_channel_t, wire_timeline_state_t> wire_timeline_by_session;
 
     while (auto packet = packets->pop()) {
       if (shutdown_event->peek()) {
@@ -2089,12 +2096,16 @@ namespace stream {
 
       frame_network_latency_logger.first_point_now();
 
-      auto session = (session_t *) packet->channel_data;
+      if (!packet->channel_data) {
+        continue;
+      }
+      auto channel_lease = packet->channel_data->acquire();
+      auto session = static_cast<session_t *>(channel_lease.get());
       if (!session) {
         continue;
       }
       const auto packet_pop_timestamp = std::chrono::steady_clock::now();
-      auto wire_state_it = wire_timeline_by_session.find(session);
+      auto wire_state_it = wire_timeline_by_session.find(packet->channel_data);
       if (wire_state_it == wire_timeline_by_session.end()) {
         // Bound diagnostic state even if many sessions are created during one
         // long-lived broadcast-thread generation.
@@ -2102,7 +2113,7 @@ namespace stream {
           wire_timeline_by_session.erase(wire_timeline_by_session.begin());
         }
         wire_state_it = wire_timeline_by_session.emplace(
-          session,
+          packet->channel_data,
           wire_timeline_state_t {.window_started = packet_pop_timestamp}
         ).first;
       }
@@ -2126,8 +2137,8 @@ namespace stream {
       // part of the payload.
       if (packet->is_idr() && packet->replacements) {
         for (auto &replacement : *packet->replacements) {
-          auto frame_old = replacement.old;
-          auto frame_new = replacement._new;
+          std::string_view frame_old = replacement.old;
+          std::string_view frame_new = replacement._new;
 
           payload_with_replacements = replace(payload, frame_old, frame_new);
           payload = {(char *) payload_with_replacements.data(), payload_with_replacements.size()};
@@ -2789,7 +2800,11 @@ namespace stream {
       }
 
       TUPLE_2D_REF(channel_data, packet_data, *packet);
-      auto session = (session_t *) channel_data;
+      if (!channel_data) {
+        continue;
+      }
+      auto channel_lease = channel_data->acquire();
+      auto session = static_cast<session_t *>(channel_lease.get());
       if (!session) {
         continue;
       }
@@ -3104,7 +3119,7 @@ namespace stream {
 #endif
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
-    video::capture(session->mail, session->config.monitor, session);
+    video::capture(session->mail, session->config.monitor, session->packet_channel);
   }
 
   void audioThread(session_t *session) {
@@ -3126,7 +3141,7 @@ namespace stream {
     session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Audio"sv;
-    audio::capture(session->mail, session->config.audio, session);
+    audio::capture(session->mail, session->config.audio, session->packet_channel);
   }
 
   namespace session {
@@ -3492,6 +3507,10 @@ namespace stream {
         hung_stage->store("control end");
         BOOST_LOG(debug) << "Waiting for control to end..."sv;
         session.controlEnd.view();
+        hung_stage->store("broadcast packets");
+        // No producer can enqueue more. Reject queued packets and wait for any
+        // popped packet to finish using the session before history/finalization.
+        session.packet_channel->close();
       }
       // Watchdog coverage ends with the thread joins, which are the unbounded and
       // unrecoverable part. Everything below waits on the process-wide lifecycle

@@ -71,3 +71,10 @@ Use both Moonlight and browser streaming, including two connected viewers:
 allocation and profile-selection functions with fake VHF/ViGEm driver objects.
 It covers missing client-derived profiles under `auto` without ViGEm, explicit
 profile preservation, failed automatic allocation, and ViGEm fallback.
+
+`python3 tests/input/test_stream_packet_lifetime.py` runs production packet admission,
+first session reads, packet metadata and encoder replacement publication against the
+real mailbox queue under ASan/UBSan. The fake session excludes GPU/socket work.
+Cases cover queued and in-flight audio/video at teardown, concurrent audio/video,
+independent sessions, overflow/coalescing/stop, address reuse and encoder-owned
+vector/NAL destruction. `--baseline` reads HEAD for before/after reproduction.

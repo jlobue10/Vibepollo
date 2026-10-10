@@ -6,6 +6,7 @@
 
 // local includes
 #include "platform/common.h"
+#include "stream_packet.h"
 #include "thread_safe.h"
 #include "utility.h"
 
@@ -76,10 +77,10 @@ namespace audio {
   };
 
   using buffer_t = util::buffer_t<std::uint8_t>;
-  using packet_t = std::pair<void *, buffer_t>;
+  using packet_t = std::pair<stream::packet_channel_t, buffer_t>;
   using audio_ctx_ref_t = safe::shared_t<audio_ctx_t>::ptr_t;
 
-  void capture(safe::mail_t mail, config_t config, void *channel_data);
+  void capture(safe::mail_t mail, config_t config, stream::packet_channel_t channel_data);
 
   /**
    * @brief Get the reference to the audio context.
