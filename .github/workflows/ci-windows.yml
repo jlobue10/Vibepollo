@@ -238,11 +238,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ inputs.release_commit }}
-          VHF_ARCHIVE_SHA256: 6cf4a768a83b6986dbb87d72fd8ddc4e5955e6f6dca4ab3d33e9e0c89ae9b2e6
-          VHF_DRIVER_VER: 10/09/2026,0.1.0.121
+          VHF_ARCHIVE_SHA256: 41f9cd36fac68647494056c6234270c6d0a9754ed15607ae57a49474f7005608
+          VHF_DRIVER_VER: 10/09/2026,0.1.0.123
           VHF_PROTOCOL_VERSION: '2'
-          VHF_SOURCE_REVISION: 70f81184589bea656a8efa79bf7618cb3c3aa3ea
-          VHF_TAG: v0.1.0-beta.112
+          VHF_SOURCE_REVISION: 6d7b3954b61d047c9ddb2d25144aadc77a0f4ce4
+          VHF_TAG: v0.1.0-beta.113
         run: |
           $ErrorActionPreference = 'Stop'
           $gitlink = (git rev-parse "$($env:RELEASE_COMMIT):third-party/libvirtualgamepad").Trim()
@@ -266,9 +266,9 @@ jobs:
         shell: pwsh
         env:
           RELEASE_COMMIT: ${{ inputs.release_commit }}
-          VHF_DRIVER_VER: 10/09/2026,0.1.0.121
+          VHF_DRIVER_VER: 10/09/2026,0.1.0.123
           VHF_PROTOCOL_VERSION: '2'
-          VHF_SOURCE_REVISION: 70f81184589bea656a8efa79bf7618cb3c3aa3ea
+          VHF_SOURCE_REVISION: 6d7b3954b61d047c9ddb2d25144aadc77a0f4ce4
         run: |
           $ErrorActionPreference = 'Stop'
           $gitlink = (git rev-parse "$($env:RELEASE_COMMIT):third-party/libvirtualgamepad").Trim()
@@ -414,11 +414,11 @@ jobs:
         shell: pwsh
         env:
           VHF_LOCAL_TEST_PACKAGE: ${{ inputs.vhf_local_test_package }}
-          VHF_ARCHIVE_SHA256: 6cf4a768a83b6986dbb87d72fd8ddc4e5955e6f6dca4ab3d33e9e0c89ae9b2e6
-          VHF_DRIVER_VER: 10/09/2026,0.1.0.121
+          VHF_ARCHIVE_SHA256: 41f9cd36fac68647494056c6234270c6d0a9754ed15607ae57a49474f7005608
+          VHF_DRIVER_VER: 10/09/2026,0.1.0.123
           VHF_PROTOCOL_VERSION: '2'
-          VHF_SOURCE_REVISION: 70f81184589bea656a8efa79bf7618cb3c3aa3ea
-          VHF_TAG: v0.1.0-beta.112
+          VHF_SOURCE_REVISION: 6d7b3954b61d047c9ddb2d25144aadc77a0f4ce4
+          VHF_TAG: v0.1.0-beta.113
         run: |
           $ErrorActionPreference = 'Stop'
           $packageRoot = Join-Path $env:RUNNER_TEMP 'vhf-gamepad-producer-release'
@@ -652,13 +652,13 @@ jobs:
             vhf_gamepad_package_arg=(
               -DSUNSHINE_BUNDLE_VHF_GAMEPAD_DRIVER=ON
               -DSUNSHINE_LIBVIRTUALGAMEPAD_PREBUILT_DIR="$(cygpath -u "${VHF_PACKAGE_ROOT}")"
-              -DSUNSHINE_VHF_GAMEPAD_RELEASE_TAG=v0.1.0-beta.112
-              -DSUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256=6cf4a768a83b6986dbb87d72fd8ddc4e5955e6f6dca4ab3d33e9e0c89ae9b2e6
-              -DSUNSHINE_VHF_GAMEPAD_SOURCE_REVISION=70f81184589bea656a8efa79bf7618cb3c3aa3ea
-              -DSUNSHINE_VHF_GAMEPAD_DRIVER_VER=10/09/2026,0.1.0.121
+              -DSUNSHINE_VHF_GAMEPAD_RELEASE_TAG=v0.1.0-beta.113
+              -DSUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256=41f9cd36fac68647494056c6234270c6d0a9754ed15607ae57a49474f7005608
+              -DSUNSHINE_VHF_GAMEPAD_SOURCE_REVISION=6d7b3954b61d047c9ddb2d25144aadc77a0f4ce4
+              -DSUNSHINE_VHF_GAMEPAD_DRIVER_VER=10/09/2026,0.1.0.123
               -DSUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION=2
             )
-            echo "Using verified VHF producer release v0.1.0-beta.112"
+            echo "Using verified VHF producer release v0.1.0-beta.113"
           fi
           truehdr_runtime_arg=()
           if [[ "${REQUIRE_TRUEHDR_RUNTIME}" == "true" ]]; then
@@ -926,10 +926,10 @@ jobs:
               -ValidateOnly `
               -PrebuiltPackageDir $env:VHF_PACKAGE_ROOT `
               -PackageDir $packageDir `
-              -ReleaseTag v0.1.0-beta.112 `
-              -ExpectedReleaseAssetSha256 6cf4a768a83b6986dbb87d72fd8ddc4e5955e6f6dca4ab3d33e9e0c89ae9b2e6 `
-              -ExpectedSourceRevision 70f81184589bea656a8efa79bf7618cb3c3aa3ea `
-              -ExpectedDriverVer '10/09/2026,0.1.0.121' `
+              -ReleaseTag v0.1.0-beta.113 `
+              -ExpectedReleaseAssetSha256 41f9cd36fac68647494056c6234270c6d0a9754ed15607ae57a49474f7005608 `
+              -ExpectedSourceRevision 6d7b3954b61d047c9ddb2d25144aadc77a0f4ce4 `
+              -ExpectedDriverVer '10/09/2026,0.1.0.123' `
               -ExpectedProtocolVersion 2
           }
           $expected = @(
@@ -1636,8 +1636,8 @@ jobs:
                   'tools/VibeshineVhfGamepadDeviceSetup.exe'
                 )
                 if ($vhfManifest.schema_version -ne 1 -or
-                    $vhfManifest.source_revision -cne '70f81184589bea656a8efa79bf7618cb3c3aa3ea' -or
-                    $vhfManifest.driver_ver -cne '10/09/2026,0.1.0.121' -or
+                    $vhfManifest.source_revision -cne '6d7b3954b61d047c9ddb2d25144aadc77a0f4ce4' -or
+                    $vhfManifest.driver_ver -cne '10/09/2026,0.1.0.123' -or
                     [uint16] $vhfManifest.protocol_version -ne 2 -or
                     $vhfManifest.platform -cne 'x64' -or
                     $vhfManifest.signing.channel -cne 'msi-request-signing') {
@@ -1720,9 +1720,9 @@ jobs:
                 $vhfManifestHash = (Get-FileHash -LiteralPath $vhfManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
                 if ($vhfReleaseLock.channel -cne 'production' -or
                     $vhfReleaseLock.repository -cne 'jlobue10/libvirtualgamepad' -or
-                    $vhfReleaseLock.release_tag -cne 'v0.1.0-beta.112' -or
-                    $vhfReleaseLock.release_asset_name -cne 'libvirtualgamepad-0.1.0-beta.112-windows-x64.zip' -or
-                    $vhfReleaseLock.release_asset_sha256 -cne '6cf4a768a83b6986dbb87d72fd8ddc4e5955e6f6dca4ab3d33e9e0c89ae9b2e6' -or
+                    $vhfReleaseLock.release_tag -cne 'v0.1.0-beta.113' -or
+                    $vhfReleaseLock.release_asset_name -cne 'libvirtualgamepad-0.1.0-beta.113-windows-x64.zip' -or
+                    $vhfReleaseLock.release_asset_sha256 -cne '41f9cd36fac68647494056c6234270c6d0a9754ed15607ae57a49474f7005608' -or
                     $vhfReleaseLock.source_revision -cne $vhfManifest.source_revision -or
                     $vhfReleaseLock.driver_ver -cne $vhfManifest.driver_ver -or
                     [uint16] $vhfReleaseLock.protocol_version -ne [uint16] $vhfManifest.protocol_version -or
