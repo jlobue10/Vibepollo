@@ -78,8 +78,12 @@ using packet_t = std::unique_ptr<packet_impl>;
 struct encoder_t {REPLACEMENT_DECL};
 }
 namespace audio {using buffer_t = std::vector<uint8_t>; AUDIO_TYPE}
+namespace mail { constexpr std::string_view shutdown = "shutdown"; }
 struct session_t {
  CHANNEL_FIELD
+ // The destructor also stops and joins capture threads a throwing start() left running.
+ safe::mail_t mail = std::make_shared<safe::mail_raw_t>();
+ std::thread videoThread, audioThread;
  CHANNEL_DESTRUCTOR
  struct {int lowseq=17;} video;
  struct {int sequenceNumber=23;} audio;
@@ -172,6 +176,11 @@ int main(int argc,char** argv) {
   auto* first=new(storage)session_t();auto old=make_video(*first);retire(*first);first->~session_t();
   auto* second=new(storage)session_t();assert(consume_video(std::move(old))==-1);
   assert(consume_video(make_video(*second))==17);retire(*second);second->~session_t();
+ } else if(mode=="start-throws") {
+  auto session=std::make_unique<session_t>();auto shutdown=session->mail->event<bool>(mail::shutdown);
+  session->videoThread=std::thread([shutdown]{while(!shutdown->peek())std::this_thread::sleep_for(1ms);});
+  session->audioThread=std::thread([shutdown]{while(!shutdown->peek())std::this_thread::sleep_for(1ms);});
+  session.reset();  // joinable threads would have been std::terminate before the destructor joined them
  } else if(mode=="null-channel") {
   assert(consume_video(std::make_unique<video::packet_impl>())==-1);
   assert(consume_audio(audio::packet_t{})==-1);
@@ -200,7 +209,7 @@ with tempfile.TemporaryDirectory() as temp:
     failed=0
     modes=['queued-video','queued-audio','active-video','active-audio','encoder-vector','encoder-nal',
            'two-readers','overflow-coalesce-stop','address-reuse','null-channel',
-           'popped-before-close','exception-exit','destructor-fence']
+           'popped-before-close','exception-exit','destructor-fence','start-throws']
     for mode in modes:
         result=subprocess.run([str(exe),mode],env=dict(os.environ,ASAN_OPTIONS='detect_leaks=0'),timeout=10)
         failed+=result.returncode!=0

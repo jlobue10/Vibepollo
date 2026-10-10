@@ -178,8 +178,9 @@ namespace audio {
     },
   };
 
-  void encodeThread(sample_queue_t samples, config_t config, stream::packet_channel_t channel_data) {
+  void encodeThread(sample_queue_t samples, config_t config, stream::packet_channel_t channel_data, safe::mail_t mail) {
     auto packets = mail::man->queue<packet_t>(mail::audio_packets);
+    auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto stream = stream_configs[map_stream(config.channels, config.flags[config_t::HIGH_QUALITY])];
     if (config.flags[config_t::CUSTOM_SURROUND_PARAMS]) {
       apply_surround_params(stream, config.customStreamParams);
@@ -216,8 +217,10 @@ namespace audio {
 
       int bytes = opus_multistream_encode_float(opus.get(), sample->data(), frame_size, std::begin(packet), (opus_int32) packet.size());
       if (bytes < 0) {
+        // The packet queue is shared by every session's broadcast; stopping it ended all of
+        // them. End this session only.
         BOOST_LOG(error) << "Couldn't encode audio: "sv << opus_strerror(bytes);
-        packets->stop();
+        shutdown_event->raise(true);
 
         return;
       }
@@ -304,6 +307,11 @@ namespace audio {
       }
     }
 
+    if (config.packetDuration < 5 || config.packetDuration > 60) {
+      // Validated at ANNOUNCE; a larger value overflowed the frame size arithmetic below.
+      BOOST_LOG(error) << "Refusing audio packet duration "sv << config.packetDuration << " ms"sv;
+      return;
+    }
     auto frame_size = config.packetDuration * stream.sampleRate / 1000;
     bool host_audio = config.flags[config_t::HOST_AUDIO];
     bool continuous_audio = config.flags[config_t::CONTINUOUS_AUDIO];
@@ -322,7 +330,7 @@ namespace audio {
     std::thread thread;
     if (!config.bypass_opus) {
       samples = std::make_shared<sample_queue_t::element_type>(30);
-      thread = std::thread {encodeThread, samples, config, channel_data};
+      thread = std::thread {encodeThread, samples, config, channel_data, mail};
     }
 
     auto fg = util::fail_guard([&]() {

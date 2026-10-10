@@ -38,6 +38,42 @@ namespace rtsp_stream::pending_policy {
     return normalize_requested_framerate(parsed);
   }
 
+  namespace {
+    std::optional<std::int64_t> parse_integer(const std::string_view text) {
+      std::int64_t parsed {};
+      const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
+      if (error != std::errc {} || end != text.data() + text.size()) {
+        return std::nullopt;
+      }
+      return parsed;
+    }
+  }  // namespace
+
+  std::optional<int> parse_packet_size(const std::string_view packet_size) {
+    const auto parsed = parse_integer(packet_size);
+    if (!parsed || *parsed < PACKET_SIZE_MIN || *parsed > PACKET_SIZE_MAX) {
+      return std::nullopt;
+    }
+    return static_cast<int>(*parsed);
+  }
+
+  std::optional<int> parse_packet_duration(const std::string_view packet_duration) {
+    const auto parsed = parse_integer(packet_duration);
+    if (!parsed) {
+      return std::nullopt;
+    }
+    switch (*parsed) {
+      case 5:
+      case 10:
+      case 20:
+      case 40:
+      case 60:
+        return static_cast<int>(*parsed);
+      default:
+        return std::nullopt;
+    }
+  }
+
   initial_route_e choose_initial_route(const bool plaintext_available, const bool encrypted_available, const std::array<std::uint8_t, 4> &first_word) {
     if (encrypted_available && (first_word[0] & 0x80U) != 0) return initial_route_e::encrypted;
     if (plaintext_available) return initial_route_e::plaintext;

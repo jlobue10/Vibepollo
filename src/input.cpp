@@ -715,9 +715,9 @@ namespace input {
     float x = util::endian::big(packet->x);
     float y = util::endian::big(packet->y);
 
-    // Prevent divide by zero
-    // Don't expect it to happen, but just in case
-    if (!packet->width || !packet->height) {
+    // Prevent divide by zero and negative dimensions (the fields are signed): a negative
+    // size violated std::clamp's precondition in client_to_touchport.
+    if (util::endian::big(packet->width) <= 0 || util::endian::big(packet->height) <= 0) {
       BOOST_LOG(warning) << "Moonlight passed invalid dimensions"sv;
 
       return;

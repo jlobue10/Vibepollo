@@ -20,6 +20,20 @@ namespace rtsp_stream::pending_policy {
   std::optional<normalized_framerate_t> normalize_requested_framerate(std::int64_t requested_framerate);
   std::optional<normalized_framerate_t> parse_requested_framerate(std::string_view requested_framerate);
 
+  // Bounds for a client-announced video packetSize (the same range config::stream.packetsize
+  // accepts). Below the minimum the broadcast shard arithmetic divides by zero or wraps.
+  constexpr int PACKET_SIZE_MIN = 200;
+  constexpr int PACKET_SIZE_MAX = 65535;
+
+  // The announced video packetSize: digits only and within [PACKET_SIZE_MIN, PACKET_SIZE_MAX],
+  // otherwise std::nullopt (the ANNOUNCE is answered 400).
+  std::optional<int> parse_packet_size(std::string_view packet_size);
+
+  // The announced Opus frame duration in milliseconds: exactly one of the frame sizes Opus
+  // encodes (5, 10, 20, 40, 60), otherwise std::nullopt. Anything else made the encoder fail
+  // and stop the process-wide audio packet queue, or overflowed the frame-size arithmetic.
+  std::optional<int> parse_packet_duration(std::string_view packet_duration);
+
   enum class initial_route_e { reject, plaintext, encrypted };
 
   struct pending_owner_t {

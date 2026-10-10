@@ -2035,9 +2035,14 @@ namespace rtsp_stream {
     seqn.content = const_cast<char *>(seqn_str.c_str());
 
     std::string_view target {req->message.request.target};
-    auto begin = std::find(std::begin(target), std::end(target), '=') + 1;
-    auto end = std::find(begin, std::end(target), '/');
-    std::string_view type {begin, (size_t) std::distance(begin, end)};
+    // "streamid=<type>[/...]" is the only shape we know; without the '=' the old scan for '/'
+    // started past the end of the target and read beyond the request buffer.
+    const auto eq = target.find('=');
+    if (eq == std::string_view::npos) {
+      BOOST_LOG(warning) << "Rejecting SETUP with a malformed target ["sv << target << ']';
+      return cmd_not_found(server, socket, session, std::move(req));
+    }
+    const std::string_view type = target.substr(eq + 1, target.find('/', eq + 1) - (eq + 1));
 
     std::uint16_t port;
     if (type == "audio"sv) {
@@ -2125,8 +2130,9 @@ namespace rtsp_stream {
         auto name = line.substr(2, pos - 2);
         auto val = line.substr(pos + 1);
 
-        if (val[val.size() - 1] == ' ') {
-          val = val.substr(0, val.size() - 1);
+        // An empty value ("a=name:") must not index val[-1].
+        if (!val.empty() && val.back() == ' ') {
+          val.remove_suffix(1);
         }
         args.emplace(name, val);
       }
@@ -2159,13 +2165,27 @@ namespace rtsp_stream {
     try {
       config.audio.channels = (int) util::from_view(args.at("x-nv-audio.surround.numChannels"sv));
       config.audio.mask = (int) util::from_view(args.at("x-nv-audio.surround.channelMask"sv));
-      config.audio.packetDuration = (int) util::from_view(args.at("x-nv-aqos.packetDuration"sv));
+      const auto packet_duration = pending_policy::parse_packet_duration(args.at("x-nv-aqos.packetDuration"sv));
+      if (!packet_duration) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: audio packetDuration ["sv << args.at("x-nv-aqos.packetDuration"sv)
+                           << "] is not an Opus frame duration"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.audio.packetDuration = *packet_duration;
 
       config.audio.flags[audio::config_t::HIGH_QUALITY] =
         util::from_view(args.at("x-nv-audio.surround.AudioQuality"sv));
 
       config.controlProtocolType = (int) util::from_view(args.at("x-nv-general.useReliableUdp"sv));
-      config.packetsize = (int) util::from_view(args.at("x-nv-video[0].packetSize"sv));
+      const auto packet_size = pending_policy::parse_packet_size(args.at("x-nv-video[0].packetSize"sv));
+      if (!packet_size) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: video packetSize ["sv << args.at("x-nv-video[0].packetSize"sv)
+                           << "] is outside "sv << pending_policy::PACKET_SIZE_MIN << ".."sv << pending_policy::PACKET_SIZE_MAX;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.packetsize = *packet_size;
 
       // Limit the packetsize to avoid fragmentation with clients that cannot configure this value
       if (config::stream.packetsize && config::stream.packetsize < config.packetsize) {
