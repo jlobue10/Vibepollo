@@ -250,6 +250,14 @@ int main(int argc, char **argv) {
     passthrough(a, packet_bytes(KEY_DOWN_EVENT_MAGIC), crypto::PERM::_all_inputs);
     assert(a->input_queue.empty() && task_pool.tasks.empty());
     expect({{0x41, false, 0}, {0x41, true, 0}});
+  } else if (test == "gamepad_presence_lifecycle") {
+    assert(!has_gamepad(a) && !has_gamepad(nullptr));
+    controller_packet p {0, 3}; passthrough(a, &p); assert(has_gamepad(a));
+    p.controllerNumber=1; passthrough(a, &p); assert(has_gamepad(a));
+    p.activeGamepadMask=2; passthrough(a, &p); assert(has_gamepad(a));
+    p.activeGamepadMask=0; passthrough(a, &p); assert(!has_gamepad(a));
+    p.activeGamepadMask=2; passthrough(a, &p); assert(has_gamepad(a));
+    disconnect(a); assert(!has_gamepad(a));
   } else if (test == "controller_hold_disconnect") {
     controller_packet p {0, 1, platf::BACK, 0, 255, 255, 32767, -32768, 123, -456};
     passthrough(a, &p);
@@ -320,6 +328,7 @@ def main():
         'void passthrough(std::shared_ptr<input_t> &input, PNV_MULTI_CONTROLLER_PACKET packet)',
         'void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM &permission)',
         'void reset(std::shared_ptr<input_t> &input)',
+        'bool has_gamepad(const std::shared_ptr<input_t> &input)',
     )
     handlers = '\n'.join(function(source, signature) for signature in signatures)
     import re

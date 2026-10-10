@@ -39,7 +39,7 @@ namespace input {
 
   /**
    * @brief Whether any gamepad slot of this input context is currently allocated.
-   * @details Read without the input lock: a stale answer only shifts the control loop's wake-up.
+   * @details Reads an atomic summary published by the input worker; no gamepad state is shared.
    */
   bool has_gamepad(const std::shared_ptr<input_t> &input);
 
