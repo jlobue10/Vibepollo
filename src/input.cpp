@@ -1757,14 +1757,16 @@ namespace input {
       }
 
       // Pop off the first entry, which we will send
-      entry = input->input_queue.front();
+      // Move, do not copy: a Steam Controller slot queues ~1 kHz of packets (state,
+      // motion, pad moves) and every byte copied here is under input_queue_lock.
+      entry = std::move(input->input_queue.front());
       payload = (PNV_INPUT_HEADER) entry.data();
       input->input_queue.pop_front();
 
       // Try to batch with remaining items on the queue
       auto i = input->input_queue.begin();
       while (i != input->input_queue.end()) {
-        auto batchable_entry = *i;
+        const auto &batchable_entry = *i;
         auto batchable_payload = (PNV_INPUT_HEADER) batchable_entry.data();
 
         auto batch_result = batch(payload, batchable_payload);
