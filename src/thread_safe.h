@@ -330,26 +330,32 @@ namespace safe {
   public:
     using status_t = util::optional_t<T>;
 
-    queue_t(std::uint32_t max_elements = 32):
-        _max_elements {max_elements} {
+    queue_t(std::uint32_t max_elements = 32, bool clear_on_overflow = true):
+        _max_elements {max_elements},
+        _clear_on_overflow {clear_on_overflow} {
     }
 
-    /// Replace a matching pending item in place, preserving other producers'
-    /// order. For independent snapshots whose older values may be discarded.
+    /// Coalesce obsolete snapshots at the tail, preserving order against events.
     template<class Predicate>
     bool raise_latest(T value, Predicate matches) {
+      return raise_latest(std::move(value), std::move(matches), [](const T &) { return false; });
+    }
+
+    /// Priority values may evict an ordinary item on overflow. Callers supply a
+    /// bounded key space and enough capacity for every distinct priority key.
+    template<class Predicate, class Priority>
+    bool raise_latest(T value, Predicate matches, Priority priority, std::uint32_t event_limit = UINT32_MAX) {
       std::lock_guard ul {_lock};
-      if (!_poll_state.running()) {
-        return false;
-      }
-      for (auto &pending : _queue) {
-        if (matches(pending)) {
-          pending = std::move(value);
-          return true;
-        }
-      }
-      if (_queue.size() >= _max_elements) {
-        return false;
+      if (!_poll_state.running()) return false;
+      _queue.erase(std::remove_if(_queue.begin(), _queue.end(), matches), _queue.end());
+      const bool important = priority(value);
+      const bool events_full = !important && event_limit != UINT32_MAX &&
+          std::count_if(_queue.begin(), _queue.end(), [&](const T &pending) { return !priority(pending); }) >= event_limit;
+      if (_queue.size() >= _max_elements || events_full) {
+        if (!important && event_limit == UINT32_MAX) return false;
+        auto victim = std::find_if(_queue.begin(), _queue.end(), [&](const T &pending) { return !priority(pending); });
+        if (victim == _queue.end()) return false;
+        _queue.erase(victim);
       }
       _queue.emplace_back(std::move(value));
       _poll_state.set_ready(true);
@@ -366,6 +372,7 @@ namespace safe {
       }
 
       if (_queue.size() == _max_elements) {
+        if (!_clear_on_overflow) return;
         _queue.clear();
         _poll_state.set_ready(false);
       }
@@ -487,6 +494,7 @@ namespace safe {
   private:
     detail::poll_state_t _poll_state;
     std::uint32_t _max_elements;
+    bool _clear_on_overflow;
 
     std::mutex _lock;
     std::condition_variable _cv;
@@ -673,7 +681,7 @@ namespace safe {
     }
 
     template<class T>
-    queue_t<T> queue(const std::string_view &id) {
+    queue_t<T> queue(const std::string_view &id, std::uint32_t capacity = 32, bool clear_on_overflow = true) {
       std::lock_guard lg {mutex};
 
       auto it = id_to_post.find(id);
@@ -685,7 +693,7 @@ namespace safe {
         id_to_post.erase(it);
       }
 
-      auto post = std::make_shared<typename queue_t<T>::element_type>(shared_from_this(), 32);
+      auto post = std::make_shared<typename queue_t<T>::element_type>(shared_from_this(), capacity, clear_on_overflow);
       id_to_post.emplace(std::pair<std::string, std::weak_ptr<void>> {std::string {id}, post});
 
       return post;

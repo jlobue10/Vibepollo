@@ -141,6 +141,7 @@ struct input_t {
   uint16_t repeating_key = 0;
   bool input_closed = false;
   std::vector<gamepad_t> gamepads {16};
+  std::atomic_uint32_t allocated_gamepads {0};
   std::unique_ptr<platf::client_input_t> client_context;
   int accumulated_vscroll_delta = 0, accumulated_hscroll_delta = 0;
   worker_t::task_id_t mouse_left_button_timeout = nullptr;

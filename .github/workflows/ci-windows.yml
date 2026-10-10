@@ -707,7 +707,7 @@ jobs:
       - name: Test VHF gamepad policy on Windows
         if: inputs.build_tests
         shell: msys2 {0}
-        run: ctest --test-dir build --output-on-failure --no-tests=error -R '^test_component_vhf_gamepad_policy$'
+        run: ctest --test-dir build --output-on-failure --no-tests=error -R '^(test_component_vhf_gamepad_policy|test_fast_thread_safe)$'
 
       - name: Test native AMF lifecycle behavior
         shell: msys2 {0}

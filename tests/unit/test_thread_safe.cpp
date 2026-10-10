@@ -174,7 +174,7 @@ TEST(ThreadSafeQueueTests, PeekAndRunningTrackPublishedQueueState) {
   EXPECT_FALSE(queue.pop(0ms));
 }
 
-TEST(ThreadSafeQueueTests, LatestSnapshotsPreserveOtherSessionsAndQueuePosition) {
+TEST(ThreadSafeQueueTests, LatestSnapshotsPreserveArrivalOrderAgainstOtherEvents) {
   using namespace std::chrono_literals;
   using snapshot_t = std::pair<int, int>;
   safe::queue_t<std::unique_ptr<snapshot_t>> queue(3);
@@ -192,13 +192,13 @@ TEST(ThreadSafeQueueTests, LatestSnapshotsPreserveOtherSessionsAndQueuePosition)
   EXPECT_FALSE(publish(4, 30));  // a full queue must not discard other sessions
   auto first = queue.pop(0ms);
   ASSERT_TRUE(first);
-  EXPECT_EQ(*first, snapshot_t(1, 100));
+  EXPECT_EQ(*first, snapshot_t(2, 10));
   auto second = queue.pop(0ms);
   ASSERT_TRUE(second);
-  EXPECT_EQ(*second, snapshot_t(2, 10));
+  EXPECT_EQ(*second, snapshot_t(3, 20));
   auto third = queue.pop(0ms);
   ASSERT_TRUE(third);
-  EXPECT_EQ(*third, snapshot_t(3, 20));
+  EXPECT_EQ(*third, snapshot_t(1, 100));
   EXPECT_FALSE(queue.peek());
   EXPECT_FALSE(queue.pop(0ms));
   queue.stop();

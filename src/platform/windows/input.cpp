@@ -308,8 +308,8 @@ namespace platf {
         ds4_update_motion(gamepad, LI_MOTION_TYPE_GYRO, 0.0f, 0.0f, 0.0f);
 
         // Request motion events from the client at 100 Hz
-        feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
-        feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_GYRO, 100));
+        raise_gamepad_feedback(*feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
+        raise_gamepad_feedback(*feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_GYRO, 100));
         gamepad.last_motion_request_ts = std::chrono::steady_clock::now();
 
         // We support pointer index 0 and 1
@@ -403,7 +403,7 @@ namespace platf {
               normalizedLargeMotor,
               normalizedSmallMotor
             );
-            gamepad.feedback_queue->raise(msg);
+            raise_gamepad_feedback(*gamepad.feedback_queue, msg);
             gamepad.last_rumble = msg;
           }
           return;
@@ -429,7 +429,7 @@ namespace platf {
               b != gamepad.last_rgb_led.data.rgb_led.b) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rgb_led(gamepad.client_relative_index, r, g, b);
-            gamepad.feedback_queue->raise(msg);
+            raise_gamepad_feedback(*gamepad.feedback_queue, msg);
             gamepad.last_rgb_led = msg;
           }
           return;
@@ -1712,8 +1712,8 @@ namespace platf {
             BOOST_LOG(debug) << "DS4 gyro stale for "sv
                              << std::chrono::duration_cast<std::chrono::milliseconds>(gyro_stale).count()
                              << "ms; re-requesting motion events from client"sv;
-            gamepad.feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
-            gamepad.feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_GYRO, 100));
+            raise_gamepad_feedback(*gamepad.feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
+            raise_gamepad_feedback(*gamepad.feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_GYRO, 100));
             gamepad.last_motion_request_ts = now;
           }
         }

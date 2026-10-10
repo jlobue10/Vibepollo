@@ -14,6 +14,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  host-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Install host test headers
+        run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev
+      - name: Check input teardown and raw haptic backpressure
+        run: |
+          python3 tests/input/test_disconnect_release.py
+          python3 tests/input/test_haptic_queue.py
+
   windows:
     uses: ./.github/workflows/ci-windows.yml
     with:
