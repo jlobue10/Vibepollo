@@ -1613,8 +1613,14 @@ namespace input {
       return batch_result_e::not_batchable;
     }
 
-    // Do not allow batching if the button state changes on this controller
-    if (dest->buttonFlags != src->buttonFlags || dest->buttonFlags2 != src->buttonFlags2) {
+    // Preserve trigger press/release edges as well as buttons. The virtual Steam
+    // Controller synthesizes an additional full-pull click at 0xF0. Coalescing
+    // across either boundary can erase a complete tap before the driver sees it.
+    if (dest->buttonFlags != src->buttonFlags || dest->buttonFlags2 != src->buttonFlags2 ||
+        (dest->leftTrigger == 0) != (src->leftTrigger == 0) ||
+        (dest->rightTrigger == 0) != (src->rightTrigger == 0) ||
+        (dest->leftTrigger >= 0xF0) != (src->leftTrigger >= 0xF0) ||
+        (dest->rightTrigger >= 0xF0) != (src->rightTrigger >= 0xF0)) {
       return batch_result_e::terminate_batch;
     }
 
