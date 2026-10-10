@@ -383,9 +383,10 @@ namespace {
               static_cast<std::uint8_t>(lvg::touch_event::move));
     EXPECT_EQ(to_protocol_touch_event(LI_TOUCH_EVENT_UP),
               static_cast<std::uint8_t>(lvg::touch_event::up));
-    // An unmapped event releases everything rather than inventing a contact.
-    EXPECT_EQ(to_protocol_touch_event(0xEE),
+    EXPECT_EQ(to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL_ALL),
               static_cast<std::uint8_t>(lvg::touch_event::cancel_all));
+    // An unmapped event is dropped by the caller rather than releasing every contact.
+    EXPECT_EQ(to_protocol_touch_event(0xEE), platf::vhf_gamepad::PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
   }
 
   TEST_F(VhfGamepadPolicyTest, MotionAndBatteryMapToTheProtocol) {
