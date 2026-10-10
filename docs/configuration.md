@@ -387,9 +387,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @note{This option applies to Windows only and requires the Vibepollo virtual gamepad
             driver to be installed. It presents a DualSense to clients that report a PlayStation
             controller, or when motion_as_ds4 or touchpad_as_ds4 applies, and an Xbox Series
-            controller otherwise. On an older driver it falls back to a generic HID pad that
-            publishes the DirectInput Physical Interface Device report set, so force feedback still
-            works in DirectInput games.}</td>
+            controller otherwise. A client that reports a Steam Controller, Switch or PlayStation
+            controller gets that profile when the driver offers it, and the driver's automatic
+            profile otherwise. A driver that offers no console profile is reported as unusable
+            (the reserved generic HID profiles are never selected).}</td>
     </tr>
     <tr>
         <td>vhf_switch</td>
@@ -2030,14 +2031,12 @@ this option to replace the running app immediately. The default is `true`.
     </tr>
     <tr>
         <td>Default</td>
-        <td colspan="2">@code{}
-            0
-            @endcode</td>
+        <td colspan="2">20</td>
     </tr>
     <tr>
         <td rowspan="3">Choices</td>
         <td>0</td>
-        <td>Use half the stream's FPS as the minimum target.</td>
+        <td>Use a fifth of the stream's FPS (at least 10) as the minimum target; PyroWave streams always keep the full frame rate.</td>
     </tr>
     <tr>
         <td>1-1000</td>
@@ -4893,7 +4892,8 @@ Sets the display mode used when the requested streaming mode cannot be applied.
 
 ### forward_rumble
 
-Forwards controller rumble events to the emulated host gamepad.
+Forwards the host's rumble (and Steam Controller haptics) from the emulated gamepad back to the
+client's physical controller. Lightbar colour updates are not affected by this switch.
 
 ### global_state_cmd
 
