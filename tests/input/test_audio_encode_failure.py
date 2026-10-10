@@ -46,10 +46,6 @@ void opus_multistream_encoder_destroy(OpusMSEncoder *) {}
 int opus_multistream_encoder_ctl(OpusMSEncoder *, int, ...) { return 0; }
 int opus_multistream_encode_float(OpusMSEncoder *, const float *, int, unsigned char *, opus_int32) { return encodeResult; }
 const char *opus_strerror(int) { return "bad arg"; }
-namespace util {
-  template<class T, void (*D)(T *)> struct safe_ptr { T *p; explicit safe_ptr(T *q): p {q} {} T *get() { return p; } ~safe_ptr() { D(p); } };
-  struct buffer_t { std::vector<std::uint8_t> v; explicit buffer_t(std::size_t n): v(n) {} std::uint8_t *begin() { return v.data(); } std::uint8_t *end() { return v.data() + v.size(); } std::size_t size() const { return v.size(); } void fake_resize(std::size_t n) { v.resize(n); } };
-}
 namespace platf { enum class thread_priority_e { high }; void set_thread_name(std::string_view) {} void adjust_thread_priority(thread_priority_e) {} }
 namespace webrtc_stream { bool has_active_sessions() { return false; } template<class... A> void submit_audio_frame(A &&...) {} }
 namespace mail {
@@ -60,7 +56,7 @@ namespace mail {
 namespace stream { using packet_channel_t = std::shared_ptr<int>; }
 namespace audio {
   using opus_t = util::safe_ptr<OpusMSEncoder, opus_multistream_encoder_destroy>;
-  using buffer_t = util::buffer_t;
+  using buffer_t = util::buffer_t<std::uint8_t>;
   using packet_t = std::pair<stream::packet_channel_t, buffer_t>;
   using sample_queue_t = std::shared_ptr<safe::queue_t<std::vector<float>>>;
   struct stream_params_t {};
