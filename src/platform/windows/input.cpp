@@ -1368,7 +1368,9 @@ namespace platf {
     }
 
     const bool vigem_available = raw->vigem != nullptr && raw->vigem->available();
-    const bool vhf_available = raw->vhf != nullptr && raw->vhf->available();
+    // probe() answers from its cache while the driver is known good and re-checks
+    // (with a cooldown) after a failure, so a driver installed after startup is found.
+    const bool vhf_available = raw->vhf != nullptr && raw->vhf->probe();
     const bool automatic_vhf_fallback =
       config::input.gamepad == "auto"sv &&
       vhf_gamepad::select_automatic_backend(vigem_available, vhf_available) == vhf_gamepad::backend_e::vhf;
@@ -1397,11 +1399,25 @@ namespace platf {
         return -1;
       }
 
+      // Only a vhf_* config value is an explicit choice. A profile inferred from the
+      // client's controller type (Steam Controller, Switch, PlayStation) under plain
+      // `vhf` is a preference: when the installed driver does not offer it, retry with
+      // the driver's automatic profile rather than leaving the client with no controller.
+      const bool explicit_profile = config::input.gamepad != "vhf"sv && config::input.gamepad != "auto"sv;
+      if (vhf_available && desired != vhf_profile_e::automatic && !explicit_profile) {
+        BOOST_LOG(warning) << "Gamepad " << id.globalIndex
+                           << " could not get the profile its controller type suggests; retrying with the driver's automatic profile"sv;
+        if (raw->vhf->alloc(id, feedback_queue, vhf_profile_e::automatic, metadata.capabilities) == 0) {
+          raw->gamepad_backend[id.globalIndex] = gamepad_backend_e::vhf;
+          return 0;
+        }
+      }
+
       // An explicit profile must not be replaced by an automatic/client-selected profile or by
       // ViGEmBus. Otherwise a failed Switch Pro allocation makes the client override appear to
       // win even though the user selected a specific VHF profile. A Steam Controller client
       // under `auto` chose nothing explicitly, so it may still fall back to ViGEmBus.
-      if (desired != vhf_profile_e::automatic && !steam_client_prefers_vhf) {
+      if (explicit_profile && desired != vhf_profile_e::automatic && !steam_client_prefers_vhf) {
         BOOST_LOG(error) << "Gamepad " << id.globalIndex << " could not create the requested Vibepollo controller profile; refusing to substitute another profile"sv;
         return -1;
       }
@@ -2066,11 +2082,13 @@ namespace platf {
     auto enabled = raw->vigem != nullptr && raw->vigem->available();
     auto reason = enabled ? "" : "gamepads.vigem-not-available";
 
-    auto vhf_enabled = raw->vhf != nullptr && raw->vhf->available();
+    auto vhf_enabled = raw->vhf != nullptr && raw->vhf->probe();
     auto vhf_reason = vhf_enabled ? "" : "gamepads.vhf-not-available";
 
-    // ds4 == ps4
-    static std::vector gps {
+    // ds4 == ps4. Rebuilt on every call: the list was frozen at the first call, so a
+    // driver installed afterwards stayed "not available" in the UI until a restart.
+    static std::vector<supported_gamepad_t> gps;
+    gps = std::vector {
       supported_gamepad_t {"auto", enabled || vhf_enabled, enabled || vhf_enabled ? "" : reason},
       supported_gamepad_t {"x360", enabled, reason},
       supported_gamepad_t {"ds4", enabled, reason},

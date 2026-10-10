@@ -258,6 +258,10 @@ namespace platf {
     std::atomic<bool> stopping {false};
     bool probed {false};
     bool driver_available {false};
+    // A failed probe is retried after this cooldown: the driver may be installed or
+    // started after the host (test-rig kit, an install that asked for a restart, the
+    // root UMDF device starting late at boot), and the web UI/tray check live.
+    std::chrono::steady_clock::time_point last_failed_probe {};
 
     std::mutex wake_mutex;
     std::condition_variable wake;
@@ -558,14 +562,26 @@ namespace platf {
   }
 
   bool vhf_gamepad_t::probe() {
+    constexpr auto k_reprobe_cooldown = std::chrono::seconds(5);
     std::unique_lock lock {impl->lifetime};
     if (impl->probed) {
-      return impl->driver_available;
+      if (impl->driver_available ||
+          std::chrono::steady_clock::now() - impl->last_failed_probe < k_reprobe_cooldown) {
+        return impl->driver_available;
+      }
     }
     impl->probed = true;
+    impl->last_failed_probe = std::chrono::steady_clock::now();
 
     lvg::client probe_client;
     const DWORD status = probe_client.connect();
+    if (status == ERROR_REVISION_MISMATCH) {
+      // The driver is there but speaks another protocol generation; "not installed"
+      // would send the user to install ViGEmBus instead of reinstalling the driver.
+      BOOST_LOG(warning) << "Vibepollo virtual gamepad driver is installed but incompatible with this build (expected protocol "sv
+                         << lvg::k_protocol_version << "); reinstall the driver that ships with this version"sv;
+      return false;
+    }
     if (status != ERROR_SUCCESS) {
       BOOST_LOG(info) << "Vibepollo virtual gamepad driver is not available ["sv
                       << util::hex(status).to_string_view() << ']';

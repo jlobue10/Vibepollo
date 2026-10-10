@@ -361,7 +361,13 @@ namespace platf {
     // can be staged while the source device is not started, and a stream would
     // fail in exactly that case.
     lvg::client probe;
-    if (probe.connect() != ERROR_SUCCESS) {
+    const DWORD status = probe.connect();
+    if (status == ERROR_REVISION_MISMATCH) {
+      BOOST_LOG(warning) << "Vibepollo virtual gamepad driver is installed but incompatible with this build (expected protocol "sv
+                         << lvg::k_protocol_version << "); reinstall the driver that ships with this version"sv;
+      return false;
+    }
+    if (status != ERROR_SUCCESS) {
       return false;
     }
     return probe.available_profiles() != 0;
