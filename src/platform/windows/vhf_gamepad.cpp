@@ -630,11 +630,14 @@ namespace platf {
 
     if (has_motion(profile) && slot.feedback_queue) {
       // The client only streams motion when asked. Without this a PlayStation
-      // pad enumerates with sensors that never report.
+      // pad enumerates with sensors that never report. The Steam Controller's
+      // state report carries its IMU at 250 Hz, so ask for the native rate there;
+      // the client decimates to whatever is requested.
+      const std::uint16_t motion_rate_hz = is_steam_controller(profile) ? 250 : 100;
       raise_gamepad_feedback(*slot.feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(
-        slot.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
+        slot.client_relative_index, LI_MOTION_TYPE_ACCEL, motion_rate_hz));
       raise_gamepad_feedback(*slot.feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(
-        slot.client_relative_index, LI_MOTION_TYPE_GYRO, 100));
+        slot.client_relative_index, LI_MOTION_TYPE_GYRO, motion_rate_hz));
     }
 
     if (!impl->feedback_thread.joinable()) {
