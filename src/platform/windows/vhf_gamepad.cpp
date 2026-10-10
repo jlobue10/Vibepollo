@@ -27,6 +27,7 @@
 #include <libvirtualgamepad/client.h>
 
 // local includes
+#include "src/config.h"
 #include "src/logging.h"
 #include "src/utility.h"
 #include "vhf_gamepad.h"
@@ -279,6 +280,11 @@ namespace platf {
     if (!slot.active || !slot.feedback_queue) {
       return;
     }
+    // Same switch the ViGEm backend honours: the user asked for no rumble on the client.
+    // (RGB rides on the same message, so it is withheld too; it is cosmetic.)
+    if (!config::input.forward_rumble) {
+      return;
+    }
 
     if (slot.have_feedback && slot.last_feedback == feedback) {
       return;
@@ -359,6 +365,9 @@ namespace platf {
     auto &slot = slots[nr];
     if (!slot.active || !slot.feedback_queue) {
       return;
+    }
+    if (!config::input.forward_rumble) {
+      return;  // haptics are rumble to the client as well
     }
     if (slot.client_capabilities & LI_CCAP_STEAM_HAPTIC) {
       auto msg = gamepad_feedback_msg_t::make_steam_haptic(

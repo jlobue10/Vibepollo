@@ -277,6 +277,12 @@ namespace platf {
       assert(!gamepad.gp);
 
       gamepad.client_relative_index = id.clientRelativeIndex;
+      // A slot keeps its last feedback and touch bookkeeping across sessions; a new
+      // client whose first rumble/LED equals the previous session's last value would
+      // otherwise never receive it, and a finger left down would own a stale contact.
+      gamepad.last_rumble = {};
+      gamepad.last_rgb_led = {};
+      gamepad.pointer_id_map.clear();
       gamepad.last_report_ts = std::chrono::steady_clock::now();
       gamepad.last_accel_motion_ts = gamepad.last_report_ts;
       gamepad.last_gyro_motion_ts = gamepad.last_report_ts;
@@ -404,8 +410,11 @@ namespace platf {
               normalizedLargeMotor,
               normalizedSmallMotor
             );
-            raise_gamepad_feedback(*gamepad.feedback_queue, msg);
-            gamepad.last_rumble = msg;
+            // Remember it only when it was queued: a dropped message must not be deduplicated
+            // against for the rest of the session.
+            if (raise_gamepad_feedback(*gamepad.feedback_queue, msg)) {
+              gamepad.last_rumble = msg;
+            }
           }
           return;
         }
@@ -430,8 +439,9 @@ namespace platf {
               b != gamepad.last_rgb_led.data.rgb_led.b) {
             // We have to use the client-relative index when communicating back to the client
             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rgb_led(gamepad.client_relative_index, r, g, b);
-            raise_gamepad_feedback(*gamepad.feedback_queue, msg);
-            gamepad.last_rgb_led = msg;
+            if (raise_gamepad_feedback(*gamepad.feedback_queue, msg)) {
+              gamepad.last_rgb_led = msg;
+            }
           }
           return;
         }
