@@ -1384,6 +1384,11 @@ namespace input {
     // If this gamepad has not been initialized, ignore it.
     // This could happen when platf::alloc_gamepad fails
     if (gamepad.id < 0) {
+      if (!(packet->activeGamepadMask & (1 << packet->controllerNumber))) {
+        // Moonlight reports a removal as a zeroed packet for the removed controller
+        // with its mask bit clear; the loop above already freed the slot.
+        return;
+      }
       BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber << "] not allocated"sv;
       return;
     }
