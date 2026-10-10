@@ -3092,12 +3092,25 @@ namespace stream {
     auto start_time = std::chrono::steady_clock::now();
     auto current_time = start_time;
 
-    while (current_time - start_time < config::stream.ping_timeout) {
-      auto delta_time = current_time - start_time;
+    // Poll in slices and honour the session's shutdown: a client disconnect, an
+    // operator cancel or an app exit during this wait must end it at once. join()
+    // covers this thread with the 10 s hang watchdog (debug_trap), and
+    // ping_timeout is an operator knob with no upper bound.
+    constexpr auto kPingPollSlice = std::chrono::milliseconds(100);
+    while (current_time - start_time < timeout) {
+      if (session->shutdown_event->peek()) {
+        BOOST_LOG(debug) << "Ping wait ended by session shutdown"sv;
+        return -1;
+      }
+      const auto delta_time = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time);
 
-      auto msg_opt = messages->pop(config::stream.ping_timeout - delta_time);
+      auto msg_opt = messages->pop(std::min<std::chrono::milliseconds>(timeout - delta_time, kPingPollSlice));
       if (!msg_opt) {
-        break;
+        if (!messages->running()) {
+          break;
+        }
+        current_time = std::chrono::steady_clock::now();
+        continue;
       }
 
       TUPLE_2D_REF(recv_peer, msg, *msg_opt);
@@ -3159,7 +3172,24 @@ namespace stream {
       rtsp_stream::launch_session_t::display_helper_gate_status_e gate_status {};
       try {
         constexpr auto kGateTimeout = display_helper_integration::kApplyVerificationGateWaitTimeout;
-        if (session->display_helper_gate.wait_for(kGateTimeout) == std::future_status::ready) {
+        // Sliced like the ping wait: this follows it back to back, and the two
+        // together can outlast join()'s watchdog when a stop lands early.
+        const auto gate_deadline = std::chrono::steady_clock::now() + kGateTimeout;
+        auto gate_wait = std::future_status::timeout;
+        while (gate_wait != std::future_status::ready && !session->shutdown_event->peek()) {
+          const auto remaining = gate_deadline - std::chrono::steady_clock::now();
+          if (remaining <= std::chrono::steady_clock::duration::zero()) {
+            break;
+          }
+          gate_wait = session->display_helper_gate.wait_for(
+            std::min<std::chrono::steady_clock::duration>(remaining, std::chrono::milliseconds(100))
+          );
+        }
+        if (gate_wait != std::future_status::ready && session->shutdown_event->peek()) {
+          BOOST_LOG(debug) << "Display helper: gate wait ended by session shutdown.";
+          return;
+        }
+        if (gate_wait == std::future_status::ready) {
           gate_status = session->display_helper_gate.get();
         } else {
           BOOST_LOG(warning) << "Display helper: gate wait timed out; proceeding with capture.";
@@ -3828,6 +3858,20 @@ namespace stream {
           --frame_limiter_sessions;
         }
         --running_sessions;
+#if defined(_WIN32) || defined(__linux__)
+        if (first_frame_limiter_session) {
+          // join() is otherwise the only place the stream's limiter owner is
+          // released. Left set after a throwing start, the next session's limiter
+          // start is "ignored for existing owner" and it streams under the stale
+          // limit and framegen policy.
+#ifdef _WIN32
+          clear_deferred_stream_start_actions();
+          platf::frame_limiter_streaming_stop(platf::frame_limiter_owner::rtsp, false);
+#else
+          platf::frame_limiter_streaming_stop(platf::frame_limiter_owner::rtsp);
+#endif
+        }
+#endif
         host_stats::rtsp_session_ended();
         session_history::end_session(session.history_uuid);
         if (first_rtsp_session) {
