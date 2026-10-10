@@ -2025,7 +2025,7 @@ namespace input {
   std::shared_ptr<input_t> alloc(safe::mail_t mail) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
-      mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback, 128, false)
+      mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback, platf::GAMEPAD_FEEDBACK_QUEUE_CAPACITY, false)
     );
 
     // Workaround to ensure new frames will be captured when a client connects

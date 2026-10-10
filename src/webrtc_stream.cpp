@@ -3487,7 +3487,7 @@ namespace webrtc_stream {
 #endif
       webrtc_capture.feedback_shutdown.store(false, std::memory_order_release);
 #ifdef SUNSHINE_ENABLE_WEBRTC
-      webrtc_capture.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback, 128, false);
+      webrtc_capture.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback, platf::GAMEPAD_FEEDBACK_QUEUE_CAPACITY, false);
       webrtc_capture.feedback_thread = std::thread([queue = webrtc_capture.feedback_queue]() {
         feedback_thread_main(queue);
       });

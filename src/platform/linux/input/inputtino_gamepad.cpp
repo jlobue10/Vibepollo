@@ -132,7 +132,7 @@ namespace platf::gamepad {
       }
 
       gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rumble(idx, low_freq, high_freq);
-      feedback_queue->raise(msg);
+      raise_gamepad_feedback(*feedback_queue, msg);
       gamepad->last_rumble = msg;
     };
 
@@ -175,11 +175,11 @@ namespace platf::gamepad {
                 return;
               }
               auto msg = gamepad_feedback_msg_t::make_rgb_led(idx, r, g, b);
-              feedback_queue->raise(msg);
+              raise_gamepad_feedback(*feedback_queue, msg);
               gamepad->last_rgb_led = msg;
             });
-            feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_ACCEL, 100));
-            feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
+            raise_gamepad_feedback(*feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_ACCEL, 100));
+            raise_gamepad_feedback(*feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*ds4));
             raw->gamepads[id.globalIndex] = std::move(gamepad);
             return 0;
@@ -203,7 +203,7 @@ namespace platf::gamepad {
                   msg.data.haptics.samples = samples;
                   // PCM may be dropped under load; never purge queued trigger,
                   // LED, or stop-rumble messages to make room for audio.
-                  feedback_queue->try_raise(std::move(msg));
+                  raise_gamepad_feedback(*feedback_queue, std::move(msg));
                 });
               });
             }
@@ -214,17 +214,17 @@ namespace platf::gamepad {
               }
 
               auto msg = gamepad_feedback_msg_t::make_rgb_led(idx, r, g, b);
-              feedback_queue->raise(msg);
+              raise_gamepad_feedback(*feedback_queue, msg);
               gamepad->last_rgb_led = msg;
             });
 
             (*ds5).set_on_trigger_effect([feedback_queue, idx = id.clientRelativeIndex](const inputtino::PS5Joypad::TriggerEffect &trigger_effect) {
-              feedback_queue->raise(gamepad_feedback_msg_t::make_adaptive_triggers(idx, trigger_effect.event_flags, trigger_effect.type_left, trigger_effect.type_right, trigger_effect.left, trigger_effect.right));
+              raise_gamepad_feedback(*feedback_queue, gamepad_feedback_msg_t::make_adaptive_triggers(idx, trigger_effect.event_flags, trigger_effect.type_left, trigger_effect.type_right, trigger_effect.left, trigger_effect.right));
             });
 
             // Activate the motion sensors
-            feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_ACCEL, 100));
-            feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
+            raise_gamepad_feedback(*feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_ACCEL, 100));
+            raise_gamepad_feedback(*feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
 
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*ds5));
             raw->gamepads[id.globalIndex] = std::move(gamepad);

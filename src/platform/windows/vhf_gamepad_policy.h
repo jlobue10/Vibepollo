@@ -15,23 +15,6 @@
 
 namespace platf::vhf_gamepad {
 
-// Return a stop key including both report family and actuator mask.
-// Keep families distinct: do not assume their hardware stop effects are interchangeable.
-inline unsigned steam_haptic_stop_key(const unsigned char *report, unsigned length) {
-    if (length >= 10 && report[0] == 0x80 &&
-            report[4] == 0 && report[5] == 0 && report[7] == 0 && report[8] == 0) {
-        return (0x80u << 2) | 3;
-    }
-    if (length < 2 || report[1] > 2) return 0;
-    if ((length >= 8 && report[0] == 0x81 &&
-            ((report[2] == 0 && report[3] == 0) || (report[6] == 0 && report[7] == 0))) ||
-            (length >= 4 && report[0] == 0x82 && report[2] == 0)) {
-        return ((unsigned)report[0] << 2) | (report[1] == 2 ? 3 : 1u << report[1]);
-    }
-    return 0;
-}
-
-
   // Single-touch Steam pads transported as the two halves of a DS4 touchpad.
   // A pointer owns its original half until release. Unknown releases/moves and
   // additional fingers on an occupied pad must not affect the existing owner.

@@ -296,14 +296,14 @@ namespace platf {
     bool queued = true;
     // We have to use the client-relative index when communicating back to the client
     if (rumble_changed) {
-      queued &= slot.feedback_queue->try_raise(gamepad_feedback_msg_t::make_rumble(
+      queued &= raise_gamepad_feedback(*slot.feedback_queue, gamepad_feedback_msg_t::make_rumble(
         slot.client_relative_index,
         feedback.low_frequency,
         feedback.high_frequency
       ));
     }
     if (rgb_changed) {
-      queued &= slot.feedback_queue->try_raise(gamepad_feedback_msg_t::make_rgb_led(
+      queued &= raise_gamepad_feedback(*slot.feedback_queue, gamepad_feedback_msg_t::make_rgb_led(
         slot.client_relative_index,
         feedback.red,
         feedback.green,
@@ -319,7 +319,7 @@ namespace platf {
         slot.last_feedback.left_effect != feedback.left_effect ||
         slot.last_feedback.right_effect != feedback.right_effect;
       if (effects_changed) {
-        queued &= slot.feedback_queue->try_raise(gamepad_feedback_msg_t::make_adaptive_triggers(
+        queued &= raise_gamepad_feedback(*slot.feedback_queue, gamepad_feedback_msg_t::make_adaptive_triggers(
           slot.client_relative_index,
           feedback.trigger_event_flags,
           feedback.left_effect.mode,
@@ -335,7 +335,7 @@ namespace platf {
                                    slot.last_feedback.left_trigger != feedback.left_trigger ||
                                    slot.last_feedback.right_trigger != feedback.right_trigger);
     if (triggers_changed) {
-      queued &= slot.feedback_queue->try_raise(gamepad_feedback_msg_t::make_rumble_triggers(
+      queued &= raise_gamepad_feedback(*slot.feedback_queue, gamepad_feedback_msg_t::make_rumble_triggers(
         slot.client_relative_index,
         feedback.left_trigger,
         feedback.right_trigger
@@ -364,19 +364,7 @@ namespace platf {
         haptic.length,
         haptic.report
       );
-      // Feedback queues hold 128 values: all 16 * 7 explicit stop keys fit.
-      // Ordinary feedback cannot clear this queue when it fills.
-      const auto id = slot.client_relative_index;
-      const auto stop = vhf_gamepad::steam_haptic_stop_key(haptic.report.data(), haptic.length);
-      if (!slot.feedback_queue->raise_latest(std::move(msg), [id, stop, &haptic](const gamepad_feedback_msg_t &pending) {
-            if (pending.type != gamepad_feedback_e::steam_haptic || pending.id != id) return false;
-            const auto &old = pending.data.steam_haptic;
-            return (haptic.report[0] == 0x80 && old.report[0] == 0x80) ||
-                   (stop != 0 && vhf_gamepad::steam_haptic_stop_key(old.report.data(), old.length) == stop);
-          }, [](const gamepad_feedback_msg_t &pending) {
-            return pending.type == gamepad_feedback_e::steam_haptic &&
-                   vhf_gamepad::steam_haptic_stop_key(pending.data.steam_haptic.report.data(), pending.data.steam_haptic.length) != 0;
-          })) {
+      if (!raise_gamepad_feedback(*slot.feedback_queue, std::move(msg))) {
         BOOST_LOG(debug) << "VHF gamepad "sv << nr << ": Steam haptic queue full, dropping report 0x"sv
                          << std::hex << int(haptic.report[0]) << std::dec;
       }
@@ -643,9 +631,9 @@ namespace platf {
     if (has_motion(profile) && slot.feedback_queue) {
       // The client only streams motion when asked. Without this a PlayStation
       // pad enumerates with sensors that never report.
-      slot.feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(
+      raise_gamepad_feedback(*slot.feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(
         slot.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
-      slot.feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(
+      raise_gamepad_feedback(*slot.feedback_queue, gamepad_feedback_msg_t::make_motion_event_state(
         slot.client_relative_index, LI_MOTION_TYPE_GYRO, 100));
     }
 

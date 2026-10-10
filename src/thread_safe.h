@@ -344,12 +344,15 @@ namespace safe {
     /// Priority values may evict an ordinary item on overflow. Callers supply a
     /// bounded key space and enough capacity for every distinct priority key.
     template<class Predicate, class Priority>
-    bool raise_latest(T value, Predicate matches, Priority priority) {
+    bool raise_latest(T value, Predicate matches, Priority priority, std::uint32_t event_limit = UINT32_MAX) {
       std::lock_guard ul {_lock};
       if (!_poll_state.running()) return false;
       _queue.erase(std::remove_if(_queue.begin(), _queue.end(), matches), _queue.end());
-      if (_queue.size() >= _max_elements) {
-        if (!priority(value)) return false;
+      const bool important = priority(value);
+      const bool events_full = !important && event_limit != UINT32_MAX &&
+          std::count_if(_queue.begin(), _queue.end(), [&](const T &pending) { return !priority(pending); }) >= event_limit;
+      if (_queue.size() >= _max_elements || events_full) {
+        if (!important && event_limit == UINT32_MAX) return false;
         auto victim = std::find_if(_queue.begin(), _queue.end(), [&](const T &pending) { return !priority(pending); });
         if (victim == _queue.end()) return false;
         _queue.erase(victim);
