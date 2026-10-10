@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Execute production Windows controller allocation with fake driver boundaries.
+
+The full allocation/selection functions are extracted unchanged; fake VHF and
+ViGEm objects expose configurable availability and profile-allocation results.
+--baseline reads input.cpp from HEAD. No kernel driver or controller is required.
+"""
+from pathlib import Path
+import os
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+PATH = 'src/platform/windows/input.cpp'
+source = (subprocess.check_output(['git', 'show', 'HEAD:' + PATH], cwd=ROOT, text=True)
+          if '--baseline' in sys.argv else (ROOT / PATH).read_text())
+
+def block(text, marker):
+    start = text.index(marker)
+    end = text.index('{', start)
+    depth = 1
+    while depth:
+        end += 1
+        depth += (text[end] == '{') - (text[end] == '}')
+    return text[start:end + 1]
+
+policy = (ROOT/'src/platform/windows/vhf_gamepad_policy.h').read_text()
+header = (ROOT/'src/platform/windows/vhf_gamepad.h').read_text()
+prefix = r'''
+#include <cstdint>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+using namespace std::literals;
+struct Log {template<class T> Log& operator<<(const T&){return *this;}};
+#define BOOST_LOG(level) Log{}
+constexpr int MAX_GAMEPADS=16;
+constexpr int LI_CTYPE_STEAM=4,LI_CTYPE_PS=2,LI_CTYPE_NINTENDO=3,LI_CTYPE_XBOX=1;
+constexpr int LI_CCAP_ACCEL=1,LI_CCAP_GYRO=2,LI_CCAP_TOUCHPAD=4,LI_CCAP_RGB_LED=8;
+namespace config {struct {std::string gamepad="auto";bool motion_as_ds4=false,touchpad_as_ds4=false;} input;}
+namespace platf {
+PROFILE_ENUM;
+namespace vhf_gamepad {BACKEND_ENUM; BACKEND_SELECT}
+struct gamepad_id_t {int globalIndex,clientRelativeIndex;};
+struct gamepad_arrival_t {int type;std::uint16_t capabilities=0;};
+using feedback_queue_t=std::shared_ptr<int>;
+enum VIGEM_TARGET_TYPE {Xbox360Wired,DualShock4Wired};
+enum class gamepad_backend_e {none,vhf,vigem};
+struct FakeVhf {
+ bool live=true,requested_success=false,automatic_success=true;
+ std::vector<vhf_profile_e> calls;
+ bool probe(){return live;}
+ int alloc(const gamepad_id_t&,feedback_queue_t& feedback,vhf_profile_e profile,std::uint16_t){
+  calls.push_back(profile);
+  bool ok=profile==vhf_profile_e::automatic?automatic_success:requested_success;
+  if(ok)feedback.reset();return ok?0:-1;
+ }
+};
+struct FakeVigem {
+ bool live=false;int calls=0;
+ bool available(){return live;}
+ int alloc_gamepad_internal(const gamepad_id_t&,feedback_queue_t&,VIGEM_TARGET_TYPE){++calls;return live?0:-1;}
+};
+struct input_raw_t {
+ std::unique_ptr<FakeVhf> vhf=std::make_unique<FakeVhf>();
+ std::unique_ptr<FakeVigem> vigem=std::make_unique<FakeVigem>();
+ gamepad_backend_e gamepad_backend[MAX_GAMEPADS]{};
+};
+using input_t=std::shared_ptr<input_raw_t>;
+'''.replace('PROFILE_ENUM',block(header,'enum class vhf_profile_e'))
+prefix=prefix.replace('BACKEND_ENUM',block(policy,'enum class backend_e'))
+prefix=prefix.replace('BACKEND_SELECT',block(policy,'[[nodiscard]] constexpr backend_e select_automatic_backend('))
+suffix = r'''
+}
+int main(){
+ using namespace platf;
+ int errors=0,checks=0;
+ auto check=[&](bool ok,const char* name){++checks;errors+=!ok;std::cout<<(ok?"PASS ":"FAIL ")<<name<<'\n';};
+ for(int type:{LI_CTYPE_STEAM,LI_CTYPE_PS,LI_CTYPE_NINTENDO}){
+  config::input.gamepad="auto";auto input=std::make_shared<input_raw_t>();
+  int rc=alloc_gamepad(input,{0,2},{type},std::make_shared<int>(1));
+  check(rc==0&&input->vhf->calls.size()==2&&input->vhf->calls.back()==vhf_profile_e::automatic&&
+        input->gamepad_backend[0]==gamepad_backend_e::vhf&&input->vigem->calls==0,
+        "auto without ViGEm retries an unsupported client-derived profile");
+ }
+ for(const char* setting:{"vhf_steam","vhf_ds5","vhf_switch"}){
+  config::input.gamepad=setting;auto input=std::make_shared<input_raw_t>();input->vigem->live=true;
+  check(alloc_gamepad(input,{0,0},{LI_CTYPE_STEAM},std::make_shared<int>(1))==-1&&
+        input->vhf->calls.size()==1&&input->vigem->calls==0,"explicit profile is not substituted");
+ }
+ config::input.gamepad="vhf";auto input=std::make_shared<input_raw_t>();
+ check(alloc_gamepad(input,{0,0},{LI_CTYPE_STEAM},std::make_shared<int>(1))==0&&
+       input->vhf->calls.size()==2,"plain vhf still retries automatic profile");
+ config::input.gamepad="auto";input=std::make_shared<input_raw_t>();input->vhf->requested_success=true;
+ check(alloc_gamepad(input,{0,0},{LI_CTYPE_STEAM},std::make_shared<int>(1))==0&&
+       input->vhf->calls.size()==1,"available client profile is kept without a retry");
+ input=std::make_shared<input_raw_t>();input->vhf->automatic_success=false;
+ check(alloc_gamepad(input,{0,0},{LI_CTYPE_STEAM},std::make_shared<int>(1))==-1&&
+       input->vhf->calls.size()==2&&input->vigem->calls==0,"both VHF allocations fail cleanly without ViGEm");
+ input=std::make_shared<input_raw_t>();input->vigem->live=true;input->vhf->automatic_success=false;
+ check(alloc_gamepad(input,{0,0},{LI_CTYPE_STEAM},std::make_shared<int>(1))==0&&
+       input->vigem->calls==1&&input->gamepad_backend[0]==gamepad_backend_e::vigem,
+       "Steam auto still falls back to available ViGEm after both VHF failures");
+ input=std::make_shared<input_raw_t>();
+ check(alloc_gamepad(input,{-1,0},{LI_CTYPE_STEAM},std::make_shared<int>(1))==-1&&
+       input->vhf->calls.empty(),"invalid slot performs no allocation");
+ std::cout<<checks<<" checks; "<<errors<<" failures\n";return errors?1:0;
+}
+'''
+code=prefix+'\n'.join(block(source,m) for m in [
+    'static bool vhf_gamepad_selected(', 'static vhf_profile_e vhf_desired_profile(', 'int alloc_gamepad(input_t &'])+suffix
+with tempfile.TemporaryDirectory(prefix='vhf-fallback-') as directory:
+    work=Path(directory)
+    (work/'test.cpp').write_text(code)
+    subprocess.run(['g++','-std=c++20','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer',
+                    str(work/'test.cpp'),'-o',str(work/'test')],check=True)
+    raise SystemExit(subprocess.run([str(work/'test')],env=dict(os.environ,ASAN_OPTIONS='detect_leaks=0')).returncode)

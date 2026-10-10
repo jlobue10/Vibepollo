@@ -64,3 +64,10 @@ Use both Moonlight and browser streaming, including two connected viewers:
 9. Repeat disconnect while capture teardown is delayed. Input cleanup should
    run before the capture joins finish. Verify healthy Alt+Tab, typing, mouse,
    controller and pen/touch use after reconnect.
+
+# VHF automatic profile fallback regression
+
+`python3 tests/input/test_vhf_fallback.py` executes the production Windows
+allocation and profile-selection functions with fake VHF/ViGEm driver objects.
+It covers missing client-derived profiles under `auto` without ViGEm, explicit
+profile preservation, failed automatic allocation, and ViGEm fallback.

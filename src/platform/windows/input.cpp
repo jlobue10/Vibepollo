@@ -1394,11 +1394,6 @@ namespace platf {
         }
       }
 
-      if (automatic_vhf_fallback) {
-        BOOST_LOG(error) << "Gamepad " << id.globalIndex << " could not be created on the Vibepollo virtual gamepad driver"sv;
-        return -1;
-      }
-
       // Only a vhf_* config value is an explicit choice. A profile inferred from the
       // client's controller type (Steam Controller, Switch, PlayStation) under plain
       // `vhf` is a preference: when the installed driver does not offer it, retry with
@@ -1411,6 +1406,13 @@ namespace platf {
           raw->gamepad_backend[id.globalIndex] = gamepad_backend_e::vhf;
           return 0;
         }
+      }
+
+      // With no ViGEm backend, exhaust the driver's automatic profile before
+      // failing. The client-derived profile above is only a preference under auto.
+      if (automatic_vhf_fallback) {
+        BOOST_LOG(error) << "Gamepad " << id.globalIndex << " could not be created on the Vibepollo virtual gamepad driver"sv;
+        return -1;
       }
 
       // An explicit profile must not be replaced by an automatic/client-selected profile or by
