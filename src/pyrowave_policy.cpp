@@ -193,7 +193,10 @@ namespace pyrowave::policy {
     record_frame_stats_t stats;
     stats.block_records = records.size();
     const std::size_t frame_start = out.size();
-    out.reserve(frame_start + bitstream.size());
+    // Padding records make the framed frame a little larger than the bitstream;
+    // reserving exactly the bitstream size meant one more grow-and-copy of a
+    // ~1 MB buffer on nearly every frame (the frame buffer starts empty each time).
+    out.reserve(frame_start + bitstream.size() + bitstream.size() / 32 + 256);
     out.insert(out.end(), bitstream.begin(), bitstream.begin() + 8);
 
     if (!shard_payload) {
