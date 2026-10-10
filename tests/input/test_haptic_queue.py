@@ -39,6 +39,7 @@ code=r'''
 using namespace std::literals;
 #define BOOST_LOG(level) std::clog
 constexpr int LI_CCAP_STEAM_HAPTIC=1;
+namespace config { struct { bool forward_rumble=true; } input; }
 TYPES
 PARSER
 HELPERS
@@ -56,6 +57,8 @@ int main(){int failures=0;
    if(!stop){h.report[2]=3;h.report[4]=1;h.report[6]=1;h.report[7]=1;}
    raise_steam_haptic(id,h,std::chrono::steady_clock::now());
  };
+ config::input.forward_rumble=false;send(0,0x80,0,false);
+ check(!queue->pop(0ms),"forward_rumble off withholds Steam haptics from the client");config::input.forward_rumble=true;
  send(0,0x80,0,false);send(0,0x82,0,false);send(0,0x80,0,true);
  auto a=queue->pop(0ms),b=queue->pop(0ms);
  check(a && b && a->data.steam_haptic.report[0]==0x82 && b->data.steam_haptic.report[0]==0x80,
