@@ -30,6 +30,8 @@ jobs:
           python3 tests/input/test_haptic_queue.py
           python3 tests/input/test_gamepad_feedback.py
           python3 tests/input/test_vhf_fallback.py
+          python3 tests/input/test_netfloat_validation.py
+          python3 tests/input/test_vigem_touch_pointers.py
       - name: Check queued and in-flight stream packet lifetimes
         run: python3 tests/input/test_stream_packet_lifetime.py
       - name: Check PyroWave fence import and conversion timeout ordering

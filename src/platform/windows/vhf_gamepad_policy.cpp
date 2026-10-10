@@ -99,10 +99,12 @@ namespace platf::vhf_gamepad {
         return static_cast<std::uint8_t>(lvg::touch_event::move);
       case LI_TOUCH_EVENT_CANCEL:
         return static_cast<std::uint8_t>(lvg::touch_event::cancel);
-      default:
-        // An unmapped event is safer read as "release everything" than as a
-        // contact the client never reported.
+      case LI_TOUCH_EVENT_CANCEL_ALL:
         return static_cast<std::uint8_t>(lvg::touch_event::cancel_all);
+      default:
+        // Mapping anything else to cancel_all let one unsupported event lift every
+        // contact on the pad; the ViGEm path ignores such events, and so does this one.
+        return PROTOCOL_TOUCH_EVENT_UNSUPPORTED;
     }
   }
 

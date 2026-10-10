@@ -756,6 +756,10 @@ namespace platf {
     std::lock_guard touch_guard {slot.touch_lock};
 
     const std::uint8_t event = vhf_gamepad::to_protocol_touch_event(touch_event.eventType);
+    if (event == vhf_gamepad::PROTOCOL_TOUCH_EVENT_UNSUPPORTED) {
+      BOOST_LOG(debug) << "Unsupported touch event for VHF gamepad: "sv << static_cast<unsigned>(touch_event.eventType);
+      return;
+    }
     const std::uint64_t pointer_key =
       vhf_gamepad::touch_pointer_key(touch_event.touchpadIndex, touch_event.pointerId);
     std::uint8_t contact = 0;

@@ -231,10 +231,13 @@ namespace platf::vhf_gamepad {
    */
   [[nodiscard]] std::uint8_t synthesize_steam_rumble(const steam_haptic_t &haptic, synthesized_rumble_t &rumble) noexcept;
 
+  /// Returned for touch events the pads have no equivalent for; the caller drops them.
+  constexpr std::uint8_t PROTOCOL_TOUCH_EVENT_UNSUPPORTED = 0xFF;
+
   /**
    * @brief Converts a client touch event type into the protocol's.
    * @param event_type The client event type.
-   * @return The protocol value, or the cancel-all value for anything unmapped.
+   * @return The protocol value, or PROTOCOL_TOUCH_EVENT_UNSUPPORTED for anything unmapped.
    */
   [[nodiscard]] std::uint8_t to_protocol_touch_event(std::uint8_t event_type) noexcept;
 

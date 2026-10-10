@@ -117,6 +117,7 @@ void free_id(std::bitset<16> &mask, int id) { mask[id] = false; }
 enum class button_state_e { NONE, DOWN, UP };
 struct gamepad_t {
   int id = -1;
+  bool alloc_failed = false;
   worker_t::task_id_t back_timeout_id = nullptr;
   worker_t::task_id_t home_timeout_id = nullptr;
   uint64_t home_generation = 0;
