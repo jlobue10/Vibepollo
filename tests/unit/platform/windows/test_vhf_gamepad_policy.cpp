@@ -63,6 +63,19 @@ namespace {
     EXPECT_EQ(select_automatic_backend(false, false), backend_e::unavailable);
   }
 
+  TEST_F(VhfGamepadPolicyTest, UnsupportedTouchEventsAreDroppedNotCancelAll) {
+    using platf::vhf_gamepad::PROTOCOL_TOUCH_EVENT_UNSUPPORTED;
+    EXPECT_EQ(to_protocol_touch_event(LI_TOUCH_EVENT_HOVER_LEAVE), PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+    EXPECT_EQ(to_protocol_touch_event(LI_TOUCH_EVENT_BUTTON_ONLY), PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+    EXPECT_EQ(to_protocol_touch_event(0x42), PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+    EXPECT_NE(to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL_ALL), PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+    EXPECT_NE(to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL), to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL_ALL));
+    for (std::uint8_t event : {LI_TOUCH_EVENT_HOVER, LI_TOUCH_EVENT_DOWN, LI_TOUCH_EVENT_UP, LI_TOUCH_EVENT_MOVE, LI_TOUCH_EVENT_CANCEL}) {
+      EXPECT_NE(to_protocol_touch_event(event), PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+      EXPECT_NE(to_protocol_touch_event(event), to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL_ALL));
+    }
+  }
+
   TEST_F(VhfGamepadPolicyTest, AutomaticProfilePrefersXinputThenPlaystation) {
     const auto all_public =
       lvg::profile_bit(lvg::profile::xbox_series) |
@@ -370,9 +383,10 @@ namespace {
               static_cast<std::uint8_t>(lvg::touch_event::move));
     EXPECT_EQ(to_protocol_touch_event(LI_TOUCH_EVENT_UP),
               static_cast<std::uint8_t>(lvg::touch_event::up));
-    // An unmapped event releases everything rather than inventing a contact.
-    EXPECT_EQ(to_protocol_touch_event(0xEE),
+    EXPECT_EQ(to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL_ALL),
               static_cast<std::uint8_t>(lvg::touch_event::cancel_all));
+    // An unmapped event is dropped by the caller rather than releasing every contact.
+    EXPECT_EQ(to_protocol_touch_event(0xEE), platf::vhf_gamepad::PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
   }
 
   TEST_F(VhfGamepadPolicyTest, MotionAndBatteryMapToTheProtocol) {

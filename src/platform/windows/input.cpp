@@ -554,15 +554,6 @@ namespace platf {
   }
 
   /**
-   * @brief Reports whether the configured VHF controller has a touchpad.
-   * @return `true` when the selection always yields a controller with one.
-   */
-  static bool vhf_gamepad_has_touchpad() {
-    return config::input.gamepad == "vhf_ds4"sv || config::input.gamepad == "vhf_ds5"sv ||
-           config::input.gamepad == "vhf_steam"sv;
-  }
-
-  /**
    * @brief Reports whether the configured VHF controller definitely has no touchpad.
    * @return `true` when the selection always yields an Xbox controller.
    */
@@ -1854,7 +1845,12 @@ namespace platf {
     const uint64_t pointer_key = (static_cast<uint64_t>(touch.touchpadIndex) << 32) | touch.pointerId;
     uint8_t pointerIndex;
     if (touch.eventType == LI_TOUCH_EVENT_DOWN) {
-      if (gamepad.available_pointers & 0x1) {
+      if (auto existing = gamepad.pointer_id_map.find(pointer_key); existing != gamepad.pointer_id_map.end()) {
+        // The client dropped the up/cancel for this pointer. Keep its contact and treat the
+        // down as a move; a second index would leave the first pressed until CANCEL_ALL.
+        BOOST_LOG(warning) << "Gamepad pointer already down. Did the client drop an up/cancel event?"sv;
+        pointerIndex = existing->second;
+      } else if (gamepad.available_pointers & 0x1) {
         // Reserve pointer index 0 for this touch
         gamepad.pointer_id_map[pointer_key] = pointerIndex = 0;
         gamepad.available_pointers &= ~(1 << pointerIndex);
@@ -2129,13 +2125,12 @@ namespace platf {
     platform_caps::caps_t caps = 0;
 
     // We support controller touchpad input as long as we're not emulating X360, which has no
-    // touchpad. On the VHF driver it depends on the controller: the PlayStation profiles have
-    // one, and plain `vhf` may still select one for a PlayStation client, so advertise it unless
-    // the selection rules out a touchpad entirely.
-    const bool vhf_without_touchpad =
-      vhf_gamepad_selected() && !vhf_gamepad_has_touchpad() &&
-      (vhf_gamepad_is_xbox() ||
-       (!config::input.motion_as_ds4 && !config::input.touchpad_as_ds4));
+    // touchpad. On the VHF driver it depends on the controller: plain `vhf` selects a
+    // pad-bearing profile from the client's controller type (Steam Controller, PlayStation)
+    // whatever motion_as_ds4/touchpad_as_ds4 say, so only the explicit Xbox and Switch
+    // selections rule a touchpad out. Withholding the flag silences both Steam Controller
+    // trackpads: the client never sends a touch packet without it.
+    const bool vhf_without_touchpad = vhf_gamepad_selected() && vhf_gamepad_is_xbox();
     if (config::input.gamepad != "x360"sv && !vhf_without_touchpad) {
       caps |= platform_caps::controller_touch;
     }

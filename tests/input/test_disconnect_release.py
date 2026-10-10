@@ -24,8 +24,15 @@ using PNV_MULTI_CONTROLLER_PACKET = controller_packet *;
 namespace platf {
   struct gamepad_id_t { int globalIndex; uint8_t clientRelativeIndex; };
   struct gamepad_arrival_t {};
-  int alloc_gamepad(int, gamepad_id_t, gamepad_arrival_t, int) { return 0; }
+  int alloc_result = 0, alloc_calls = 0;
+  int alloc_gamepad(int, gamepad_id_t, gamepad_arrival_t, int) { ++alloc_calls; return alloc_result; }
+  struct gamepad_battery_t { gamepad_id_t id; uint8_t state; uint8_t percentage; };
+  std::vector<gamepad_battery_t> battery_events;
+  void gamepad_battery(int, const gamepad_battery_t &battery) { battery_events.push_back(battery); }
 }
+struct battery_packet { uint8_t controllerNumber; uint8_t batteryState; uint8_t batteryPercentage; };
+using PSS_CONTROLLER_BATTERY_PACKET = battery_packet *;
+constexpr int LI_BATTERY_PERCENTAGE_UNKNOWN = 0xFF;
 int alloc_id(std::bitset<16> &mask) {
   for (int i = 0; i < 16; ++i) if (!mask[i]) { mask[i] = true; return i; }
   return -1;
@@ -311,6 +318,23 @@ int main(int argc, char **argv) {
     assert(!retained->client_context);
     assert(platf::touch_cancels == 1 && platf::pen_cancels == 1 && platf::client_input_t::destroyed == 1);
     disconnect(a); assert(platf::client_input_t::destroyed == 1);
+  } else if (test == "failed_allocation_not_retried_per_packet") {
+    platf::alloc_result = -1;
+    controller_packet p {0, 1}; passthrough(a, &p); passthrough(a, &p); passthrough(a, &p);
+    assert(platf::alloc_calls == 1 && a->gamepads[0].id == -1 && a->gamepads[0].alloc_failed);
+    p.activeGamepadMask = 0; passthrough(a, &p);
+    assert(!a->gamepads[0].alloc_failed && platf::alloc_calls == 1);
+    platf::alloc_result = 0; p.activeGamepadMask = 1; passthrough(a, &p);
+    assert(platf::alloc_calls == 2 && a->gamepads[0].id >= 0 && !a->gamepads[0].alloc_failed);
+    disconnect(a); assert(!a->gamepads[0].alloc_failed);
+  } else if (test == "battery_percentage_clamped") {
+    controller_packet p {0, 1}; passthrough(a, &p);
+    battery_packet b {0, 1, 150}; passthrough(a, &b);
+    b.batteryPercentage = 255; passthrough(a, &b);
+    b.batteryPercentage = 42; passthrough(a, &b);
+    assert(platf::battery_events.size() == 3 && platf::battery_events[0].percentage == 100 &&
+           platf::battery_events[1].percentage == 255 && platf::battery_events[2].percentage == 42);
+    disconnect(a);
   } else if (test == "shortcut_swallowed") {
     key(a, VKEY_LSHIFT); key(a, VKEY_LCONTROL); key(a, VKEY_LMENU);
     auto count = platf::keyboard_events.size(); key(a, 0x70); key(a, 0x70, true);
@@ -347,6 +371,7 @@ def main():
         'void free_gamepad(platf::input_t &platf_input, int id)',
         'void reset_gamepad(gamepad_t &gamepad)',
         'void passthrough(std::shared_ptr<input_t> &input, PNV_MULTI_CONTROLLER_PACKET packet)',
+        'void passthrough(std::shared_ptr<input_t> &input, PSS_CONTROLLER_BATTERY_PACKET packet)',
         'void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM &permission)',
         'void reset(std::shared_ptr<input_t> &input)',
         'bool has_gamepad(const std::shared_ptr<input_t> &input)',

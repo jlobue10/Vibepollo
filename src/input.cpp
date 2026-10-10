@@ -91,7 +91,13 @@ namespace input {
    * @return Clamped native endianess float value.
    */
   float from_clamped_netfloat(netfloat f, float min, float max) {
-    return std::clamp(from_netfloat(f), min, max);
+    const float value = from_netfloat(f);
+    if (std::isnan(value)) {
+      // NaN compares false against both bounds, so std::clamp would pass it on into the
+      // float-to-integer conversions of the touch and pen injection paths.
+      return min;
+    }
+    return std::clamp(value, min, max);
   }
 
   struct held_key_t {
@@ -175,6 +181,11 @@ namespace input {
 
     int id;
 
+    // Set when the platform could not allocate this slot. Cleared when the client removes or
+    // re-adds the controller, so a driver that refuses the slot is not re-probed (and the
+    // failure not re-logged) on every state packet.
+    bool alloc_failed {};
+
     // When emulating the HOME button, we may need to artificially release the back button.
     // Afterwards, the gamepad state on sunshine won't match the state on Moonlight.
     // To prevent Sunshine from sending erroneous input data to the active application,
@@ -198,6 +209,7 @@ namespace input {
       free_gamepad(platf_input, gamepad.id);
       gamepad.id = -1;
     }
+    gamepad.alloc_failed = false;
     gamepad.gamepad_state = {};
     gamepad.back_button_state = button_state_e::NONE;
   }
@@ -1082,10 +1094,13 @@ namespace input {
       return;
     }
 
-    if (input->gamepads[packet->controllerNumber].id >= 0) {
+    auto &gamepad = input->gamepads[packet->controllerNumber];
+    if (gamepad.id >= 0) {
       BOOST_LOG(warning) << "ControllerNumber already allocated ["sv << packet->controllerNumber << ']';
       return;
     }
+    // A new arrival is a new attempt, whatever an earlier one did.
+    gamepad.alloc_failed = false;
 
     platf::gamepad_arrival_t arrival {
       packet->type,
@@ -1101,10 +1116,11 @@ namespace input {
     // Allocate a new gamepad
     if (platf::alloc_gamepad(platf_input, {id, packet->controllerNumber}, arrival, input->feedback_queue)) {
       free_id(gamepadMask, id);
+      gamepad.alloc_failed = true;
       return;
     }
 
-    input->gamepads[packet->controllerNumber].id = id;
+    gamepad.id = id;
     input->allocated_gamepads.fetch_or(1u << packet->controllerNumber, std::memory_order_relaxed);
   }
 
@@ -1332,10 +1348,15 @@ namespace input {
       return;
     }
 
+    // The driver profiles accept 0..100 only; the ViGEm DS4 report wrapped a larger value
+    // and corrupted its special-status nibble.
+    const std::uint8_t percentage = packet->batteryPercentage == LI_BATTERY_PERCENTAGE_UNKNOWN ?
+                                      static_cast<std::uint8_t>(LI_BATTERY_PERCENTAGE_UNKNOWN) :
+                                      std::min<std::uint8_t>(packet->batteryPercentage, 100);
     platf::gamepad_battery_t battery {
       {gamepad.id, packet->controllerNumber},
       packet->batteryState,
-      packet->batteryPercentage
+      percentage
     };
 
     platf::gamepad_battery(platf_input, battery);
@@ -1356,7 +1377,7 @@ namespace input {
     // may never send another packet under its own controller number.
     for (std::size_t i = 0; i < input->gamepads.size(); ++i) {
       if (!(packet->activeGamepadMask & (1 << i)) &&
-          (input->gamepads[i].id >= 0 || input->gamepads[i].back_timeout_id)) {
+          (input->gamepads[i].id >= 0 || input->gamepads[i].back_timeout_id || input->gamepads[i].alloc_failed)) {
         reset_gamepad(input->gamepads[i]);
         input->allocated_gamepads.fetch_and(~(1u << i), std::memory_order_relaxed);
       }
@@ -1366,7 +1387,7 @@ namespace input {
 
     // If this is an event for a new gamepad, create the gamepad now. Ideally, the client would
     // send a controller arrival instead of this but it's still supported for legacy clients.
-    if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0) {
+    if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0 && !gamepad.alloc_failed) {
       auto id = alloc_id(gamepadMask);
       if (id < 0) {
         return;
@@ -1374,6 +1395,11 @@ namespace input {
 
       if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, {}, input->feedback_queue)) {
         free_id(gamepadMask, id);
+        // Every state packet would otherwise repeat the attempt (a driver connect, enumeration
+        // and handshake on the single input worker) and its error lines.
+        gamepad.alloc_failed = true;
+        BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber
+                           << "] could not be allocated; ignoring its input until the client removes and re-adds it"sv;
         return;
       }
 
@@ -1389,7 +1415,9 @@ namespace input {
         // with its mask bit clear; the loop above already freed the slot.
         return;
       }
-      BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber << "] not allocated"sv;
+      if (!gamepad.alloc_failed) {
+        BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber << "] not allocated"sv;
+      }
       return;
     }
 

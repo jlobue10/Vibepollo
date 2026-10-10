@@ -40,8 +40,11 @@ struct Log {template<class T> Log& operator<<(const T&){return *this;}};
 constexpr int MAX_GAMEPADS=16;
 constexpr int LI_CTYPE_STEAM=4,LI_CTYPE_PS=2,LI_CTYPE_NINTENDO=3,LI_CTYPE_XBOX=1;
 constexpr int LI_CCAP_ACCEL=1,LI_CCAP_GYRO=2,LI_CCAP_TOUCHPAD=4,LI_CCAP_RGB_LED=8;
-namespace config {struct {std::string gamepad="auto";bool motion_as_ds4=false,touchpad_as_ds4=false;} input;}
+namespace config {struct {std::string gamepad="auto";bool motion_as_ds4=false,touchpad_as_ds4=false,native_pen_touch=false;} input;}
+void* GetModuleHandleA(const char*){return nullptr;}
+void* GetProcAddress(void*,const char*){return nullptr;}
 namespace platf {
+namespace platform_caps {typedef std::uint32_t caps_t;constexpr caps_t pen_touch=0x01,controller_touch=0x02;}
 PROFILE_ENUM;
 namespace vhf_gamepad {BACKEND_ENUM; BACKEND_SELECT}
 struct gamepad_id_t {int globalIndex,clientRelativeIndex;};
@@ -107,11 +110,27 @@ int main(){
  input=std::make_shared<input_raw_t>();
  check(alloc_gamepad(input,{-1,0},{LI_CTYPE_STEAM},std::make_shared<int>(1))==-1&&
        input->vhf->calls.empty(),"invalid slot performs no allocation");
+ // The advertised controller-touch capability must agree with the profile the selection can
+ // yield: plain vhf gives a Steam/PlayStation client a pad-bearing profile whatever the
+ // motion/touchpad preferences say, so the flag stays on; only Xbox/Switch selections drop it.
+ config::input.motion_as_ds4=false;config::input.touchpad_as_ds4=false;
+ for(const char* setting:{"vhf","auto","vhf_ds4","vhf_ds5","vhf_steam","ds4","ds5"}){
+  config::input.gamepad=setting;
+  check((get_capabilities()&platform_caps::controller_touch)!=0,"controller touch advertised for a selection that can yield a touchpad");
+ }
+ config::input.gamepad="vhf";
+ check(vhf_desired_profile({LI_CTYPE_STEAM})==vhf_profile_e::steam_controller&&vhf_desired_profile({LI_CTYPE_PS})==vhf_profile_e::dualsense,
+       "plain vhf without the ds4 preferences still selects the client's pad-bearing profile");
+ for(const char* setting:{"vhf_xbox","vhf_xbox_one","vhf_switch","x360"}){
+  config::input.gamepad=setting;
+  check((get_capabilities()&platform_caps::controller_touch)==0,"controller touch not advertised for a selection without a touchpad");
+ }
  std::cout<<checks<<" checks; "<<errors<<" failures\n";return errors?1:0;
 }
 '''
 code=prefix+'\n'.join(block(source,m) for m in [
-    'static bool vhf_gamepad_selected(', 'static vhf_profile_e vhf_desired_profile(', 'int alloc_gamepad(input_t &'])+suffix
+    'static bool vhf_gamepad_selected(', 'static bool vhf_gamepad_is_xbox(', 'static vhf_profile_e vhf_desired_profile(',
+    'int alloc_gamepad(input_t &', 'platform_caps::caps_t get_capabilities('])+suffix
 with tempfile.TemporaryDirectory(prefix='vhf-fallback-') as directory:
     work=Path(directory)
     (work/'test.cpp').write_text(code)

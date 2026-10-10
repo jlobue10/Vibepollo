@@ -236,6 +236,10 @@ namespace platf::vhf_gamepad {
    * @param event_type The client event type.
    * @return The protocol value, or the cancel-all value for anything unmapped.
    */
+  /// Returned by to_protocol_touch_event for an event the pads have no equivalent for
+  /// (HOVER_LEAVE, BUTTON_ONLY, undefined values); the caller drops it.
+  constexpr std::uint8_t PROTOCOL_TOUCH_EVENT_UNSUPPORTED = 0xFF;
+
   [[nodiscard]] std::uint8_t to_protocol_touch_event(std::uint8_t event_type) noexcept;
 
   /**

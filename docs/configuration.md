@@ -489,7 +489,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             <br>
             <br>
             When disabled, motion sensors will not be taken into account during gamepad type selection.
-            @hint{Only applies when gamepad is set to auto.}
+            @hint{Applies when gamepad is set to auto or vhf.}
         </td>
     </tr>
     <tr>
@@ -517,7 +517,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             <br>
             <br>
             When disabled, touchpad presence will not be taken into account during gamepad type selection.
-            @hint{Only applies when gamepad is set to auto.}
+            @hint{Applies when gamepad is set to auto or vhf.}
         </td>
     </tr>
     <tr>
