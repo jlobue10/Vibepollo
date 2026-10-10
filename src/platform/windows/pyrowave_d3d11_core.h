@@ -10,8 +10,9 @@
  *        writes three NT-shared plane textures
  *     -> D3D11 signals a shared fence and flushes
  *     -> PyroWave's own Vulkan device on the same adapter imports the planes and the
- *        fence (VK_KHR_external_memory_win32 / external_semaphore_win32), waits for
- *        the fence on the GPU, encodes, and the CPU waits for the result
+ *        fence (VK_KHR_external_memory_win32 / external_semaphore_win32). The CPU
+ *        confirms conversion with a bounded wait before submitting the GPU acquire
+ *        and encode, then waits on a second shared fence for the result
  *     -> the bitstream is packetized and framed (src/pyrowave_policy.h)
  *
  * This file has no Sunshine dependencies so it can be driven by a standalone test

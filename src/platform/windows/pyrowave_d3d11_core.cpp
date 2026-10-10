@@ -122,6 +122,7 @@ namespace pyrowave::d3d11 {
 
     // Handoff to PyroWave: the planes and a fence signalled once they are written.
     ComPtr<ID3D11Fence> convert_fence;
+    ComPtr<ID3D11Fence> completion_fence;
     std::uint64_t convert_value = 0;
 
     // Encoding.
@@ -335,15 +336,28 @@ namespace pyrowave::d3d11 {
         return false;
       }
 
-      // Our own exportable timeline (no handle imported) that each encode signals on
-      // completion; see pw_release.
+      // Import a second D3D11 fence for completion, just like the conversion fence.
+      // The bundled sync API rejects a null handle without TEMPORARY, which is
+      // invalid for timelines. Import also works on drivers without fence export.
+      hr = device11->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&completion_fence));
+      if (FAILED(hr)) {
+        error("completion fence creation failed [" + hresult_string(hr) + "]");
+        return false;
+      }
+      handle = nullptr;
+      hr = completion_fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &handle);
+      if (FAILED(hr)) {
+        error("sharing the completion fence failed [" + hresult_string(hr) + "]");
+        return false;
+      }
       pyrowave_sync_object_create_info release_info {};
       release_info.device = pw_device;
-      release_info.external_handle = pyrowave_os_handle(0);
+      release_info.external_handle = pyrowave_os_handle(handle);
       release_info.handle_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
       release_info.semaphore_type = VK_SEMAPHORE_TYPE_TIMELINE;
       result = pyrowave_sync_object_create(&release_info, &pw_release);
       if (result != PYROWAVE_SUCCESS) {
+        CloseHandle(handle);
         error(std::string("creating the encode completion fence failed: ") + pyrowave_result_string(result));
         return false;
       }
@@ -603,16 +617,30 @@ namespace pyrowave::d3d11 {
       return result_e::skipped;
     }
 
-    auto result = pyrowave_encoder_encode_gpu_synchronous(state.pw_encoder, &acquire, &release, &state.pw_buffers, &rate);
+    // Do not submit a Vulkan wait on a conversion value that may never arrive.
+    // Returning after a later encode timeout cannot cancel that queue dependency:
+    // the library still waits for the device to become idle during destruction.
+    // Confirm conversion completion first; retain the GPU acquire for ownership
+    // and visibility of the shared planes.
+    constexpr std::uint64_t k_encode_timeout_ns = 2'000'000'000ull;
+    auto result = pyrowave_sync_object_cpu_wait(state.pw_fence, state.convert_value, k_encode_timeout_ns);
+    if (result != PYROWAVE_SUCCESS) {
+      const HRESULT removed = state.device11 ? state.device11->GetDeviceRemovedReason() : S_OK;
+      state.error(std::string("the conversion did not complete within 2 s") +
+                  (FAILED(removed) ? " [D3D11 device removed: " + hresult_string(removed) + "]" : "") +
+                  "; ending the stream before submitting the encode");
+      return result_e::failed;
+    }
+
+    result = pyrowave_encoder_encode_gpu_synchronous(state.pw_encoder, &acquire, &release, &state.pw_buffers, &rate);
     if (result != PYROWAVE_SUCCESS) {
       state.error(std::string("encode failed: ") + pyrowave_result_string(result));
       return result_e::failed;
     }
 
-    // Bounded wait for the encode. Without it a D3D11 device removal (TDR, adapter
-    // reconfiguration) after the conversion fence was signalled could park this
-    // thread forever inside the library's wait, and with it the session's teardown.
-    constexpr std::uint64_t k_encode_timeout_ns = 2'000'000'000ull;
+    // Bound the host's wait for the encode result as well. A Vulkan device/driver
+    // hang can still affect the library's device-idle teardown; this timeout does
+    // not cancel submitted work.
     result = pyrowave_sync_object_cpu_wait(state.pw_release, state.release_value, k_encode_timeout_ns);
     if (result != PYROWAVE_SUCCESS) {
       const HRESULT removed = state.device11 ? state.device11->GetDeviceRemovedReason() : S_OK;
