@@ -26,6 +26,7 @@ jobs:
       - name: Check input teardown and raw haptic backpressure
         run: |
           python3 tests/input/test_disconnect_release.py
+          python3 tests/input/test_controller_touch_batch.py
           python3 tests/input/test_haptic_queue.py
 
   windows:
