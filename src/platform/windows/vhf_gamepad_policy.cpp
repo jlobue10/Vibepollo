@@ -280,15 +280,16 @@ namespace platf::vhf_gamepad {
     switch (report[0]) {
       case 0x80: {
         // Rumble: type u8, intensity u16, left {speed u16, gain s8}, right {speed u16, gain s8}.
-        // The speeds are already the client's motor range; the host keeps re-sending while
-        // it rumbles and sends zeros to stop, so no hold.
+        // The speeds are already the client's motor range. Steam keeps re-sending while it
+        // rumbles (every <= 50 ms) and sends zeros to stop; the hold is the safety timeout
+        // the real unit applies when those re-sends stop coming.
         if (haptic.length < 10) {
           return 0;
         }
         rumble.left = read_le16(&report[4]);
         rumble.right = read_le16(&report[7]);
-        rumble.left_hold_ms = 0;
-        rumble.right_hold_ms = 0;
+        rumble.left_hold_ms = STEAM_HAPTIC_RUMBLE_TIMEOUT_MS;
+        rumble.right_hold_ms = STEAM_HAPTIC_RUMBLE_TIMEOUT_MS;
         return STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT;
       }
       case 0x81: {

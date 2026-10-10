@@ -212,6 +212,10 @@ namespace platf::vhf_gamepad {
   /// Steam re-sends a test-screen click every 100 ms; the hold outlasts one interval by a
   /// few polls so the stream of clicks reads as one buzz, not an off/on stutter.
   constexpr std::uint32_t STEAM_HAPTIC_CLICK_HOLD_MS = 150;
+  /// A 0x80 rumble report with no follow-up: the real unit stops after a safety timeout
+  /// (Steam re-sends every <= 50 ms while it rumbles), so the synthesized rumble must stop
+  /// too when the sender dies or its zero report is lost.
+  constexpr std::uint32_t STEAM_HAPTIC_RUMBLE_TIMEOUT_MS = 200;
 
   /**
    * @brief Folds a haptic report into the synthesized rumble state.
