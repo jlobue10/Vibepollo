@@ -1430,14 +1430,20 @@ namespace input {
             state.buttonFlags |= platf::HOME;
             platf::gamepad_update(platf_input, gamepad.id, state);
 
-            // Sleep for a short time to allow the input to be detected
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-            // Release Home button
-            state.buttonFlags &= ~platf::HOME;
-            platf::gamepad_update(platf_input, gamepad.id, state);
-
             gamepad.back_timeout_id = nullptr;
+
+            // Hold it long enough to be detected, then release from another task:
+            // sleeping here would stall the only input worker, and with it every
+            // other client's controller, pad and motion packets.
+            task_pool.pushDelayed([input, controller]() {
+              auto &gamepad = input->gamepads[controller];
+              if (gamepad.id < 0) {
+                return;  // freed while the button was held
+              }
+              auto &state = gamepad.gamepad_state;
+              state.buttonFlags &= ~platf::HOME;
+              platf::gamepad_update(platf_input, gamepad.id, state);
+            }, std::chrono::milliseconds(100));
           };
 
           gamepad.back_timeout_id = task_pool.pushDelayed(std::move(f), config::input.back_button_timeout).task_id;
@@ -1650,6 +1656,13 @@ namespace input {
     // We can only batch entries for the same controller, but allow batching attempts to continue
     // in case we have more packets for this controller later in the queue.
     if (dest->controllerNumber != src->controllerNumber) {
+      return batch_result_e::not_batchable;
+    }
+
+    // Each physical pad is its own pointer space: a dual-touchpad Steam Controller
+    // client sends pointer id 0 on both pads, so a move on pad 1 must not replace
+    // the queued move on pad 0 (that froze the left pad under backlog).
+    if (dest->touchpadIndex != src->touchpadIndex) {
       return batch_result_e::not_batchable;
     }
 

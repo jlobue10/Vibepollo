@@ -533,8 +533,15 @@ namespace {
   }
 
 
+  TEST_F(VhfGamepadPolicyTest, TouchPointerKeysSeparatePadsSharingAPointerId) {
+    using platf::vhf_gamepad::touch_pointer_key;
+    EXPECT_NE(touch_pointer_key(0, 0), touch_pointer_key(1, 0));
+    EXPECT_EQ(touch_pointer_key(0, 5), 5u);
+    EXPECT_NE(touch_pointer_key(1, 0), touch_pointer_key(0, 1));
+  }
+
   TEST_F(VhfGamepadPolicyTest, SteamSplitPadsKeepExactlyOneOwnerPerHalf) {
-    std::map<std::uint32_t, std::uint8_t> pointers;
+    std::map<std::uint64_t, std::uint8_t> pointers;
     const auto send = [&](lvg::touch_event event, std::uint32_t pointer, float x) {
       return platf::vhf_gamepad::map_steam_touch(pointers, static_cast<std::uint8_t>(event), pointer, x);
     };
