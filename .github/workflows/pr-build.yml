@@ -47,13 +47,17 @@ jobs:
         run: |
           python3 tests/input/test_recv_ping_shutdown.py
           python3 tests/input/test_start_guard_limiter.py
-      - name: Check mouse release ownership, browser/peer-state lifetimes and Windows mouse mapping
+      - name: Check mouse release ownership and Windows mouse mapping
         run: |
           python3 tests/input/test_delayed_mouse_release.py
-          python3 tests/input/test_browser_disconnect.py
-          python3 tests/input/test_peer_state_bridge.py
           python3 tests/input/test_windows_absolute_mouse.py
           python3 tests/input/test_windows_mouse_keys.py
+      - name: Fetch the libwebrtc C header the browser/peer-state harnesses read
+        run: git submodule update --init --depth 1 third-party/libwebrtc
+      - name: Check browser input context and peer-state bridge lifetimes
+        run: |
+          python3 tests/input/test_browser_disconnect.py
+          python3 tests/input/test_peer_state_bridge.py
       - name: Check PyroWave fence import and conversion timeout ordering
         run: python3 tests/input/test_pyrowave_sync.py
 
