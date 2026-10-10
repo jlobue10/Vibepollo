@@ -2036,7 +2036,7 @@ this option to replace the running app immediately. The default is `true`.
     <tr>
         <td rowspan="3">Choices</td>
         <td>0</td>
-        <td>Use half the stream's FPS as the minimum target.</td>
+        <td>Use a fifth of the stream's FPS (at least 10) as the minimum target; PyroWave streams always keep the full frame rate.</td>
     </tr>
     <tr>
         <td>1-1000</td>
