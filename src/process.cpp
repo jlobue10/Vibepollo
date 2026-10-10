@@ -2831,7 +2831,7 @@ namespace proc {
       if (deferred_launch::claim(_deferred_launch, _deferred_launch_in_flight)) {
         BOOST_LOG(info) << "User session detected; resuming deferred launch for app '" << _app.name << "' on a launcher thread.";
         try {
-          std::thread([this, app_id = _app_id]() {
+          std::thread([this, app_id = _app_id.load(std::memory_order_acquire)]() {
             resume_deferred_launch(app_id);
           }).detach();
         } catch (const std::exception &e) {
