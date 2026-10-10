@@ -30,6 +30,7 @@ prefix = r"""
 #include <iostream>
 #include <memory>
 #include <string_view>
+#include <thread>
 #include <vector>
 #include "src/thread_safe.h"
 using namespace std::literals;
@@ -90,9 +91,10 @@ int main() {
   encodeResult = 120;
   auto samples2 = std::make_shared<safe::queue_t<std::vector<float>>>(30);
   samples2->raise(std::vector<float>(480, 0.0f));
+  std::thread encoder([&] { encodeThread(samples2, config, std::make_shared<int>(2), other_session_mail); });
+  auto produced = packets->pop();  // the encoder raises it; the sample queue is stopped only afterwards
   samples2->stop();
-  encodeThread(samples2, config, std::make_shared<int>(2), other_session_mail);
-  auto produced = packets->pop();
+  encoder.join();
   check(produced && produced->second.size() == 120 && !other_session_mail->event<bool>(mail::shutdown)->peek(),
         "a successful encode publishes its packet without ending the session");
   std::cout << checks << " checks; " << failures << " failures\n";
