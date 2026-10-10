@@ -43,6 +43,17 @@ jobs:
           python3 tests/input/test_control_thread_lifecycle_gate.py
           python3 tests/input/test_audio_encode_failure.py
           python3 tests/input/test_audio_surround_layout.py
+      - name: Check the pre-capture waits and the failed-start limiter release
+        run: |
+          python3 tests/input/test_recv_ping_shutdown.py
+          python3 tests/input/test_start_guard_limiter.py
+      - name: Check mouse release ownership, browser/peer-state lifetimes and Windows mouse mapping
+        run: |
+          python3 tests/input/test_delayed_mouse_release.py
+          python3 tests/input/test_browser_disconnect.py
+          python3 tests/input/test_peer_state_bridge.py
+          python3 tests/input/test_windows_absolute_mouse.py
+          python3 tests/input/test_windows_mouse_keys.py
       - name: Check PyroWave fence import and conversion timeout ordering
         run: python3 tests/input/test_pyrowave_sync.py
 
