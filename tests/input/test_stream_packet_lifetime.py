@@ -79,10 +79,16 @@ struct encoder_t {REPLACEMENT_DECL};
 }
 namespace audio {using buffer_t = std::vector<uint8_t>; AUDIO_TYPE}
 namespace mail { constexpr std::string_view shutdown = "shutdown"; }
+namespace session {enum class state_e {STOPPING};}
+struct mock_broadcast_t {struct {template<class T> void retire_session(T&) {}} control_server;};
 struct session_t {
  CHANNEL_FIELD
  // The destructor also stops and joins capture threads a throwing start() left running.
  safe::mail_t mail = std::make_shared<safe::mail_raw_t>();
+ bool control_registered = false;  // Control retirement is covered by test_session_start_failure.py.
+ std::atomic<session::state_e> state {};
+ safe::mail_raw_t::event_t<bool> shutdown_event = mail->event<bool>(::mail::shutdown);
+ std::shared_ptr<mock_broadcast_t> broadcast_ref;
  std::thread videoThread, audioThread;
  CHANNEL_DESTRUCTOR
  struct {int lowseq=17;} video;

@@ -523,6 +523,9 @@ namespace stream {
     // If none of those are found, return nullptr
     session_t *get_session(const net::peer_t peer, uint32_t connect_data);
 
+    // Wait until the control thread has released all references to this session.
+    void retire_session(session_t &session);
+
     // Circular dependency:
     //   iterate refers to session
     //   session refers to broadcast_ctx_t
@@ -598,6 +601,12 @@ namespace stream {
     packet_channel_t packet_channel = std::make_shared<packet_channel_state_t>(this);
 
     ~session_t() {
+      // A throwing start() is not published to RTSP's normal stop/join path,
+      // but the shared control server may already know this session.
+      if (control_registered) {
+        state.store(session::state_e::STOPPING, std::memory_order_release);
+        shutdown_event->raise(true);
+      }
       // Also fence partially initialized sessions before any fields are destroyed.
       packet_channel->close();
       // A start() that threw after the capture threads were running would otherwise destroy
@@ -612,6 +621,9 @@ namespace stream {
         if (audioThread.joinable()) {
           audioThread.join();
         }
+      }
+      if (control_registered) {
+        broadcast_ref->control_server.retire_session(*this);
       }
     }
 
@@ -642,6 +654,7 @@ namespace stream {
     std::chrono::steady_clock::time_point pingTimeout;
 
     safe::shared_t<broadcast_ctx_t>::ptr_t broadcast_ref;
+    bool control_registered = false;
 
     boost::asio::ip::address localAddress;
 
@@ -986,6 +999,23 @@ namespace stream {
     return true;
   }
 #endif
+
+  void control_server_t::retire_session(session_t &session) {
+    session.controlEnd.view();
+    // The control thread's shutdown tail also signals controlEnd. Serialize
+    // with that tail and remove any entry it left in the shared registry.
+    auto lg = _sessions.lock();
+    std::erase(*_sessions, &session);
+    if (session.control.peer) {
+      auto ptslg = _peer_to_session.lock();
+      const auto it = _peer_to_session->find(session.control.peer);
+      // ENet can reuse a disconnected peer for a new session before this
+      // destructor runs. Retire only the mapping still owned by this session.
+      if (it != _peer_to_session->end() && it->second == &session) {
+        _peer_to_session->erase(it);
+      }
+    }
+  }
 
   session_t *control_server_t::get_session(const net::peer_t peer, uint32_t connect_data) {
     {
@@ -3708,12 +3738,6 @@ namespace stream {
       }
 #endif
 
-      // Insert this session into the session list
-      {
-        auto lg = session.broadcast_ref->control_server._sessions.lock();
-        session.broadcast_ref->control_server._sessions->push_back(&session);
-      }
-
       auto addr = boost::asio::ip::make_address(addr_string);
       session.video.peer.address(addr);
       session.video.peer.port(0);
@@ -3724,6 +3748,14 @@ namespace stream {
       }
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
+
+      // Publish only after the endpoint and timeout fields read by control
+      // are initialized. Remember publication even if thread creation throws.
+      {
+        auto lg = session.broadcast_ref->control_server._sessions.lock();
+        session.broadcast_ref->control_server._sessions->push_back(&session);
+        session.control_registered = true;
+      }
 
       if (!session.audio_disabled) {
         session.audioThread = std::thread {audioThread, &session};

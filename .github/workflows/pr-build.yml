@@ -33,7 +33,9 @@ jobs:
           python3 tests/input/test_netfloat_validation.py
           python3 tests/input/test_vigem_touch_pointers.py
       - name: Check queued and in-flight stream packet lifetimes
-        run: python3 tests/input/test_stream_packet_lifetime.py
+        run: |
+          python3 tests/input/test_stream_packet_lifetime.py
+          python3 tests/input/test_session_start_failure.py
       - name: Check ANNOUNCE bounds, the control-thread lifecycle gate and audio encode failure scope
         run: |
           python3 tests/input/test_announce_validation.py
