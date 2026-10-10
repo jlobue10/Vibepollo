@@ -2250,6 +2250,14 @@ namespace rtsp_stream {
 
       if (config::video.max_bitrate > 0) {
         if (config::video.max_bitrate < configuredBitrateKbps) {
+          if (config.monitor.videoFormat == 3) {
+            // PyroWave sizes its bitrate per pixel and frame (intra-only); a cap set
+            // for HEVC/AV1 leaves it several times short, which shows as a uniformly
+            // soft picture with nothing else in the log explaining why.
+            BOOST_LOG(warning) << "max_bitrate (" << config::video.max_bitrate
+                               << " kbps) clamps the PyroWave request of " << configuredBitrateKbps
+                               << " kbps; the picture will be softer than the client asked for";
+          }
           configuredBitrateKbps = config::video.max_bitrate;
         }
       }
