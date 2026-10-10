@@ -7,6 +7,7 @@ python3 tests/input/test_delayed_mouse_release.py
 python3 tests/input/test_disconnect_release.py
 python3 tests/input/test_browser_disconnect.py
 python3 tests/input/test_peer_state_bridge.py
+python3 tests/input/test_gamepad_feedback.py
 ```
 
 These scripts compile the production handlers with a deterministic task worker
@@ -18,6 +19,11 @@ independent browser input contexts sharing capture coordinates, and WebRTC
 connection-loss/recovery callbacks.
 
 The scripts do not replace a full platform build or driver-level testing.
+The feedback test executes production VHF/ViGEm dispatch against a real mailbox
+with fake driver slots. It checks LED forwarding when rumble is disabled,
+optional-category deduplication, first zero states after slot allocation, and
+retry after a rejected queue insertion. It uses ASan/UBSan and needs
+`nlohmann/json` headers (`AUDIT_JSON_INCLUDE` can override the include directory).
 The WebRTC change includes the `third-party/libwebrtc` submodule's C bridge;
 rebuild that dependency before linking Vibepollo (the cached library needs the
 new `lwrtc_peer_register_state_callback` export).
