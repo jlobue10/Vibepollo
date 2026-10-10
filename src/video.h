@@ -9,6 +9,7 @@
 #include "platform/common.h"
 #include "pyrowave_policy.h"
 #include "video_policy.h"
+#include "stream_packet.h"
 #include "thread_safe.h"
 #include "video_colorspace.h"
 
@@ -341,19 +342,21 @@ namespace video {
     virtual size_t data_size() = 0;
 
     struct replace_t {
-      std::string_view old;
-      std::string_view _new;
+      std::string old;
+      std::string _new;
 
       KITTY_DEFAULT_CONSTR_MOVE(replace_t)
 
-      replace_t(std::string_view old, std::string_view _new) noexcept:
-          old {std::move(old)},
-          _new {std::move(_new)} {
+      replace_t(std::string_view old, std::string_view _new):
+          old {old},
+          _new {_new} {
       }
     };
 
-    std::vector<replace_t> *replacements = nullptr;
-    void *channel_data = nullptr;
+    // An IDR may outlive its encoder (including an in-session reinitialization).
+    // Own the replacement bytes and share their immutable table with the packet.
+    std::shared_ptr<const std::vector<replace_t>> replacements;
+    stream::packet_channel_t channel_data = nullptr;
     bool after_ref_frame_invalidation = false;
     // Pacing/scheduled timestamp used for transport timing.
     /// PyroWave record framing: frame bytes through the coarsest wavelet level, whose
@@ -482,7 +485,7 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    stream::packet_channel_t channel_data
   );
 
   bool validate_encoder(

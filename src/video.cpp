@@ -1287,7 +1287,7 @@ namespace video {
     avcodec_ctx_t avcodec_ctx;
     std::unique_ptr<platf::avcodec_encode_device_t> device;
 
-    std::vector<packet_raw_t::replace_t> replacements;
+    std::shared_ptr<std::vector<packet_raw_t::replace_t>> replacements = std::make_shared<std::vector<packet_raw_t::replace_t>>();
 
     cbs::nal_t sps;
     cbs::nal_t vps;
@@ -1600,7 +1600,7 @@ namespace video {
 
     config_t config;
     int frame_nr;
-    void *channel_data;
+    stream::packet_channel_t channel_data;
     hdr_latch_t hdr_latch;
     // Last HDR info raised to this session's client, used to suppress duplicates on reinit.
     std::optional<hdr_info_raw_t> last_hdr_info;
@@ -3564,7 +3564,7 @@ namespace video {
     int64_t frame_nr,
     avcodec_encode_session_t &session,
     safe::mail_raw_t::queue_t<packet_t> &packets,
-    void *channel_data,
+    const stream::packet_channel_t &channel_data,
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
     std::optional<std::chrono::steady_clock::time_point> capture_timestamp,
     std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp
@@ -3616,7 +3616,7 @@ namespace video {
           sps = std::move(hevc.sps);
           vps = std::move(hevc.vps);
 
-          session.replacements.emplace_back(
+          session.replacements->emplace_back(
             std::string_view((char *) std::begin(vps.old), vps.old.size()),
             std::string_view((char *) std::begin(vps._new), vps._new.size())
           );
@@ -3624,7 +3624,7 @@ namespace video {
 
         session.inject = 0;
 
-        session.replacements.emplace_back(
+        session.replacements->emplace_back(
           std::string_view((char *) std::begin(sps.old), sps.old.size()),
           std::string_view((char *) std::begin(sps._new), sps._new.size())
         );
@@ -3636,7 +3636,7 @@ namespace video {
         packet->host_processing_timestamp = host_processing_timestamp;
       }
 
-      packet->replacements = &session.replacements;
+      packet->replacements = packet->is_idr() ? session.replacements : nullptr;
       packet->channel_data = channel_data;
       if (webrtc_stream::has_active_sessions()) {
         webrtc_stream::submit_video_packet(*packet);
@@ -3652,7 +3652,7 @@ namespace video {
     int64_t frame_nr,
     nvenc_encode_session_t &session,
     safe::mail_raw_t::queue_t<packet_t> &packets,
-    void *channel_data,
+    const stream::packet_channel_t &channel_data,
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
     std::optional<std::chrono::steady_clock::time_point> capture_timestamp,
     std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp
@@ -3687,7 +3687,7 @@ namespace video {
     amf_encode_session_t &session,
     std::vector<amf::amf_encoded_frame> &encoded_frames,
     safe::mail_raw_t::queue_t<packet_t> &packets,
-    void *channel_data
+    const stream::packet_channel_t &channel_data
   ) {
     for (auto &encoded_frame : encoded_frames) {
       if (encoded_frame.data.empty()) {
@@ -3723,7 +3723,7 @@ namespace video {
     int64_t frame_nr,
     amf_encode_session_t &session,
     safe::mail_raw_t::queue_t<packet_t> &packets,
-    void *channel_data,
+    const stream::packet_channel_t &channel_data,
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
     std::optional<std::chrono::steady_clock::time_point> capture_timestamp,
     std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp
@@ -3756,7 +3756,7 @@ namespace video {
     int64_t frame_nr,
     encode_session_t &session,
     safe::mail_raw_t::queue_t<packet_t> &packets,
-    void *channel_data,
+    const stream::packet_channel_t &channel_data,
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
     std::optional<std::chrono::steady_clock::time_point> capture_timestamp,
     std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp
@@ -4977,7 +4977,7 @@ namespace video {
     safe::signal_t &reinit_event,
     const encoder_t &encoder,
     hdr_latch_t *hdr_latch,
-    void *channel_data,
+    stream::packet_channel_t channel_data,
     std::chrono::steady_clock::time_point initialization_deadline,
     initialization_cancel_t initialization_cancelled,
     std::optional<hdr_info_raw_t> &last_hdr_info,
@@ -5302,7 +5302,7 @@ namespace video {
     // Per-session encode-loop accounting. When several clients share one capture target, a
     // single client can freeze while the others stream fine, and nothing else in the log
     // distinguishes a session that is encoding live frames from one that is starved or gated.
-    // The channel_data pointer is a stable per-session tag for correlating these lines.
+    // The channel_data handle is a stable per-session tag for correlating these lines.
     struct {
       uint64_t popped_real = 0;
       uint64_t popped_placeholder = 0;
@@ -6221,7 +6221,7 @@ namespace video {
     std::shared_ptr<platf::display_t> disp,
     const sunshine_colorspace_t &colorspace,
     safe::signal_t &reinit_event,
-    void *channel_data
+    stream::packet_channel_t channel_data
   ) {
     pyrowave::host::session_params_t params;
     params.width = config.width;
@@ -6343,7 +6343,7 @@ namespace video {
   void capture_async(
     safe::mail_t mail,
     config_t &config,
-    void *channel_data
+    stream::packet_channel_t channel_data
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
@@ -6590,7 +6590,7 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    void *channel_data
+    stream::packet_channel_t channel_data
   ) {
     // Snapshot the encoder pointer to avoid races with concurrent probe_encoders() calls
     auto *encoder = chosen_encoder;
