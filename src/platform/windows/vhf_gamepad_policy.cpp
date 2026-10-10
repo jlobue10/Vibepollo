@@ -18,8 +18,8 @@ extern "C" {
 namespace platf::vhf_gamepad {
 
   std::optional<std::uint8_t> map_steam_touch(
-    std::map<std::uint32_t, std::uint8_t> &pointers,
-    std::uint8_t event, std::uint32_t pointer, float x) {
+    std::map<std::uint64_t, std::uint8_t> &pointers,
+    std::uint8_t event, std::uint64_t pointer, float x) {
     const auto kind = static_cast<lvg::touch_event>(event);
     if (kind == lvg::touch_event::cancel_all) {
       pointers.clear();

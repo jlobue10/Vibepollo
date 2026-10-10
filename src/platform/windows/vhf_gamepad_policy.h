@@ -15,12 +15,19 @@
 
 namespace platf::vhf_gamepad {
 
+  // Contacts are tracked per (touchpad, pointer): a dual-touchpad client reuses
+  // pointer id 0 on both pads, and a backend with one pad must still keep the
+  // two fingers apart.
+  [[nodiscard]] constexpr std::uint64_t touch_pointer_key(std::uint8_t touchpad, std::uint32_t pointer) noexcept {
+    return (static_cast<std::uint64_t>(touchpad) << 32) | pointer;
+  }
+
   // Single-touch Steam pads transported as the two halves of a DS4 touchpad.
   // A pointer owns its original half until release. Unknown releases/moves and
   // additional fingers on an occupied pad must not affect the existing owner.
   [[nodiscard]] std::optional<std::uint8_t> map_steam_touch(
-    std::map<std::uint32_t, std::uint8_t> &pointers,
-    std::uint8_t event, std::uint32_t pointer, float x);
+    std::map<std::uint64_t, std::uint8_t> &pointers,
+    std::uint8_t event, std::uint64_t pointer, float x);
 
   enum class backend_e {
     unavailable,

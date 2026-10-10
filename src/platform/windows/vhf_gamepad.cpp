@@ -91,7 +91,7 @@ namespace platf {
       // lifetime lock, so a stream of pad events does not serialize every other
       // session's input and the feedback thread behind an exclusive lock.
       std::mutex touch_lock;
-      std::map<std::uint32_t, std::uint8_t> contact_of_pointer;
+      std::map<std::uint64_t, std::uint8_t> contact_of_pointer;  // keyed by touch_pointer_key
       std::uint8_t free_contacts {0x3};
       // The client's LI_CCAP_* flags for this controller (0 when unknown).
       std::uint16_t client_capabilities {};
@@ -101,6 +101,7 @@ namespace platf {
       std::atomic<bool> submit_failed {false};
 
       // Only the feedback thread touches these.
+      bool poll_failed {};  // logged once per failure run, not at every 8 ms poll
       bool have_feedback {};
       vhf_gamepad::rumble_rgb_t last_feedback {};
       // Rumble stood in for Steam Controller haptics on a client without the pads, with the
@@ -118,6 +119,7 @@ namespace platf {
         client_capabilities = 0;
         feedback_queue.reset();
         submit_failed.store(false, std::memory_order_relaxed);
+        poll_failed = false;
         synth_rumble = {};
         synth_left_until.reset();
         synth_right_until.reset();
@@ -465,12 +467,14 @@ namespace platf {
           lvg::feedback_event event {};
           const DWORD status = client.poll_feedback(static_cast<std::uint32_t>(nr), &event);
           if (status != ERROR_SUCCESS) {
-            if (status != ERROR_NO_MORE_ITEMS) {
+            if (status != ERROR_NO_MORE_ITEMS && !slots[nr].poll_failed) {
+              slots[nr].poll_failed = true;
               BOOST_LOG(debug) << "VHF gamepad "sv << nr << " feedback poll failed ["sv
                                << util::hex(status).to_string_view() << ']';
             }
             break;
           }
+          slots[nr].poll_failed = false;
 
           vhf_gamepad::steam_haptic_t haptic {};
           if (vhf_gamepad::decode_steam_haptic(event, haptic)) {
@@ -704,6 +708,8 @@ namespace platf {
     std::lock_guard touch_guard {slot.touch_lock};
 
     const std::uint8_t event = vhf_gamepad::to_protocol_touch_event(touch_event.eventType);
+    const std::uint64_t pointer_key =
+      vhf_gamepad::touch_pointer_key(touch_event.touchpadIndex, touch_event.pointerId);
     std::uint8_t contact = 0;
     float x = touch_event.x;
 
@@ -718,7 +724,7 @@ namespace platf {
       // down and keep it for the pointer's moves and release, since a release carries
       // no position. Each half stretches back to its pad's full width.
       const auto mapped = vhf_gamepad::map_steam_touch(slot.contact_of_pointer, event,
-                                                      touch_event.pointerId, x);
+                                                      pointer_key, x);
       if (!mapped) return;
       contact = *mapped;
       x = std::clamp(contact ? (x - 0.5f) * 2.0f : x * 2.0f, 0.0f, 1.0f);
@@ -726,17 +732,17 @@ namespace platf {
       slot.contact_of_pointer.clear();
       slot.free_contacts = 0x3;
     } else if (event == static_cast<std::uint8_t>(lvg::touch_event::down)) {
-      const auto existing = slot.contact_of_pointer.find(touch_event.pointerId);
+      const auto existing = slot.contact_of_pointer.find(pointer_key);
       if (existing != slot.contact_of_pointer.end()) {
         contact = existing->second;
       } else if (slot.free_contacts & 0x1) {
         contact = 0;
         slot.free_contacts &= ~0x1;
-        slot.contact_of_pointer[touch_event.pointerId] = contact;
+        slot.contact_of_pointer[pointer_key] = contact;
       } else if (slot.free_contacts & 0x2) {
         contact = 1;
         slot.free_contacts &= ~0x2;
-        slot.contact_of_pointer[touch_event.pointerId] = contact;
+        slot.contact_of_pointer[pointer_key] = contact;
       } else {
         // The pad has two contacts; a third would have to evict one, and
         // evicting produces a phantom jump on whichever finger loses.
@@ -744,7 +750,7 @@ namespace platf {
         return;
       }
     } else {
-      const auto existing = slot.contact_of_pointer.find(touch_event.pointerId);
+      const auto existing = slot.contact_of_pointer.find(pointer_key);
       if (existing == slot.contact_of_pointer.end()) {
         return;  // A move or release for a pointer that never went down.
       }

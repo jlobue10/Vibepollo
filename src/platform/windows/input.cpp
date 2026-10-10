@@ -86,8 +86,9 @@ namespace platf {
       DS4_REPORT_EX ds4;
     } report;
 
-    // Map from pointer ID to pointer index
-    std::map<uint32_t, uint8_t> pointer_id_map;
+    // Map from (touchpad, pointer ID) to pointer index: a dual-touchpad client
+    // reuses pointer id 0 on both pads.
+    std::map<uint64_t, uint8_t> pointer_id_map;
     uint8_t available_pointers;
 
     uint8_t client_relative_index;
@@ -1814,11 +1815,12 @@ namespace platf {
 
     auto &report = gamepad.report.ds4.Report;
 
+    const uint64_t pointer_key = (static_cast<uint64_t>(touch.touchpadIndex) << 32) | touch.pointerId;
     uint8_t pointerIndex;
     if (touch.eventType == LI_TOUCH_EVENT_DOWN) {
       if (gamepad.available_pointers & 0x1) {
         // Reserve pointer index 0 for this touch
-        gamepad.pointer_id_map[touch.pointerId] = pointerIndex = 0;
+        gamepad.pointer_id_map[pointer_key] = pointerIndex = 0;
         gamepad.available_pointers &= ~(1 << pointerIndex);
 
         // Set pointer 0 down
@@ -1826,7 +1828,7 @@ namespace platf {
         report.sCurrentTouch.bIsUpTrackingNum1++;
       } else if (gamepad.available_pointers & 0x2) {
         // Reserve pointer index 1 for this touch
-        gamepad.pointer_id_map[touch.pointerId] = pointerIndex = 1;
+        gamepad.pointer_id_map[pointer_key] = pointerIndex = 1;
         gamepad.available_pointers &= ~(1 << pointerIndex);
 
         // Set pointer 1 down
@@ -1847,7 +1849,7 @@ namespace platf {
       // All pointers are now available
       gamepad.available_pointers = 0x3;
     } else {
-      auto i = gamepad.pointer_id_map.find(touch.pointerId);
+      auto i = gamepad.pointer_id_map.find(pointer_key);
       if (i == gamepad.pointer_id_map.end()) {
         BOOST_LOG(warning) << "Pointer ID not found! Did the client miss a touch down event?"sv;
         return;
