@@ -1257,8 +1257,10 @@ namespace rtsp_stream {
 
       std::vector<std::shared_ptr<stream::session_t>> to_cleanup;
       bool removed_pending = false;
+      bool pending_launches_remain = false;
       client_disconnect_result_t result;
       [[maybe_unused]] bool vulkan_hdr_layer_active = false;
+      std::optional<std::array<std::uint8_t, 16>> virtual_display_guid_bytes;
       {
         std::lock_guard<std::mutex> lock {_launch_sessions_mutex};
         for (auto it = _launch_sessions.begin(); it != _launch_sessions.end();) {
@@ -1266,12 +1268,19 @@ namespace rtsp_stream {
           if (pending && pending->client_uuid == client_uuid) {
             result.pending_roles.push_back(pending->role);
             result.pending_generations.push_back(pending->role_generation);
+            const auto &guid_bytes = pending->virtual_display_guid_bytes;
+            if (std::any_of(guid_bytes.begin(), guid_bytes.end(), [](const std::uint8_t byte) {
+                  return byte != 0;
+                })) {
+              virtual_display_guid_bytes = guid_bytes;
+            }
             it = _launch_sessions.erase(it);
             removed_pending = true;
           } else {
             ++it;
           }
         }
+        pending_launches_remain = !_launch_sessions.empty();
       }
       {
         auto lg = _session_state.lock();
@@ -1297,6 +1306,29 @@ namespace rtsp_stream {
         stream::session::mark_client_disconnected(*slot);
         stream::session::stop(*slot);
         stream::session::join(*slot);
+      }
+
+      // The same bookkeeping every other removal path performs: a dropped pending
+      // launch must release the Vulkan HDR layer flag when none remain, re-arm the
+      // launch timer, and hand its virtual display to the shared-runtime finalizer.
+      if (removed_pending) {
+        if (!pending_launches_remain) {
+          set_pending_vulkan_hdr_layer_stream(false);
+        }
+        asio::post(io_context, [this]() {
+          arm_launch_timer();
+        });
+      }
+      if (removed_pending || !to_cleanup.empty()) {
+        stream::session::cleanup_reservation_t cleanup_reservation;
+        std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex());
+        const stream::session::shared_runtime_finalize_context_t finalize_context {
+          .virtual_display_guid_bytes = virtual_display_guid_bytes,
+        };
+        (void) stream::session::finalize_shared_runtime_if_idle(
+          "rtsp_client_disconnected",
+          finalize_context
+        );
       }
 
       if (!to_cleanup.empty()) {
@@ -1950,7 +1982,16 @@ namespace rtsp_stream {
     uint32_t encryption_flags_requested = SS_ENC_CONTROL_V2;
 
     // Determine the encryption desired for this remote endpoint
-    auto encryption_mode = net::encryption_mode_for_address(socket->sock.remote_endpoint().address());
+    // Non-throwing: a connection reset before the handler ran would otherwise unwind
+    // through the RTSP io_context, which has no handler, and terminate the process.
+    boost::system::error_code endpoint_ec;
+    const auto peer_endpoint = socket->sock.remote_endpoint(endpoint_ec);
+    if (endpoint_ec) {
+      BOOST_LOG(warning) << "RTSP peer endpoint unavailable: "sv << endpoint_ec.message();
+      respond(socket->sock, *session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
+      return false;
+    }
+    auto encryption_mode = net::encryption_mode_for_address(peer_endpoint.address());
     if (encryption_mode != config::ENCRYPTION_MODE_NEVER) {
       // Advertise support for video encryption if it's not disabled
       encryption_flags_supported |= SS_ENC_VIDEO;
@@ -2227,7 +2268,14 @@ namespace rtsp_stream {
       config.monitor.framerate = normalized_framerate->capture_framerate;
       config.monitor.encodingFramerate = normalized_framerate->encoding_framerate;
       config.monitor.framerateX100 = (int) util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv));
-      config.monitor.bitrate = (int) util::from_view(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv));
+      const auto maximum_bitrate = pending_policy::parse_bitrate_kbps(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv), false);
+      if (!maximum_bitrate) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: maximumBitrateKbps ["sv << args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv)
+                           << "] is outside 1.."sv << pending_policy::BITRATE_KBPS_MAX;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.bitrate = *maximum_bitrate;
       config.monitor.client_requested_bitrate = config.monitor.bitrate;
       config.monitor.slicesPerFrame = (int) util::from_view(args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv));
       config.monitor.numRefFrames = (int) util::from_view(args.at("x-nv-video[0].maxNumReferenceFrames"sv));
@@ -2260,7 +2308,14 @@ namespace rtsp_stream {
         }
       }
 
-      configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
+      const auto configured_bitrate = pending_policy::parse_bitrate_kbps(args.at("x-ml-video.configuredBitrateKbps"sv), true);
+      if (!configured_bitrate) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: configuredBitrateKbps ["sv << args.at("x-ml-video.configuredBitrateKbps"sv)
+                           << "] is outside 0.."sv << pending_policy::BITRATE_KBPS_MAX;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      configuredBitrateKbps = *configured_bitrate;
 
       if (!configuredBitrateKbps) {
         configuredBitrateKbps = config.monitor.bitrate;
@@ -2290,6 +2345,8 @@ namespace rtsp_stream {
         configuredBitrateKbps *= warp_factor;
         BOOST_LOG(info) << "Warp factor [" << warp_factor << "] engaged";
       }
+      // The warp multiply can exceed the bound the inputs were checked against.
+      configuredBitrateKbps = std::min<std::int64_t>(configuredBitrateKbps, pending_policy::BITRATE_KBPS_MAX);
 
     } catch (std::out_of_range &) {
       respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
@@ -2441,7 +2498,16 @@ namespace rtsp_stream {
     }
 
     // Check that any required encryption is enabled
-    auto encryption_mode = net::encryption_mode_for_address(socket->sock.remote_endpoint().address());
+    // Non-throwing: a connection reset before the handler ran would otherwise unwind
+    // through the RTSP io_context, which has no handler, and terminate the process.
+    boost::system::error_code endpoint_ec;
+    const auto peer_endpoint = socket->sock.remote_endpoint(endpoint_ec);
+    if (endpoint_ec) {
+      BOOST_LOG(warning) << "RTSP peer endpoint unavailable: "sv << endpoint_ec.message();
+      respond(socket->sock, *session, &option, 500, "Internal Server Error", req->sequenceNumber, {});
+      return false;
+    }
+    auto encryption_mode = net::encryption_mode_for_address(peer_endpoint.address());
     if (encryption_mode == config::ENCRYPTION_MODE_MANDATORY &&
         (config.encryptionFlagsEnabled & (SS_ENC_VIDEO | SS_ENC_AUDIO)) != (SS_ENC_VIDEO | SS_ENC_AUDIO)) {
       BOOST_LOG(error) << "Rejecting client that cannot comply with mandatory encryption requirement"sv;
@@ -2610,7 +2676,12 @@ namespace rtsp_stream {
       auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
 
       while (!shutdown_event->peek() || server.startup_count() > 0) {
-        server.iterate();
+        try {
+          server.iterate();
+        } catch (const std::exception &e) {
+          // A handler exception must not take the whole host down
+          BOOST_LOG(error) << "RTSP handler raised: "sv << e.what();
+        }
 
         if (broadcast_shutdown_event->peek()) {
           server.clear();

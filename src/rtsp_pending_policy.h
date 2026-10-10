@@ -34,6 +34,15 @@ namespace rtsp_stream::pending_policy {
   // and stop the process-wide audio packet queue, or overflowed the frame-size arithmetic.
   std::optional<int> parse_packet_duration(std::string_view packet_duration);
 
+  // Ceiling for a client-announced bitrate in kbps (the dynamic bitrate path and the
+  // /bitrate endpoint bound the same value); above it `bitrate * 1000` overflows int in
+  // the encoder rate-control setup.
+  constexpr int BITRATE_KBPS_MAX = 800000;
+
+  // A client-announced bitrate in kbps: digits only, 1..BITRATE_KBPS_MAX (zero allowed when
+  // `allow_zero`, meaning "not configured"), otherwise std::nullopt.
+  std::optional<int> parse_bitrate_kbps(std::string_view bitrate_kbps, bool allow_zero);
+
   enum class initial_route_e { reject, plaintext, encrypted };
 
   struct pending_owner_t {
