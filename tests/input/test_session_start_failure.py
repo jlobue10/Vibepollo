@@ -55,12 +55,15 @@ code = r'''
 #include "src/sync.h"
 #include "src/stream_packet.h"
 using namespace std::literals;
+struct Log { template<class T> Log &operator<<(const T &) { return *this; } };
+#define BOOST_LOG(level) Log{}
 namespace mail {constexpr std::string_view shutdown = "shutdown";}
 namespace stream {
 namespace session {enum class state_e {STOPPED, STOPPING, STARTING, RUNNING};}
 struct session_t;
 struct control_server_t {
   sync_util::sync_t<std::vector<session_t*>> _sessions;
+  bool _exited = false;
   sync_util::sync_t<std::unordered_map<void*, session_t*>> _peer_to_session;
   void retire_session(session_t& session);
 };
@@ -78,7 +81,7 @@ struct session_t {
   DESTRUCTOR
 };
 RETIREMENT
-void publish(session_t& session) {PUBLICATION}
+int publish(session_t& session) {PUBLICATION return 0;}
 void enet_peer_disconnect_now(void*, int) {}
 void control_step(control_server_t* server) {
   auto lg = server->_sessions.lock();
@@ -97,6 +100,17 @@ int main(int argc, char** argv) {
   auto owner = std::make_unique<session_t>();
   owner->broadcast_ref = broadcast;
   if (mode == "unregistered") {owner.reset(); return 0;}
+  if (mode == "control-exited") {
+    // The control thread already ran its shutdown tail: publication is refused, so the
+    // session is never registered and its destruction cannot wait for a controlEnd that
+    // nobody will raise.
+    server._exited = true;
+    const int rc = publish(*owner);
+    assert(rc == -1 && !owner->control_registered && server._sessions->empty());
+    auto retiring = std::async(std::launch::async, [s=std::move(owner)]() mutable {s.reset();});
+    assert(retiring.wait_for(2s) == std::future_status::ready); retiring.get();
+    std::cout << "PASS control-exited\n";return 0;
+  }
   publish(*owner);
   if (mode == "peer-reused") {
     owner->control.peer = reinterpret_cast<void*>(1);
@@ -145,7 +159,7 @@ with tempfile.TemporaryDirectory(prefix='session-start-failure-') as directory:
                     str(work / 'test.cpp'), '-o', str(work / 'test')], check=True)
     failures = 0
     modes = ['first-thread-failure', 'audio-started', 'running-failure', 'connected',
-             'shutdown-tail', 'normal-joined', 'unregistered', 'peer-reused']
+             'shutdown-tail', 'normal-joined', 'unregistered', 'peer-reused', 'control-exited']
     for mode in modes:
         result = subprocess.run([str(work / 'test'), mode],
                                 env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'), timeout=10)

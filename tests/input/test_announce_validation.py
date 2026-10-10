@@ -36,6 +36,12 @@ int main() {
   for (const char *bad : {"7", "0", "-5", "44740", "2147483648", "5.0", "", "x"}) {
     check(!parse_packet_duration(bad), bad);
   }
+  check(parse_bitrate_kbps("20000", false) == 20000 && parse_bitrate_kbps("800000", false) == 800000 && parse_bitrate_kbps("1", false) == 1,
+        "bitrates within 1..800000 parse");
+  check(parse_bitrate_kbps("0", true) == 0 && !parse_bitrate_kbps("0", false), "zero is accepted only where it means unconfigured");
+  for (const char *bad : {"3000000000", "2147483647", "800001", "-1", "12abc", "", "99999999999999999999"}) {
+    check(!parse_bitrate_kbps(bad, true) && !parse_bitrate_kbps(bad, false), bad);
+  }
   std::cout << checks << " checks; " << failures << " failures\n";
   return failures ? 1 : 0;
 }

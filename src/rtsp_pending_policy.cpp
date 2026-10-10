@@ -74,6 +74,14 @@ namespace rtsp_stream::pending_policy {
     }
   }
 
+  std::optional<int> parse_bitrate_kbps(const std::string_view bitrate_kbps, const bool allow_zero) {
+    const auto parsed = parse_integer(bitrate_kbps);
+    if (!parsed || *parsed < (allow_zero ? 0 : 1) || *parsed > BITRATE_KBPS_MAX) {
+      return std::nullopt;
+    }
+    return static_cast<int>(*parsed);
+  }
+
   initial_route_e choose_initial_route(const bool plaintext_available, const bool encrypted_available, const std::array<std::uint8_t, 4> &first_word) {
     if (encrypted_available && (first_word[0] & 0x80U) != 0) return initial_route_e::encrypted;
     if (plaintext_available) return initial_route_e::plaintext;

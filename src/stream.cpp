@@ -567,6 +567,11 @@ namespace stream {
 
     // All active sessions (including those still waiting for a peer to connect)
     sync_util::sync_t<std::vector<session_t *>> _sessions;
+    // Set by the control thread's shutdown tail under _sessions. The broadcast context
+    // outlives its control thread while stopped sessions still hold references, and a
+    // session published to it afterwards would never get its controlEnd raised: join()
+    // would hang into the watchdog, a failed start() would block the startup pool forever.
+    bool _exited = false;
 
     // ENet peer to session mapping for sessions with a peer connected
     sync_util::sync_t<std::map<net::peer_t, session_t *>> _peer_to_session;
@@ -1636,10 +1641,13 @@ namespace stream {
       }
 
       if (*cmdIndex < config::sunshine.server_cmds.size()) {
-        const auto &cmd = config::sunshine.server_cmds[*cmdIndex];
+        // A copy: a runtime config reload (web UI save, launch/resume override guards,
+        // deferred apply) replaces config::sunshine wholesale while the detached thread
+        // below may still be reading the entry.
+        const auto cmd = config::sunshine.server_cmds[*cmdIndex];
         BOOST_LOG(info) << "Executing server command: " << cmd.cmd_name;
 
-        auto exec_thread = std::thread([&cmd] {
+        auto exec_thread = std::thread([cmd] {
           std::error_code ec;
           auto env = proc::proc.get_env();
           boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd_val, env);
@@ -1962,6 +1970,7 @@ namespace stream {
     // Let all remaining connections know the server is shutting down
     // reason: graceful termination
     auto lg = server->_sessions.lock();
+    server->_exited = true;  // publication after this point is refused
     for (auto pos = std::begin(*server->_sessions); pos != std::end(*server->_sessions); ++pos) {
       auto session = *pos;
 
@@ -3753,6 +3762,14 @@ namespace stream {
       // are initialized. Remember publication even if thread creation throws.
       {
         auto lg = session.broadcast_ref->control_server._sessions.lock();
+        if (session.broadcast_ref->control_server._exited) {
+          // Stopped sessions still reference this broadcast context, so ref() handed
+          // out a server whose thread already ran its shutdown tail; nothing would
+          // service this session. Fail the start: the client retries once the context
+          // is torn down and a fresh one (with a live control thread) is created.
+          BOOST_LOG(error) << "Control server already stopped; refusing to start a new session on it"sv;
+          return -1;
+        }
         session.broadcast_ref->control_server._sessions->push_back(&session);
         session.control_registered = true;
       }
@@ -3796,10 +3813,27 @@ namespace stream {
 
       // If this is the first session, invoke the platform callbacks
       const bool first_rtsp_session = ++running_sessions == 1;
-      const bool first_frame_limiter_session =
-        !session.secondary_game_client && !session.config.monitor.input_only &&
-        ++frame_limiter_sessions == 1;
+      const bool frame_limiter_counted =
+        !session.secondary_game_client && !session.config.monitor.input_only;
+      const bool first_frame_limiter_session = frame_limiter_counted && ++frame_limiter_sessions == 1;
       host_stats::rtsp_session_started();
+      // Anything below can throw (thread creation, platform callbacks, the tray). The
+      // ANNOUNCE worker then drops the session without stop()/join(), which is the only
+      // other place these counters are undone; without this the host believes a stream is
+      // live forever (no app pause, no shared-runtime finalize, no deferred config apply).
+      auto live_session_guard = util::fail_guard([&]() {
+        session.state.store(state_e::STOPPING, std::memory_order_release);
+        session.shutdown_event->raise(true);
+        if (frame_limiter_counted) {
+          --frame_limiter_sessions;
+        }
+        --running_sessions;
+        host_stats::rtsp_session_ended();
+        session_history::end_session(session.history_uuid);
+        if (first_rtsp_session) {
+          webrtc_stream::set_rtsp_sessions_active(false);
+        }
+      });
       if (first_rtsp_session || first_frame_limiter_session) {
         if (first_rtsp_session) {
           if (!webrtc_stream::has_active_or_pending_sessions()) {
@@ -3953,6 +3987,7 @@ namespace stream {
       }
 #endif
 
+      live_session_guard.disable();
       return 0;
     }
 
