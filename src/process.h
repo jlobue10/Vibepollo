@@ -299,7 +299,11 @@ namespace proc {
     std::chrono::steady_clock::time_point _steam_last_tracking_poll {};
 
 #ifdef _WIN32
-    bool _deferred_launch {false};
+    // A launch waiting for a user session; claimed once (deferred_launch_claim.h) and
+    // run on a launcher thread under the stream lifecycle gate, never by the poller.
+    std::atomic<bool> _deferred_launch {false};
+    std::atomic<bool> _deferred_launch_in_flight {false};
+    void resume_deferred_launch(int expected_app_id);
     bool _lossless_should_start_support {false};
     playnite_launcher::lossless::lossless_scaling_app_metadata _lossless_metadata {};
 #endif

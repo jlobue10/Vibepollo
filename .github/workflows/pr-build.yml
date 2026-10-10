@@ -44,10 +44,11 @@ jobs:
           python3 tests/input/test_control_thread_lifecycle_gate.py
           python3 tests/input/test_audio_encode_failure.py
           python3 tests/input/test_audio_surround_layout.py
-      - name: Check the pre-capture waits and the failed-start limiter release
+      - name: Check the pre-capture waits, the failed-start limiter release and the deferred-launch claim
         run: |
           python3 tests/input/test_recv_ping_shutdown.py
           python3 tests/input/test_start_guard_limiter.py
+          python3 tests/input/test_deferred_launch_claim.py
       - name: Check mouse release ownership and Windows mouse mapping
         run: |
           python3 tests/input/test_delayed_mouse_release.py

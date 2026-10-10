@@ -2417,8 +2417,13 @@ namespace nvhttp {
       std::string name;
     };
 
+    struct remembered_tls_client_identity_t {
+      resolved_client_identity_t identity;
+      std::chrono::steady_clock::time_point seen;
+    };
+
     std::mutex tls_client_identity_mutex;
-    std::unordered_map<std::string, resolved_client_identity_t> tls_client_identity_by_endpoint;
+    std::unordered_map<std::string, remembered_tls_client_identity_t> tls_client_identity_by_endpoint;
 
     std::string endpoint_key(req_https_t request) {
       if (!request) {
@@ -2509,11 +2514,20 @@ namespace nvhttp {
       }
 
       std::lock_guard<std::mutex> lock(tls_client_identity_mutex);
+      const auto now = std::chrono::steady_clock::now();
       if (!tls_client_identity_by_endpoint.contains(key) &&
           tls_client_identity_by_endpoint.size() >= pairing_policy::max_paired_clients * 8) {
-        tls_client_identity_by_endpoint.erase(tls_client_identity_by_endpoint.begin());
+        // Evict the entry seen longest ago. unordered_map::begin() was arbitrary and
+        // could drop a request still queued on the blocking pool (spurious 403).
+        auto oldest = tls_client_identity_by_endpoint.begin();
+        for (auto it = tls_client_identity_by_endpoint.begin(); it != tls_client_identity_by_endpoint.end(); ++it) {
+          if (it->second.seen < oldest->second.seen) {
+            oldest = it;
+          }
+        }
+        tls_client_identity_by_endpoint.erase(oldest);
       }
-      tls_client_identity_by_endpoint.insert_or_assign(key, identity);
+      tls_client_identity_by_endpoint.insert_or_assign(key, remembered_tls_client_identity_t {identity, now});
     }
 
     void forget_tls_client_identity(req_https_t request) {
@@ -2529,7 +2543,7 @@ namespace nvhttp {
   void forget_tls_client_identities_for_uuid(const std::string_view uuid) {
     std::lock_guard<std::mutex> lock(tls_client_identity_mutex);
     for (auto it = tls_client_identity_by_endpoint.begin(); it != tls_client_identity_by_endpoint.end();) {
-      if (it->second.uuid == uuid) {
+      if (it->second.identity.uuid == uuid) {
         it = tls_client_identity_by_endpoint.erase(it);
       } else {
         ++it;
@@ -2556,11 +2570,12 @@ namespace nvhttp {
         return std::nullopt;
       }
 
-      if (!paired_client_uuid_enabled_locked(it->second.uuid)) {
+      if (!paired_client_uuid_enabled_locked(it->second.identity.uuid)) {
         tls_client_identity_by_endpoint.erase(it);
         return std::nullopt;
       }
-      return it->second;
+      it->second.seen = std::chrono::steady_clock::now();
+      return it->second.identity;
     }
 
     std::mutex launch_request_mutex;
@@ -4255,6 +4270,13 @@ namespace nvhttp {
         tree.put("root.<xmlattr>.status_message", "Missing a required launch parameter");
         return;
       }
+      if (!pairing_policy::valid_hex_field(get_arg(args, "rikey", ""), 32, 32)) {
+        // The AES-128 key is read as 16 bytes; a shorter hex string over-read the vector.
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", "Invalid rikey");
+        return;
+      }
 
       const auto verified_client = get_verified_cert(request);
       const auto request_client_identity = resolve_client_identity(request, verified_client);
@@ -5272,6 +5294,14 @@ namespace nvhttp {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
       tree.put("root.<xmlattr>.status_message", "Missing a required resume parameter");
+
+      return;
+    }
+    if (!pairing_policy::valid_hex_field(get_arg(args, "rikey", ""), 32, 32)) {
+      // The AES-128 key is read as 16 bytes; a shorter hex string over-read the vector.
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Invalid rikey");
 
       return;
     }
