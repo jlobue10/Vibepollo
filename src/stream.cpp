@@ -600,6 +600,19 @@ namespace stream {
     ~session_t() {
       // Also fence partially initialized sessions before any fields are destroyed.
       packet_channel->close();
+      // A start() that threw after the capture threads were running would otherwise destroy
+      // joinable std::threads, which is std::terminate. Tell them to stop and wait.
+      if (videoThread.joinable() || audioThread.joinable()) {
+        if (mail) {
+          mail->event<bool>(mail::shutdown)->raise(true);
+        }
+        if (videoThread.joinable()) {
+          videoThread.join();
+        }
+        if (audioThread.joinable()) {
+          audioThread.join();
+        }
+      }
     }
 
     std::shared_ptr<void> display_power_guard;
@@ -940,7 +953,13 @@ namespace stream {
       return false;
     }
 
-    std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex());
+    // Never block the control-broadcast thread on the lifecycle gate: a launch or teardown
+    // holding it may be waiting in session::join for this thread's controlEnd, which would
+    // deadlock until the join watchdog killed the process. Retry on the next iteration.
+    std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex(), std::try_to_lock);
+    if (!lifecycle_lock.owns_lock()) {
+      return false;
+    }
     std::optional<deferred_stream_start_t> deferred;
     {
       std::lock_guard<std::mutex> lock(deferred_stream_start_mutex());
@@ -2143,6 +2162,12 @@ namespace stream {
           payload_with_replacements = replace(payload, frame_old, frame_new);
           payload = {(char *) payload_with_replacements.data(), payload_with_replacements.size()};
         }
+      }
+
+      if (session->config.packetsize <= (int) sizeof(NV_VIDEO_PACKET)) {
+        // Rejected at ANNOUNCE; defence in depth for the modulo and shard arithmetic below.
+        BOOST_LOG(error) << "Dropping frame: session packet size "sv << session->config.packetsize << " is too small"sv;
+        continue;
       }
 
       video_short_frame_header_t frame_header = {};

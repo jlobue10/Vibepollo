@@ -34,6 +34,11 @@ jobs:
           python3 tests/input/test_vigem_touch_pointers.py
       - name: Check queued and in-flight stream packet lifetimes
         run: python3 tests/input/test_stream_packet_lifetime.py
+      - name: Check ANNOUNCE bounds, the control-thread lifecycle gate and audio encode failure scope
+        run: |
+          python3 tests/input/test_announce_validation.py
+          python3 tests/input/test_control_thread_lifecycle_gate.py
+          python3 tests/input/test_audio_encode_failure.py
       - name: Check PyroWave fence import and conversion timeout ordering
         run: python3 tests/input/test_pyrowave_sync.py
 
