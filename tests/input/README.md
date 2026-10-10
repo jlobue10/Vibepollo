@@ -19,6 +19,13 @@ independent browser input contexts sharing capture coordinates, and WebRTC
 connection-loss/recovery callbacks.
 
 The scripts do not replace a full platform build or driver-level testing.
+`python3 tests/input/test_pyrowave_sync.py` compiles production D3D11 fence setup
+and encode methods with the bundled PyroWave sync-object creation code. Fake
+D3D/Vulkan boundaries cover handle ownership, allocation/import failures and a
+conversion timeline that never signals. The fixture checks that this condition
+does not submit a Vulkan dependency that could block device-idle teardown. It
+uses ASan/UBSan and requires no GPU; real driver latency and device-loss recovery
+still require a Windows integration run.
 The feedback test executes production VHF/ViGEm dispatch against a real mailbox
 with fake driver slots. It checks LED forwarding when rumble is disabled,
 optional-category deduplication, first zero states after slot allocation, and

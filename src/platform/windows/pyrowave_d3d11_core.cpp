@@ -122,6 +122,7 @@ namespace pyrowave::d3d11 {
 
     // Handoff to PyroWave: the planes and a fence signalled once they are written.
     ComPtr<ID3D11Fence> convert_fence;
+    ComPtr<ID3D11Fence> completion_fence;
     std::uint64_t convert_value = 0;
 
     // Encoding.
@@ -131,6 +132,11 @@ namespace pyrowave::d3d11 {
     std::array<pyrowave_gpu_external_reference, 3> pw_plane_refs {};
     pyrowave_gpu_buffers pw_buffers {};
     pyrowave_sync_object pw_fence = nullptr;
+    // Signalled by the encode itself, so the CPU wait for the frame can be bounded:
+    // the Vulkan queue waits on the D3D11 conversion fence, and a removed D3D11
+    // device may never reach that value. The library's own wait has no timeout.
+    pyrowave_sync_object pw_release = nullptr;
+    std::uint64_t release_value = 0;
 
     std::vector<pyrowave_packet> packets;
     std::vector<std::uint8_t> scratch;
@@ -143,6 +149,9 @@ namespace pyrowave::d3d11 {
         if (image) {
           pyrowave_image_destroy(image);
         }
+      }
+      if (pw_release) {
+        pyrowave_sync_object_destroy(pw_release);
       }
       if (pw_fence) {
         pyrowave_sync_object_destroy(pw_fence);
@@ -324,6 +333,32 @@ namespace pyrowave::d3d11 {
       if (result != PYROWAVE_SUCCESS) {
         CloseHandle(handle);
         error(std::string("importing the fence into Vulkan failed: ") + pyrowave_result_string(result));
+        return false;
+      }
+
+      // Import a second D3D11 fence for completion, just like the conversion fence.
+      // The bundled sync API rejects a null handle without TEMPORARY, which is
+      // invalid for timelines. Import also works on drivers without fence export.
+      hr = device11->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&completion_fence));
+      if (FAILED(hr)) {
+        error("completion fence creation failed [" + hresult_string(hr) + "]");
+        return false;
+      }
+      handle = nullptr;
+      hr = completion_fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &handle);
+      if (FAILED(hr)) {
+        error("sharing the completion fence failed [" + hresult_string(hr) + "]");
+        return false;
+      }
+      pyrowave_sync_object_create_info release_info {};
+      release_info.device = pw_device;
+      release_info.external_handle = pyrowave_os_handle(handle);
+      release_info.handle_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
+      release_info.semaphore_type = VK_SEMAPHORE_TYPE_TIMELINE;
+      result = pyrowave_sync_object_create(&release_info, &pw_release);
+      if (result != PYROWAVE_SUCCESS) {
+        CloseHandle(handle);
+        error(std::string("creating the encode completion fence failed: ") + pyrowave_result_string(result));
         return false;
       }
       return true;
@@ -568,11 +603,13 @@ namespace pyrowave::d3d11 {
     acquire.sync.semaphore = pyrowave_sync_object_get_semaphore(state.pw_fence);
     acquire.sync.value = state.convert_value;
 
-    // No release semaphore: the encode is synchronous. The CPU waits for it below
-    // (get_mapped_raw_bitstream) before D3D11 can overwrite the planes again.
+    // The encode signals pw_release when it completes; the CPU waits for that value
+    // below, with a timeout, before D3D11 may overwrite the planes again.
     pyrowave_gpu_sync_operation release {};
     release.images = state.pw_plane_refs.data();
     release.num_images = state.pw_plane_refs.size();
+    release.sync.semaphore = pyrowave_sync_object_get_semaphore(state.pw_release);
+    release.sync.value = ++state.release_value;
 
     pyrowave_rate_control rate {};
     rate.maximum_bitstream_size = std::min<std::size_t>(max_bitstream_bytes, std::numeric_limits<std::uint32_t>::max() & ~3u) & ~std::size_t(3);
@@ -580,13 +617,40 @@ namespace pyrowave::d3d11 {
       return result_e::skipped;
     }
 
-    auto result = pyrowave_encoder_encode_gpu_synchronous(state.pw_encoder, &acquire, &release, &state.pw_buffers, &rate);
+    // Do not submit a Vulkan wait on a conversion value that may never arrive.
+    // Returning after a later encode timeout cannot cancel that queue dependency:
+    // the library still waits for the device to become idle during destruction.
+    // Confirm conversion completion first; retain the GPU acquire for ownership
+    // and visibility of the shared planes.
+    constexpr std::uint64_t k_encode_timeout_ns = 2'000'000'000ull;
+    auto result = pyrowave_sync_object_cpu_wait(state.pw_fence, state.convert_value, k_encode_timeout_ns);
+    if (result != PYROWAVE_SUCCESS) {
+      const HRESULT removed = state.device11 ? state.device11->GetDeviceRemovedReason() : S_OK;
+      state.error(std::string("the conversion did not complete within 2 s") +
+                  (FAILED(removed) ? " [D3D11 device removed: " + hresult_string(removed) + "]" : "") +
+                  "; ending the stream before submitting the encode");
+      return result_e::failed;
+    }
+
+    result = pyrowave_encoder_encode_gpu_synchronous(state.pw_encoder, &acquire, &release, &state.pw_buffers, &rate);
     if (result != PYROWAVE_SUCCESS) {
       state.error(std::string("encode failed: ") + pyrowave_result_string(result));
       return result_e::failed;
     }
 
-    // Waits for the encode and sizes the packetizer output from the bitstream buffer.
+    // Bound the host's wait for the encode result as well. A Vulkan device/driver
+    // hang can still affect the library's device-idle teardown; this timeout does
+    // not cancel submitted work.
+    result = pyrowave_sync_object_cpu_wait(state.pw_release, state.release_value, k_encode_timeout_ns);
+    if (result != PYROWAVE_SUCCESS) {
+      const HRESULT removed = state.device11 ? state.device11->GetDeviceRemovedReason() : S_OK;
+      state.error(std::string("the encode did not complete within 2 s") +
+                  (FAILED(removed) ? " [D3D11 device removed: " + hresult_string(removed) + "]" : "") +
+                  "; ending the stream");
+      return result_e::failed;
+    }
+
+    // Sizes the packetizer output from the bitstream buffer (the encode is complete).
     const void *mapped_bitstream = nullptr;
     const void *mapped_metadata = nullptr;
     std::size_t mapped_bitstream_size = 0;

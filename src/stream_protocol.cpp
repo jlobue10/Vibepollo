@@ -32,18 +32,28 @@ namespace stream {
     if (slice_size == 0) {
       return {};
     }
-    std::string joined;
-    joined.reserve(data1.size() + data2.size());
-    joined.append(data1);
-    joined.append(data2);
-
-    const auto slices = (joined.size() + slice_size - 1) / slice_size;
+    // One pass straight from the two inputs: a PyroWave frame is 0.5-1 MB at up
+    // to 120 fps and this runs on the broadcast thread that also paces the send,
+    // so the intermediate joined copy was ~100-200 MB/s of memcpy and a large
+    // allocation per frame for nothing.
+    const std::size_t total = data1.size() + data2.size();
+    const auto slices = (total + slice_size - 1) / slice_size;
     std::vector<std::uint8_t> result;
-    result.reserve(joined.size() + slices * insert_size);
-    for (std::size_t offset = 0; offset < joined.size(); offset += slice_size) {
+    result.reserve(total + slices * insert_size);
+    std::size_t offset = 0;
+    while (offset < total) {
       result.insert(result.end(), insert_size, 0);
-      const auto count = std::min<std::size_t>(slice_size, joined.size() - offset);
-      result.insert(result.end(), joined.begin() + offset, joined.begin() + offset + count);
+      std::size_t remaining = std::min<std::size_t>(slice_size, total - offset);
+      while (remaining) {
+        // The slice may straddle the boundary between data1 and data2.
+        const bool first = offset < data1.size();
+        const std::string_view src = first ? data1 : data2;
+        const std::size_t at = first ? offset : offset - data1.size();
+        const std::size_t count = std::min(remaining, src.size() - at);
+        result.insert(result.end(), src.begin() + at, src.begin() + at + count);
+        offset += count;
+        remaining -= count;
+      }
     }
     return result;
   }
