@@ -4,6 +4,8 @@ param(
     [switch]$AllowUnsignedCatalogForValidation,
     [switch]$RegisterVulkanLayerOnly,
     [switch]$UnregisterVulkanLayerOnly,
+    [ValidateSet(0, 1)]
+    [int]$DailyUnsignedPolicy = 0,
     [switch]$InstallerBestEffort
 )
 
@@ -22,6 +24,10 @@ $probePath = Join-Path $scriptDir 'virtualdisplay_probe.exe'
 $vulkanLayerDir = Join-Path $scriptDir 'vulkan-layer'
 $vulkanLayerDllPath = Join-Path $vulkanLayerDir 'VkLayer_sunshine_hdr.dll'
 $vulkanLayerJsonPath = Join-Path $vulkanLayerDir 'VkLayer_sunshine_hdr.json'
+$vulkanLayers = @(
+    @{ View = [Microsoft.Win32.RegistryView]::Registry64; Manifest = $vulkanLayerJsonPath; Dll = $vulkanLayerDllPath; Machine = 0x8664 },
+    @{ View = [Microsoft.Win32.RegistryView]::Registry32; Manifest = (Join-Path $vulkanLayerDir 'VkLayer_sunshine_hdr_x86.json'); Dll = (Join-Path $vulkanLayerDir 'VkLayer_sunshine_hdr_x86.dll'); Machine = 0x014c }
+)
 $vulkanImplicitLayersSubKey = 'SOFTWARE\Khronos\Vulkan\ImplicitLayers'
 $userModeDriversSid = 'S-1-5-84-0-0-0-0-0'
 $script:rebootRequired = $false
@@ -49,6 +55,80 @@ trap {
 
     throw
 }
+
+# DRIVER_INSTALL_SAFETY_BEGIN
+# Kept inline so pinned producer packages do not need a new runtime file.
+function ConvertTo-DriverComponentVersion {
+    param([string]$Value)
+    if ($Value -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "Unknown driver component version: '$Value'. Driver unchanged." }
+    foreach ($part in $Value.Split('.')) {
+        if ([uint64]$part -gt 65535) { throw "Invalid driver component version: '$Value'. Driver unchanged." }
+    }
+    return [version]$Value
+}
+
+function Get-InfComponentVersion {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $inVersion = $false
+    $versions = @()
+    foreach ($line in (Get-Content -LiteralPath $Path -ErrorAction Stop)) {
+        $text = ($line -split ';', 2)[0].Trim()
+        if ($text -match '^\[(.+)\]$') { $inVersion = $Matches[1] -ieq 'Version'; continue }
+        if ($inVersion -and $text -match '^DriverVer\s*=\s*[^,]+,\s*(\S+)\s*$') {
+            $versions += ConvertTo-DriverComponentVersion $Matches[1]
+        }
+    }
+    if ($versions.Count -ne 1) { throw "Missing or ambiguous INF DriverVer: $Path. Driver unchanged." }
+    return $versions[0]
+}
+
+function Test-SafeDriverInstall {
+    param(
+        [Parameter(Mandatory = $true)][string]$InfPath,
+        [Parameter(Mandatory = $true)][string]$CatalogPath,
+        [Parameter(Mandatory = $true)][string]$HardwareId,
+        [string]$WarningMarker = 'VIRTUAL_DISPLAY_DRIVER_WARNING',
+        [bool]$LocalTestPackage = $false
+    )
+    $target = Get-InfComponentVersion $InfPath
+    $infName = [IO.Path]::GetFileName($InfPath)
+    # Both queries must succeed. An empty successful query means missing;
+    # errors, missing active versions, and unreadable store INFs mean unknown.
+    $packages = @(Get-WindowsDriver -Online -All -ErrorAction Stop | Where-Object {
+        [IO.Path]::GetFileName([string]$_.OriginalFileName) -ieq $infName
+    })
+    $devices = @(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop | Where-Object {
+        ([string]$_.DeviceID).StartsWith($HardwareId, [StringComparison]::OrdinalIgnoreCase) -or
+        ([string]$_.HardwareID).Equals($HardwareId, [StringComparison]::OrdinalIgnoreCase)
+    })
+    $installed = @()
+    foreach ($device in $devices) {
+        # CIM reports the active INF's numeric DriverVersion (not DriverDate).
+        $installed += ConvertTo-DriverComponentVersion ([string]$device.DriverVersion)
+    }
+    foreach ($package in $packages) {
+        $path = [string]$package.OriginalFileName
+        if (-not [IO.Path]::IsPathRooted($path)) {
+            if ([string]$package.Driver -notmatch '^oem\d+\.inf$') {
+                throw 'Unknown published INF identity. Driver unchanged.'
+            }
+            $path = Join-Path (Join-Path $env:windir 'INF') ([string]$package.Driver)
+        }
+        $installed += Get-InfComponentVersion $path
+    }
+    if (@($installed | Where-Object { $_ -ge $target }).Count -gt 0) {
+        Write-Host "Driver component $target skipped: an equal or newer active/Driver Store component exists; installed driver retained."
+        return $false
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $CatalogPath -ErrorAction Stop
+    $signer = $signature.SignerCertificate
+    if ($LocalTestPackage -or $null -eq $signer -or $signature.Status -ne 'Valid' -or
+        [string]::Equals([string]$signer.Subject, [string]$signer.Issuer, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$WarningMarker`: Driver component $target is missing or newer, but its catalog is unsigned, self-signed, or untrusted. Installed driver retained. Manual security review is required; self-signed drivers can require added certificate trust or weakened boot/signing policy. This installer will not add test certificates, change Secure Boot, or enable test signing."
+    }
+    return $true
+}
+# DRIVER_INSTALL_SAFETY_END
 
 function Assert-Administrator {
     $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -304,13 +384,27 @@ function Assert-Package {
 }
 
 function Assert-VulkanLayerPackage {
-    foreach ($artifact in @($vulkanLayerDllPath, $vulkanLayerJsonPath)) {
-        Assert-Artifact -Path $artifact
+    foreach ($layer in $vulkanLayers) {
+        Assert-Artifact -Path $layer.Dll
+        Assert-Artifact -Path $layer.Manifest
+        $bytes = [System.IO.File]::ReadAllBytes($layer.Dll)
+        if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+            throw "[SunshineVirtualDisplay] Invalid Vulkan layer DLL: $($layer.Dll)"
+        }
+        $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3c)
+        if ($peOffset -lt 0 -or $peOffset -gt ($bytes.Length - 6) -or
+            [System.BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x00004550 -or
+            [System.BitConverter]::ToUInt16($bytes, $peOffset + 4) -ne $layer.Machine) {
+            throw "[SunshineVirtualDisplay] Wrong Vulkan layer DLL architecture for $($layer.View): $($layer.Dll)"
+        }
+        $manifest = Get-Content -LiteralPath $layer.Manifest -Raw | ConvertFrom-Json
+        $expectedLibrary = '.\' + [System.IO.Path]::GetFileName($layer.Dll)
+        if ($manifest.layer.name -cne 'VK_LAYER_SUNSHINE_virtual_hdr' -or
+            $manifest.layer.library_path -cne $expectedLibrary -or
+            $manifest.layer.functions.vkGetInstanceProcAddr -cne 'vkGetInstanceProcAddr') {
+            throw "[SunshineVirtualDisplay] Vulkan layer manifest does not match its architecture: $($layer.Manifest)"
+        }
     }
-}
-
-function Get-VulkanLayerJsonFullPath {
-    return (Resolve-Path -LiteralPath $vulkanLayerJsonPath).Path
 }
 
 function Open-LocalMachineRegistryKey {
@@ -338,22 +432,25 @@ function Open-LocalMachineRegistryKey {
 }
 
 function Register-VulkanLayer {
+    # Check both DLL/manifest pairs before removing any working registration.
+    Assert-VulkanLayerPackage
     Unregister-VulkanLayer
-    $jsonFullPath = Get-VulkanLayerJsonFullPath
-    $key = Open-LocalMachineRegistryKey `
-        -View ([Microsoft.Win32.RegistryView]::Registry64) `
-        -SubKey $vulkanImplicitLayersSubKey `
-        -Writable $true `
-        -Create $true
-    if (-not $key) {
-        throw "[SunshineVirtualDisplay] Unable to open HKLM:\$vulkanImplicitLayersSubKey in the 64-bit registry view."
-    }
-
-    try {
-        $key.SetValue($jsonFullPath, 0, [Microsoft.Win32.RegistryValueKind]::DWord)
-        Write-Host "[SunshineVirtualDisplay] Vulkan HDR implicit layer registered: $jsonFullPath"
-    } finally {
-        $key.Dispose()
+    foreach ($layer in $vulkanLayers) {
+        $jsonFullPath = (Resolve-Path -LiteralPath $layer.Manifest).Path
+        $key = Open-LocalMachineRegistryKey `
+            -View $layer.View `
+            -SubKey $vulkanImplicitLayersSubKey `
+            -Writable $true `
+            -Create $true
+        if (-not $key) {
+            throw "[SunshineVirtualDisplay] Unable to open HKLM:\$vulkanImplicitLayersSubKey in $($layer.View)."
+        }
+        try {
+            $key.SetValue($jsonFullPath, 0, [Microsoft.Win32.RegistryValueKind]::DWord)
+            Write-Host "[SunshineVirtualDisplay] Vulkan HDR implicit layer registered in $($layer.View): $jsonFullPath"
+        } finally {
+            $key.Dispose()
+        }
     }
 }
 
@@ -370,7 +467,7 @@ function Unregister-VulkanLayer {
         try {
             $removed = 0
             foreach ($valueName in @($key.GetValueNames())) {
-                if ([System.IO.Path]::GetFileName($valueName) -eq 'VkLayer_sunshine_hdr.json') {
+                if ([System.IO.Path]::GetFileName($valueName) -in @('VkLayer_sunshine_hdr.json', 'VkLayer_sunshine_hdr_x86.json')) {
                     $key.DeleteValue($valueName, $false)
                     $removed++
                 }
@@ -1141,6 +1238,10 @@ if ($UnregisterVulkanLayerOnly) {
     exit 0
 }
 
+if (-not $Uninstall -and -not $ValidateOnly) {
+    if (-not (Test-SafeDriverInstall -InfPath $infPath -CatalogPath $catPath -HardwareId $hardwareId)) { exit 0 }
+}
+
 Assert-Package
 
 $pnputil = Resolve-SystemToolPath -ToolName 'pnputil.exe'
@@ -1165,9 +1266,9 @@ if ($Uninstall) {
     exit 0
 }
 
-Install-CertificateIfPresent -StoreName 'Root'
-Install-CertificateIfPresent -StoreName 'TrustedPublisher'
-Install-CatalogSignerCertificate
+if ($DailyUnsignedPolicy -eq 0) { Install-CatalogSignerCertificate }
+# Verify catalog membership through Windows before service stops or device cleanup.
+Invoke-DriverProcess -FilePath $pnputil -ArgumentList @('/add-driver', $infPath) -AllowedExitCodes @(0, 3010)
 Register-VulkanLayer
 
 $driverPackageRefreshNeeded = Test-DriverPackageRefreshNeeded

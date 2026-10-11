@@ -3,6 +3,7 @@
  * @brief Declarations for the startup and shutdown of the apps started by a streaming Session.
  */
 #pragma once
+#include "managed_app_focus.h"
 
 #ifndef __kernel_entry
   #define __kernel_entry
@@ -33,7 +34,8 @@
 #ifdef _WIN32
   #include "deferred_launch_claim.h"
   #include "platform/windows/virtual_display.h"
-#include "tools/playnite_launcher/lossless_scaling.h"
+  #include "tools/playnite_launcher/lossless_scaling.h"
+  #include "platform/windows/dualsense_usbip_gamepad.h"
 
 namespace VDISPLAY {
   enum class DRIVER_STATUS;
@@ -159,6 +161,7 @@ namespace proc {
     bool playnite_fullscreen;
     bool frame_gen_limiter_fix;
     bool elevated;
+    bool dualsense_haptics {false};
     bool virtual_screen {false};
     // Unset inherits the device preference; false allows normal client HDR requests.
     std::optional<bool> prefer_10bit_sdr;
@@ -215,7 +218,8 @@ namespace proc {
 
     void launch_input_only();
 
-    int execute(const ctx_t &_app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    // Callers holding the configuration read gate must defer cleanup writes.
+    int execute(const ctx_t &_app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session, bool config_read_gate_held = false);
 
     /**
      * @return `_app_id` if a process is running, otherwise returns `0`
@@ -244,7 +248,8 @@ namespace proc {
       bool immediate = false,
       bool needs_refresh = true,
       bool skip_display_revert = false,
-      bool stream_lifecycle_lock_held = false
+      bool stream_lifecycle_lock_held = false,
+      bool config_read_gate_held = false
     );
     bool last_run_app_frame_gen_limiter_fix() const;
     bool is_launch_deferred() const;
@@ -270,7 +275,7 @@ namespace proc {
     bp::environment release_env();
 
   private:
-    int launch_app_commands(bool stream_lifecycle_lock_held);
+    int launch_app_commands(bool stream_lifecycle_lock_held, bool config_read_gate_held = false);
 
     std::atomic<int> _app_id {0};
     std::string _app_name;
@@ -292,6 +297,7 @@ namespace proc {
     // If no command associated with _app_id, yet it's still running
     bool placebo {};
 
+    std::unique_ptr<managed_app_focus::session> _app_focus;
     platf::steam::lifecycle::tracker _steam_tracker;
     std::shared_ptr<platf::steam::lifecycle::process_controller> _steam_process_controller;
     bool _steam_tracking_active {false};
@@ -304,6 +310,7 @@ namespace proc {
     // run on a launcher thread under the stream lifecycle gate, never by the poller.
     deferred_launch::state_t _deferred_launch;
     void resume_deferred_launch(deferred_launch::state_t::ticket_t ticket);
+    std::chrono::steady_clock::time_point _dualsense_ready_deadline {};
     bool _lossless_should_start_support {false};
     playnite_launcher::lossless::lossless_scaling_app_metadata _lossless_metadata {};
 #endif
@@ -312,6 +319,7 @@ namespace proc {
     bp::group _process_group;
 
 #ifdef _WIN32
+    std::shared_ptr<platf::dualsense_usbip_gamepad::session_scope> _dualsense_usbip_session;
     GUID _virtual_display_guid {};
     bool _virtual_display_active {false};
     std::optional<config::runtime_output_override_lease_t> _runtime_output_override_lease;

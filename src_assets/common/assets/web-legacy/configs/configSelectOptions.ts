@@ -160,6 +160,7 @@ export function getConfigSelectOptions(
         vhf_xbox_one: 'config.gamepad_vhf_xbox_one',
         vhf_ds4: 'config.gamepad_vhf_ds4',
         vhf_ds5: 'config.gamepad_vhf_ds5',
+        usbip_ds5: 'config.gamepad_usbip_ds5',
         vhf_switch: 'config.gamepad_vhf_switch',
         vhf_steam: 'config.gamepad_vhf_steam',
       };
@@ -174,6 +175,7 @@ export function getConfigSelectOptions(
           'vhf_xbox_one',
           'vhf_ds4',
           'vhf_ds5',
+          'usbip_ds5',
           'vhf_switch',
           'vhf_steam',
         ],
