@@ -180,7 +180,7 @@ namespace platf::dxgi {
     bool is_connected() override;
 
   private:
-    bool try_decode_one_frame(std::span<uint8_t> dst, size_t &bytesRead);
+    PipeResult try_decode_one_frame(std::span<uint8_t> dst, size_t &bytesRead);
 
     std::unique_ptr<INamedPipe> _inner;
     std::vector<uint8_t> _rxbuf;

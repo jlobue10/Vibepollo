@@ -989,7 +989,9 @@ namespace platf::dxgi {
 
     DWORD bytesWritten = 0;
     if (BOOL result = WriteFile(_pipe.get(), bytes.data(), static_cast<DWORD>(bytes.size()), &bytesWritten, ctx.get()); !result) {
-      return handle_send_error(ctx, timeout_ms, bytesWritten);
+      if (!handle_send_error(ctx, timeout_ms, bytesWritten)) {
+        return false;
+      }
     }
 
     if (bytesWritten != bytes.size()) {
@@ -1015,29 +1017,24 @@ namespace platf::dxgi {
 
   bool WinPipe::handle_pending_send_operation(io_context &ctx, int timeout_ms, DWORD &bytesWritten) {
     DWORD waitResult = WaitForSingleObject(ctx.event(), timeout_ms);
-
-    if (waitResult == WAIT_OBJECT_0) {
-      if (!GetOverlappedResult(_pipe.get(), ctx.get(), &bytesWritten, FALSE)) {
-        DWORD err = GetLastError();
-        if (err == ERROR_BROKEN_PIPE) {
-          BOOST_LOG(warning) << "Pipe broken during overlapped send (ERROR_BROKEN_PIPE)";
-          _connected.store(false, std::memory_order_release);
-        } else if (err != ERROR_OPERATION_ABORTED) {
-          BOOST_LOG(error) << "GetOverlappedResult failed in send, error=" << err;
-        }
-        return false;
-      }
-      return true;
-    } else if (waitResult == WAIT_TIMEOUT) {
-      BOOST_LOG(warning) << "Send operation timed out after " << timeout_ms << "ms";
+    if (waitResult != WAIT_OBJECT_0) {
+      // Cancellation is a request: normal completion can win the race. Always
+      // drain the operation before its OVERLAPPED context leaves scope.
       CancelIoEx(_pipe.get(), ctx.get());
-      DWORD transferred = 0;
-      GetOverlappedResult(_pipe.get(), ctx.get(), &transferred, TRUE);
-      return false;
-    } else {
-      BOOST_LOG(error) << "WaitForSingleObject failed in send, result=" << waitResult << ", error=" << GetLastError();
-      return false;
     }
+    if (GetOverlappedResult(_pipe.get(), ctx.get(), &bytesWritten, waitResult != WAIT_OBJECT_0)) {
+      return true;
+    }
+    DWORD err = GetLastError();
+    if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED || err == ERROR_NO_DATA) {
+      BOOST_LOG(warning) << "Pipe broken during overlapped send, error=" << err;
+      _connected.store(false, std::memory_order_release);
+    } else if (err == ERROR_OPERATION_ABORTED && waitResult == WAIT_TIMEOUT) {
+      BOOST_LOG(warning) << "Send operation timed out after " << timeout_ms << "ms";
+    } else if (err != ERROR_OPERATION_ABORTED || waitResult == WAIT_FAILED) {
+      BOOST_LOG(error) << "Overlapped send failed, wait=" << waitResult << ", error=" << err;
+    }
+    return false;
   }
 
   PipeResult WinPipe::receive(std::span<uint8_t> dst, size_t &bytesRead, int timeout_ms) {
@@ -1105,37 +1102,34 @@ namespace platf::dxgi {
 
   PipeResult WinPipe::handle_pending_receive_operation(io_context &ctx, int timeout_ms, std::span<uint8_t> dst, size_t &bytesRead) {
     using enum platf::dxgi::PipeResult;
+    bytesRead = 0;
     DWORD waitResult = WaitForSingleObject(ctx.event(), timeout_ms);
     DWORD bytesReadWin = 0;
-
-    if (waitResult == WAIT_OBJECT_0) {
-      if (GetOverlappedResult(_pipe.get(), ctx.get(), &bytesReadWin, FALSE)) {
-        bytesRead = static_cast<size_t>(bytesReadWin);
-        return Success;
-      } else {
-        DWORD overlappedErr = GetLastError();
-        if (overlappedErr == ERROR_BROKEN_PIPE ||
-            overlappedErr == ERROR_PIPE_NOT_CONNECTED ||
-            overlappedErr == ERROR_NO_DATA) {
-          BOOST_LOG(warning) << "IPC pipe connection to helper process was lost.";
-          _connected.store(false, std::memory_order_release);
-          return BrokenPipe;
-        }
-        if (overlappedErr == ERROR_OPERATION_ABORTED) {
-          return Disconnected;
-        }
-        BOOST_LOG(error) << "GetOverlappedResult failed in receive, error=" << overlappedErr;
-        return Error;
-      }
-    } else if (waitResult == WAIT_TIMEOUT) {
+    if (waitResult != WAIT_OBJECT_0) {
+      // Even a zero-timeout receive may have consumed bytes before cancellation
+      // reaches the driver. The final completion status owns those bytes.
       CancelIoEx(_pipe.get(), ctx.get());
-      DWORD transferred = 0;
-      GetOverlappedResult(_pipe.get(), ctx.get(), &transferred, TRUE);
-      return Timeout;
-    } else {
-      BOOST_LOG(error) << "WinPipe::receive() wait failed, result=" << waitResult << ", error=" << GetLastError();
-      return Error;
     }
+    if (GetOverlappedResult(_pipe.get(), ctx.get(), &bytesReadWin, waitResult != WAIT_OBJECT_0)) {
+      bytesRead = static_cast<size_t>(bytesReadWin);
+      return Success;
+    }
+    DWORD err = GetLastError();
+    if (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED || err == ERROR_NO_DATA) {
+      BOOST_LOG(warning) << "IPC pipe connection to helper process was lost.";
+      _connected.store(false, std::memory_order_release);
+      return BrokenPipe;
+    }
+    if (err == ERROR_OPERATION_ABORTED) {
+      if (waitResult == WAIT_TIMEOUT) {
+        return Timeout;
+      }
+      if (waitResult == WAIT_OBJECT_0) {
+        return Disconnected;
+      }
+    }
+    BOOST_LOG(error) << "Overlapped receive failed, wait=" << waitResult << ", error=" << err;
+    return Error;
   }
 
   void WinPipe::disconnect() {
@@ -1485,38 +1479,37 @@ namespace platf::dxgi {
     return _inner && _inner->send(out, timeout_ms);
   }
 
-  bool FramedPipe::try_decode_one_frame(std::span<uint8_t> dst, size_t &bytesRead) {
+  PipeResult FramedPipe::try_decode_one_frame(std::span<uint8_t> dst, size_t &bytesRead) {
     bytesRead = 0;
-    if (_rxbuf.size() < 4) {
-      return false;
-    }
     constexpr uint32_t kMaxFrameLen = 2 * 1024 * 1024;
-
-    while (_rxbuf.size() >= 4) {
+    size_t offset = 0;
+    while (_rxbuf.size() - offset >= 4) {
       uint32_t len = 0;
-      std::memcpy(&len, _rxbuf.data(), 4);
-
-      // Defensive resync: if the header is clearly invalid, drop bytes until we find
-      // a plausible frame boundary. This prevents a single stray write (e.g., unframed
-      // bytes) from wedging the protocol forever.
+      std::memcpy(&len, _rxbuf.data() + offset, sizeof(len));
+      // Preserve the existing invalid-header resync without moving the entire
+      // remaining buffer for every rejected byte.
       if (len == 0 || len > kMaxFrameLen) {
-        _rxbuf.erase(_rxbuf.begin());
+        ++offset;
         continue;
       }
-
-      if (_rxbuf.size() < 4u + len) {
-        return false;
+      if (len > dst.size()) {
+        // This frame can never be delivered to this consumer. Waiting for more
+        // bytes would retain every subsequent frame behind it without a bound.
+        disconnect();
+        return PipeResult::Error;
       }
-      if (dst.size() < len) {
-        return false;
+      if (_rxbuf.size() - offset < 4u + len) {
+        break;
       }
-      std::memcpy(dst.data(), _rxbuf.data() + 4, len);
+      std::memcpy(dst.data(), _rxbuf.data() + offset + 4, len);
       bytesRead = len;
-      _rxbuf.erase(_rxbuf.begin(), _rxbuf.begin() + 4 + len);
-      return true;
+      _rxbuf.erase(_rxbuf.begin(), _rxbuf.begin() + offset + 4 + len);
+      return PipeResult::Success;
     }
-
-    return false;
+    if (offset != 0) {
+      _rxbuf.erase(_rxbuf.begin(), _rxbuf.begin() + offset);
+    }
+    return PipeResult::Timeout;
   }
 
   PipeResult FramedPipe::receive(std::span<uint8_t> dst, size_t &bytesRead, int timeout_ms) {
@@ -1524,32 +1517,27 @@ namespace platf::dxgi {
     if (!_inner) {
       return PipeResult::Disconnected;
     }
-    if (try_decode_one_frame(dst, bytesRead)) {
-      return PipeResult::Success;
+    auto decoded = try_decode_one_frame(dst, bytesRead);
+    if (decoded != PipeResult::Timeout) {
+      return decoded;
     }
 
     while (true) {
       std::array<uint8_t, 65536> tmp {};
       size_t n = 0;
       auto res = _inner->receive(tmp, n, timeout_ms);
-      if (res == PipeResult::Success) {
-        if (n == 0) {
-          return PipeResult::Disconnected;
-        }
-        _rxbuf.insert(_rxbuf.end(), tmp.begin(), tmp.begin() + static_cast<long>(n));
-        if (try_decode_one_frame(dst, bytesRead)) {
-          return PipeResult::Success;
-        }
-        timeout_ms = 0;
-        continue;
+      if (res != PipeResult::Success) {
+        return res;
       }
-      if (res == PipeResult::Timeout) {
-        if (try_decode_one_frame(dst, bytesRead)) {
-          return PipeResult::Success;
-        }
-        return PipeResult::Timeout;
+      if (n == 0) {
+        return PipeResult::Disconnected;
       }
-      return res;
+      _rxbuf.insert(_rxbuf.end(), tmp.begin(), tmp.begin() + static_cast<long>(n));
+      decoded = try_decode_one_frame(dst, bytesRead);
+      if (decoded != PipeResult::Timeout) {
+        return decoded;
+      }
+      timeout_ms = 0;
     }
   }
 
