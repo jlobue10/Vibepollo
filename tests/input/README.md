@@ -19,6 +19,12 @@ independent browser input contexts sharing capture coordinates, and WebRTC
 connection-loss/recovery callbacks.
 
 The scripts do not replace a full platform build or driver-level testing.
+`python3 tests/input/test_wasapi_silence.py` executes production WASAPI frame
+assembly with a controlled capture clock. It checks silent-frame pacing at
+5/10/20/60 ms for stereo, 5.1 and 7.1, partial-frame padding, resumed audio and
+retained real samples under ASan/UBSan. `--baseline` reads HEAD. Actual endpoint
+event timing and silent-to-active transitions still need Windows hardware checks.
+
 `python3 tests/input/test_pyrowave_sync.py` compiles production D3D11 fence setup
 and encode methods with the bundled PyroWave sync-object creation code. Fake
 D3D/Vulkan boundaries cover handle ownership, allocation/import failures and a
