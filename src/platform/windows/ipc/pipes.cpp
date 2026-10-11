@@ -279,7 +279,10 @@ namespace platf::dxgi {
 
     while (GetTickCount64() < deadline) {
       winrt::file_handle pipe {
-        CreateFileW(fullPipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr)
+        // SECURITY_IDENTIFICATION: the server (possibly a squatter on a user-creatable pipe
+        // name) may identify this client but never impersonate it; the host runs as SYSTEM.
+        CreateFileW(fullPipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                    FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr)
       };
 
       if (pipe) {

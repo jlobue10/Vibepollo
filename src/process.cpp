@@ -2853,6 +2853,13 @@ namespace proc {
         return _app_id;
       }
       if (readiness == dualsense_launch::decision::timed_out) {
+        // terminate() is told the stream lifecycle gate is held; the pollers that run
+        // this loop never take it (upstream's try_to_lock lived here). Take it now, or
+        // yield to a launcher thread / replacement execute() that already owns it.
+        std::unique_lock<std::mutex> lifecycle_lock {nvhttp::stream_lifecycle_mutex(), std::try_to_lock};
+        if (!lifecycle_lock.owns_lock() || !_deferred_launch.active()) {
+          return _app_id;
+        }
         BOOST_LOG(error) << "DualSense launch timed out waiting for the streamed controller and its Windows haptic audio endpoint. Check the optional driver installation and use a compatible Moonlight client with a waveform-capable DualSense.";
         terminate(false, true, false, true);
         return 0;

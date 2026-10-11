@@ -44,7 +44,8 @@ int main() {
     "global_prep_cmd = [{\"do\":\"cmd /c echo #1\",\"undo\":\"\",\"elevated\":false}]\n"
     "   # an indented comment line\n"
     "playnite_exclude_games = #DRIVE, Other\n"
-    "trailing = value # not a comment any more\n"
+    "trailing = value # a trailing comment\n"
+    "glued = a#b\n"
     "list = [\n"
     "  # a comment line inside a bracketed value\n"
     "  a,\n"
@@ -55,10 +56,11 @@ int main() {
   check(vars.count("# a full-line comment") == 0 && vars.count("# an indented comment line") == 0, "comment lines are skipped");
   check(vars["global_prep_cmd"] == "[{\"do\":\"cmd /c echo #1\",\"undo\":\"\",\"elevated\":false}]", "a '#' inside a JSON value survives");
   check(vars["playnite_exclude_games"] == "#DRIVE, Other", "a value starting with '#' survives");
-  check(vars["trailing"] == "value # not a comment any more", "only a line-leading '#' is a comment");
+  check(vars["trailing"] == "value", "a blank-preceded '#' still ends a single-line value");
+  check(vars["glued"] == "a#b", "a '#' glued to the value is part of it");
   check(vars["list"].find('#') == std::string::npos && vars["list"].find("a,") != std::string::npos && vars["list"].find('b') != std::string::npos,
         "comment lines inside a bracketed value are dropped, the entries kept");
-  check(vars["plain"] == "1" && vars.size() == 5, "ordinary options are unchanged");
+  check(vars["plain"] == "1" && vars.size() == 6, "ordinary options are unchanged");
   return failures ? 1 : 0;
 }
 '''
