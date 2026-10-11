@@ -1642,45 +1642,26 @@ namespace webrtc_stream {
         if (controller < 0 || controller >= 16) {
           return;
         }
-        bool should_send = false;
-        {
-          std::lock_guard lg {gamepad_mutex};
-          if (!webrtc_gamepads.test(controller)) {
-            webrtc_gamepads.set(controller);
-            should_send = true;
-          }
-        }
-        if (!should_send) {
-          return;
-        }
+        // Parse and allocate before committing the registration. The callback
+        // catches malformed JSON, so a failed message must leave no state that
+        // suppresses the next valid arrival.
         const uint8_t controller_type = parse_gamepad_type(message);
         const auto capabilities = static_cast<uint16_t>(message.value("capabilities", 0));
         const auto supported_buttons = static_cast<uint32_t>(message.value("supportedButtons", 0));
-        input::passthrough(input_ctx, make_gamepad_arrival_packet(controller, controller_type, capabilities, supported_buttons), input_permission);
+        auto arrival = make_gamepad_arrival_packet(controller, controller_type, capabilities, supported_buttons);
+        {
+          std::lock_guard lg {gamepad_mutex};
+          if (!webrtc_gamepads.test(controller)) {
+            input::passthrough(input_ctx, std::move(arrival), input_permission);
+            webrtc_gamepads.set(controller);
+          }
+        }
         return;
       }
       if (type == "gamepad_state") {
         const int controller = message.value("id", -1);
         if (controller < 0 || controller >= 16) {
           return;
-        }
-        bool should_send_arrival = false;
-        {
-          std::lock_guard lg {gamepad_mutex};
-          if (!webrtc_gamepads.test(controller)) {
-            webrtc_gamepads.set(controller);
-            should_send_arrival = true;
-          }
-        }
-        if (should_send_arrival) {
-          const uint8_t controller_type = parse_gamepad_type(message);
-          const auto capabilities = static_cast<uint16_t>(message.value("capabilities", 0));
-          const auto supported_buttons = static_cast<uint32_t>(message.value("supportedButtons", 0));
-          input::passthrough(
-            input_ctx,
-            make_gamepad_arrival_packet(controller, controller_type, capabilities, supported_buttons),
-            input_permission
-          );
         }
         const auto active_mask = static_cast<uint16_t>(message.value("activeMask", 0));
         const auto buttons = static_cast<uint32_t>(message.value("buttons", 0));
@@ -1696,9 +1677,7 @@ namespace webrtc_stream {
         const int ls_y = static_cast<int>(std::lround(message.value("lsY", 0.0)));
         const int rs_x = static_cast<int>(std::lround(message.value("rsX", 0.0)));
         const int rs_y = static_cast<int>(std::lround(message.value("rsY", 0.0)));
-        input::passthrough(
-          input_ctx,
-          make_gamepad_state_packet(
+        auto state = make_gamepad_state_packet(
             controller,
             active_mask,
             buttons,
@@ -1708,9 +1687,21 @@ namespace webrtc_stream {
             clamp_i16(ls_y),
             clamp_i16(rs_x),
             clamp_i16(rs_y)
-          ),
-          input_permission
-        );
+          );
+        // Finish parsing the state before sending even its implicit arrival.
+        // Keep arrival/state/disconnect ordering under the registration lock.
+        {
+          std::lock_guard lg {gamepad_mutex};
+          if (!webrtc_gamepads.test(controller)) {
+            const uint8_t controller_type = parse_gamepad_type(message);
+            const auto capabilities = static_cast<uint16_t>(message.value("capabilities", 0));
+            const auto supported_buttons = static_cast<uint32_t>(message.value("supportedButtons", 0));
+            auto arrival = make_gamepad_arrival_packet(controller, controller_type, capabilities, supported_buttons);
+            input::passthrough(input_ctx, std::move(arrival), input_permission);
+            webrtc_gamepads.set(controller);
+          }
+          input::passthrough(input_ctx, std::move(state), input_permission);
+        }
         return;
       }
       if (type == "gamepad_disconnect") {
@@ -1718,16 +1709,13 @@ namespace webrtc_stream {
         if (controller < 0 || controller >= 16) {
           return;
         }
+        const auto active_mask = static_cast<uint16_t>(message.value("activeMask", 0));
+        auto state = make_gamepad_state_packet(controller, active_mask, 0, 0, 0, 0, 0, 0, 0);
         {
           std::lock_guard lg {gamepad_mutex};
+          input::passthrough(input_ctx, std::move(state), input_permission);
           webrtc_gamepads.reset(controller);
         }
-        const auto active_mask = static_cast<uint16_t>(message.value("activeMask", 0));
-        input::passthrough(
-          input_ctx,
-          make_gamepad_state_packet(controller, active_mask, 0, 0, 0, 0, 0, 0, 0),
-          input_permission
-        );
         return;
       }
       if (type == "gamepad_motion") {

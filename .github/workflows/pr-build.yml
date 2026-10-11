@@ -51,6 +51,7 @@ jobs:
           python3 tests/input/test_deferred_launch_claim.py
           python3 tests/input/test_deferred_launch_lifecycle.py
           python3 tests/input/test_capture_display_wait.py
+          python3 tests/input/test_encoder_retry.py
       - name: Check malformed app catalog entry recovery
         run: python3 tests/input/test_app_catalog_error.py
       - name: Check mouse release ownership and Windows mouse mapping
@@ -63,6 +64,7 @@ jobs:
       - name: Check browser input context and peer-state bridge lifetimes
         run: |
           python3 tests/input/test_browser_disconnect.py
+          python3 tests/input/test_browser_gamepad_admission.py
           python3 tests/input/test_peer_state_bridge.py
       - name: Check PyroWave fence import and conversion timeout ordering
         run: python3 tests/input/test_pyrowave_sync.py
