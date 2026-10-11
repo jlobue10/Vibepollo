@@ -3680,7 +3680,7 @@ namespace nvhttp {
           }
           pair_session_t sess;
 
-          auto deviceName {get_arg(args, "devicename")};
+          auto deviceName {get_arg(args, "devicename", "")};
 
           if (deviceName == "roth"sv) {
             deviceName = "Legacy Moonlight Client";
@@ -3709,6 +3709,7 @@ namespace nvhttp {
               otp_device_name.clear();
               tree.put("root.<xmlattr>.status_code", 503);
               tree.put("root.<xmlattr>.status_message", "OTP auth not available.");
+              return;
             } else {
               auto hash = util::hex(crypto::hash(one_time_pin + ptr->second.async_insert_pin.salt + otp_passphrase), true);
 

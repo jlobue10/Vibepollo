@@ -87,6 +87,9 @@ namespace platf::playnite {
     std::atomic<bool> broken_ {false};
     std::atomic<bool> active_ {false};
     std::string recv_buffer_;
+    // Set when a line exceeded the pending-line cap: bytes are discarded up to the next
+    // newline so the peer cannot choose where parsing resumes.
+    bool discarding_line_ = false;
     std::string control_name_;
     bool no_playnite_logged_ = false;  ///< Ensures we only log missing Playnite once until it appears.
   };

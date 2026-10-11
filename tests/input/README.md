@@ -86,3 +86,14 @@ completion winning timeout cancellation, cancelled operations, broken pipes,
 pending-I/O cleanup after a failed wait, and short overlapped writes.
 `--baseline` reads HEAD to reproduce the pre-fix failures. Actual Windows pipe
 scheduling and helper recovery still require a Windows integration run.
+
+`python3 tests/input/test_playnite_path_guard.py` compiles the production Playnite media-path guard
+(`is_safe_local_media_path`) and checks what it accepts (drive-rooted local files only: no UNC,
+device or extended-length prefixes, no relative paths, `..`, empty segments or alternate data
+streams), plus a text check that the cover conversion and the icon resolver call it before any
+SYSTEM-side open. `--baseline` reads HEAD.
+
+`python3 tests/input/test_anon_handshake_name.py` executes the production anonymous-pipe handshake
+client against a peer whose 40-wchar pipe-name field has no terminator (ASan reported the over-read
+before the fix) and checks that empty or path-like names keep the control pipe. `--baseline` reads
+HEAD. No Windows pipes are opened.

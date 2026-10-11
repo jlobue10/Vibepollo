@@ -70,6 +70,15 @@ namespace platf::playnite {
     std::vector<active_game_status_t> g_active_games;
     std::mutex g_plugin_install_mutex;
 
+    // Names are written back into sunshine.conf one entry per line; a CR/LF inside one
+    // would split the entry into a second option.
+    std::string single_line(std::string s) {
+      std::erase_if(s, [](char c) {
+        return c == '\r' || c == '\n';
+      });
+      return s;
+    }
+
     std::string lower_copy(std::string s) {
       std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -82,7 +91,13 @@ namespace platf::playnite {
         return;
       }
       std::scoped_lock lk(g_install_dir_mutex);
-      g_install_dirs[lower_copy(id)] = dir;
+      // Peer-keyed: bound it (a library has thousands of games at most, not millions).
+      constexpr std::size_t MAX_CACHED_INSTALL_DIRS = 8192;
+      auto key = lower_copy(id);
+      if (g_install_dirs.size() >= MAX_CACHED_INSTALL_DIRS && !g_install_dirs.count(key)) {
+        g_install_dirs.clear();
+      }
+      g_install_dirs[std::move(key)] = dir;
     }
 
     void remember_active_game_started(const std::string &id, const std::string &exe, const std::string &install_dir) {
@@ -1479,12 +1494,12 @@ namespace platf::playnite {
       std::unordered_map<std::string, std::string> plugin_id_by_name;
       for (const auto &g : games) {
         if (!g.id.empty()) {
-          game_name_by_id[g.id] = g.name;
+          game_name_by_id[g.id] = single_line(g.name);
         }
       }
       for (const auto &p : plugins) {
         if (!p.id.empty()) {
-          plugin_name_by_id[p.id] = p.name;
+          plugin_name_by_id[p.id] = single_line(p.name);
         }
         if (!p.name.empty()) {
           plugin_id_by_name[p.name] = p.id;

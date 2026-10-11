@@ -9,7 +9,9 @@
 #include "src/platform/windows/playnite_integration.h"
 #include "src/uuid.h"
 
+#include <cctype>
 #include <sstream>
+#include <string_view>
 
 namespace platf::playnite::sync {
   namespace {
@@ -44,8 +46,36 @@ namespace platf::playnite::sync {
     return signature.str();
   }
 
+  bool is_safe_local_media_path(const std::string &path) {
+    // SYSTEM opens these on a peer's say-so (WIC decode, LoadLibraryEx as a data file). Only a
+    // plain drive-rooted local path: a UNC name would force SYSTEM network authentication and
+    // a device/pipe namespace path would hand a pipe squatter an impersonation client.
+    if (path.size() < 4 || !std::isalpha(static_cast<unsigned char>(path[0])) || path[1] != ':' ||
+        (path[2] != '\\' && path[2] != '/')) {
+      return false;
+    }
+    if (path.find('\0') != std::string::npos || path.find(':', 2) != std::string::npos) {
+      return false;  // embedded NUL, alternate data stream or a nested drive spec
+    }
+    const std::string_view view(path);
+    for (std::size_t i = 3; i <= view.size();) {
+      std::size_t end = view.find_first_of("\\/", i);
+      if (end == std::string_view::npos) end = view.size();
+      const auto segment = view.substr(i, end - i);
+      if (segment.empty() || segment == "." || segment == "..") {
+        return false;  // "C:\\a\\\\b", "C:\\a\\..\\b", "C:\\a\\" (a file is expected)
+      }
+      i = end + 1;
+    }
+    return true;
+  }
+
   bool convert_playnite_image_to_png(const std::string &src_path, const std::filesystem::path &dst) {
     if (src_path.empty()) return false;
+    if (!is_safe_local_media_path(src_path)) {
+      BOOST_LOG(warning) << "Playnite sync: refusing to open image path '" << src_path << "'";
+      return false;
+    }
     const auto src = std::filesystem::path(src_path);
     file_handler::make_directory(dst.parent_path().string());
     const auto signature = image_source_signature(src);
@@ -71,8 +101,13 @@ namespace platf::playnite::sync {
         std::string cached;
         if (platf::playnite::get_cached_install_dir(game.id, cached)) install_dir = cached;
       }
+      // Every path here came from the Playnite peer; the icon resolver opens them as SYSTEM.
+      const std::string icon_path = is_safe_local_media_path(game.icon_path) ? game.icon_path : std::string();
+      const std::string exe_path = is_safe_local_media_path(game.exe) ? game.exe : std::string();
+      while (!install_dir.empty() && (install_dir.back() == '\\' || install_dir.back() == '/')) install_dir.pop_back();
+      if (!is_safe_local_media_path(install_dir + "\\d")) install_dir.clear();  // a directory: checked as a parent
       platf::img::IconResolutionInfo diagnostics;
-      if (platf::img::resolve_best_app_icon_png(std::filesystem::path(game.icon_path).wstring(), std::filesystem::path(game.exe).wstring(), std::filesystem::path(install_dir).wstring(), destination.wstring(), &diagnostics)) {
+      if (platf::img::resolve_best_app_icon_png(std::filesystem::path(icon_path).wstring(), std::filesystem::path(exe_path).wstring(), std::filesystem::path(install_dir).wstring(), destination.wstring(), &diagnostics)) {
         policy::apply_icon_path(app, destination.generic_string());
         BOOST_LOG(debug) << "Playnite sync icon: name='" << game.name << "' installDir='" << install_dir << "' exeIcon=" << diagnostics.exe_size << " playniteIcon=" << diagnostics.icon_size << " -> width=" << platf::img::image_pixel_width(destination.wstring());
       } else {
