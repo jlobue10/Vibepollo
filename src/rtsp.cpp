@@ -2255,7 +2255,14 @@ namespace rtsp_stream {
         }
       }
 
-      config.minRequiredFecPackets = (int) util::from_view(args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv));
+      // Sets the parity-shard count of every frame: bounded like the other numeric fields.
+      const auto min_fec_parsed = pending_policy::parse_bounded_int(args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv), 0, 64);
+      if (!min_fec_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-nv-vqos[0].fec.minRequiredFecPackets ["sv << args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv) << "] is outside 0..64"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.minRequiredFecPackets = *min_fec_parsed;
       config.mlFeatureFlags = (int) util::from_view(args.at("x-ml-general.featureFlags"sv));
       config.audioQosType = (int) util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
       config.videoQosType = (int) util::from_view(args.at("x-nv-vqos[0].qosTrafficType"sv));

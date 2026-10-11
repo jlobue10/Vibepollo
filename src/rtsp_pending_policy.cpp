@@ -12,7 +12,10 @@ namespace rtsp_stream::pending_policy {
     const auto capture_framerate = requested_framerate > 4000 ?
                                      (requested_framerate + 500) / 1000 :
                                      requested_framerate;
-    if (capture_framerate <= 0 || capture_framerate > MAX_CAPTURE_FRAMERATE) {
+    // Below 10 fps the rate-control arithmetic degenerates (the software encoder divided
+    // by (fps * 10) / 15, zero for fps 1) and no client streams that slowly.
+    constexpr std::int64_t MIN_CAPTURE_FRAMERATE = 10;
+    if (capture_framerate < MIN_CAPTURE_FRAMERATE || capture_framerate > MAX_CAPTURE_FRAMERATE) {
       return std::nullopt;
     }
 

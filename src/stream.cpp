@@ -709,6 +709,10 @@ namespace stream {
       crypto::aes_t legacy_input_enc_iv;  // Only used when the client doesn't support full control stream encryption
       crypto::aes_t incoming_iv;
       crypto::aes_t outgoing_iv;
+      // Highest client sequence number accepted on the v2 encrypted control stream; an
+      // authenticated packet with an older or equal number is a replay.
+      std::uint32_t incoming_seq_high_water = 0;
+      bool incoming_seq_seen = false;
 
       std::uint32_t connect_data;  // Used for new clients with ML_FF_SESSION_ID_V1
       std::string expected_peer_address;  // Only used for legacy clients without ML_FF_SESSION_ID_V1
@@ -1229,6 +1233,13 @@ namespace stream {
         fecpercentage = (100 * parity_shards) / data_shards;
 
         BOOST_LOG(verbose) << "Increasing FEC percentage to "sv << fecpercentage << " to meet parity shard minimum"sv << std::endl;
+      }
+
+      // Reed-Solomon is defined for at most DATA_SHARDS_MAX shards in total; the
+      // client-chosen minimum must not push past it.
+      if (data_shards + parity_shards > DATA_SHARDS_MAX) {
+        parity_shards = data_shards < DATA_SHARDS_MAX ? DATA_SHARDS_MAX - data_shards : 0;
+        fecpercentage = data_shards ? (100 * parity_shards) / data_shards : 0;
       }
 
       auto nr_shards = data_shards + parity_shards;
@@ -1778,6 +1789,19 @@ namespace stream {
         return;
       }
 
+      if (session->config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2) {
+        // The tag authenticates the packet, not its freshness: refuse an old or repeated
+        // sequence number (an on-path replay of an input or termination packet).
+        auto &control = session->control;
+        if (control.incoming_seq_seen && *seq <= control.incoming_seq_high_water) {
+          BOOST_LOG(warning) << "Control: dropping replayed encrypted packet (seq " << *seq
+                             << " <= " << control.incoming_seq_high_water << ')';
+          return;
+        }
+        control.incoming_seq_high_water = *seq;
+        control.incoming_seq_seen = true;
+      }
+
       const auto plaintext_view = std::string_view {
         reinterpret_cast<const char *>(plaintext.data()),
         plaintext.size()
@@ -2020,7 +2044,9 @@ namespace stream {
 
     auto &io = ctx.io_context;
 
-    udp::endpoint peer;
+    // One sender-endpoint per socket: the kernel fills it when the datagram lands, so two
+    // outstanding receives must not share it.
+    std::array<udp::endpoint, 2> peers;
 
     std::array<char, 2048> buf[2];
     std::function<void(const boost::system::error_code, size_t)> recv_func[2];
@@ -2053,6 +2079,7 @@ namespace stream {
 
     auto recv_func_init = [&](udp::socket &sock, int buf_elem, std::map<av_session_id_t, message_queue_t> &peer_to_session) {
       recv_func[buf_elem] = [&, buf_elem](const boost::system::error_code &ec, size_t bytes) {
+        auto &peer = peers[buf_elem];
         auto fg = util::fail_guard([&]() {
           sock.async_receive_from(asio::buffer(buf[buf_elem]), peer, 0, recv_func[buf_elem]);
         });
@@ -2095,8 +2122,8 @@ namespace stream {
     recv_func_init(video_sock, 0, peer_to_video_session);
     recv_func_init(audio_sock, 1, peer_to_audio_session);
 
-    video_sock.async_receive_from(asio::buffer(buf[0]), peer, 0, recv_func[0]);
-    audio_sock.async_receive_from(asio::buffer(buf[1]), peer, 0, recv_func[1]);
+    video_sock.async_receive_from(asio::buffer(buf[0]), peers[0], 0, recv_func[0]);
+    audio_sock.async_receive_from(asio::buffer(buf[1]), peers[1], 0, recv_func[1]);
 
     while (!broadcast_shutdown_event->peek()) {
       io.run();
@@ -3662,8 +3689,10 @@ namespace stream {
         }
       }
 
+      // controlEnd is raised by the control thread once it has swept this STOPPING session
+      // out of its registry; raising it here, from a foreign thread, let the session be
+      // torn down while the control thread could still reach it.
       session.shutdown_event->raise(true);
-      session.controlEnd.raise(true);
     }
 
     void join(session_t &session, const bool lifecycle_lock_held) {

@@ -72,6 +72,21 @@ namespace platf::playnite::sync {
     return true;
   }
 
+  namespace {
+    // Opens one path component without following a reparse point on it. True when it is a
+    // plain file or directory on a disk volume; `directory` reports which.
+    bool plain_component(const std::wstring &component_path, bool &directory) {
+      HANDLE handle = CreateFileW(component_path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                  FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
+      if (handle == INVALID_HANDLE_VALUE) return false;
+      BY_HANDLE_FILE_INFORMATION info {};
+      const bool plain = GetFileInformationByHandle(handle, &info) && (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 && GetFileType(handle) == FILE_TYPE_DISK;
+      directory = plain && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      CloseHandle(handle);
+      return plain;
+    }
+  }  // namespace
+
   std::optional<std::wstring> resolve_local_media_path(const std::string &path) {
     if (!is_safe_local_media_path(path)) return std::nullopt;
     std::wstring wide;
@@ -80,9 +95,18 @@ namespace platf::playnite::sync {
     } catch (...) {
       return std::nullopt;
     }
-    // FILE_FLAG_OPEN_REPARSE_POINT: a junction or symlink as the final component is opened as
-    // itself and refused below. SECURITY_IDENTIFICATION: even if the name reaches a pipe, the
-    // server gets no impersonation token. BACKUP_SEMANTICS: directories (install dirs) open too.
+    // Every ancestor is opened as itself (FILE_FLAG_OPEN_REPARSE_POINT) and must be a plain
+    // directory before the next component is touched, so a junction planted in a parent can
+    // never be followed, not even by this check, to a share (forced SYSTEM authentication)
+    // or a device namespace. SECURITY_IDENTIFICATION: a name that still reaches a pipe
+    // server grants no impersonation token. The leaf may be a file or a directory.
+    // The sinks re-open the resolved path by name afterwards; a swap in that window remains
+    // (a handle-based decoder path is the complete fix).
+    for (std::size_t i = 3; i < wide.size(); ++i) {
+      if (wide[i] != L'\\' && wide[i] != L'/') continue;
+      bool directory = false;
+      if (!plain_component(wide.substr(0, i), directory) || !directory) return std::nullopt;
+    }
     HANDLE handle = CreateFileW(wide.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
     if (handle == INVALID_HANDLE_VALUE) return std::nullopt;

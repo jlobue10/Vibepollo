@@ -85,6 +85,8 @@ jobs:
           python3 tests/input/test_anon_handshake_name.py
       - name: Check Remote Monitor lease recovery after a lost display
         run: python3 tests/input/test_remote_monitor_lease_recovery.py
+      - name: Check the launch-argument bracket scanner stays in bounds
+        run: python3 tests/input/test_find_match_bounds.py
       - name: Fetch the libwebrtc C header the browser/peer-state harnesses read
         run: git submodule update --init --depth 1 third-party/libwebrtc
       - name: Check browser input context and peer-state bridge lifetimes

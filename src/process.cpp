@@ -1635,7 +1635,14 @@ namespace proc {
         } else if (_app.use_app_identity) {
           device_name = _app.name;
           if (_app.per_client_app_identity) {
-            device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
+            try {
+              device_uuid = uuid_util::uuid_t::parse(launch_session->unique_id);
+            } catch (const std::exception &e) {
+              // Not a UUID (a legacy or synthetic client id): derive from the host's own id
+              // rather than throwing out of execute() after the app state was committed.
+              BOOST_LOG(warning) << "Client id '" << launch_session->unique_id << "' is not a UUID (" << e.what() << "); using the host identity for the per-client display";
+              device_uuid = uuid_util::uuid_t::parse(http::unique_id);
+            }
             auto app_uuid = uuid_util::uuid_t::parse(_app.uuid);
 
             device_uuid.b64[0] ^= app_uuid.b64[0];
@@ -3573,22 +3580,20 @@ namespace proc {
   std::string_view::iterator find_match(std::string_view::iterator begin, std::string_view::iterator end) {
     int stack = 0;
 
-    --begin;
-    do {
-      ++begin;
+    for (; begin != end; ++begin) {
       switch (*begin) {
         case '(':
           ++stack;
           break;
         case ')':
-          --stack;
+          if (--stack == 0) {
+            return begin;
+          }
+          break;
       }
-    } while (begin != end && stack != 0);
-
-    if (begin == end) {
-      throw std::out_of_range("Missing closing bracket \')\'");
     }
-    return begin;
+
+    throw std::out_of_range("Missing closing bracket \')\'");
   }
 
   std::string parse_env_val(bp::native_environment &env, const std::string_view &val_raw) {

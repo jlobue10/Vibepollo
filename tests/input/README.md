@@ -110,3 +110,8 @@ that a lease whose display was lost (driver watchdog failure, reinstall) is recr
 resume or activation, that a present display is not recreated, and that `forget_all_leases`
 (the watchdog-failure path) leads to recreation. `--baseline` reads HEAD. No platform display
 code runs.
+
+`python3 tests/input/test_find_match_bounds.py` compiles the production `find_match` (the
+`$(...)` scanner behind `parse_env_val`) and runs it under ASan on an exact-size heap buffer
+holding an unbalanced group: the previous loop read one element past the end before throwing.
+`--baseline` reads HEAD.
