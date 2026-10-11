@@ -52,6 +52,30 @@ namespace confighttp {
 #endif
 
   namespace {
+    std::optional<std::vector<ApiTokenScope>> compile_api_token_scopes(
+      const std::map<std::string, std::set<std::string, std::less<>>, std::less<>> &path_methods
+    ) {
+      std::vector<ApiTokenScope> scopes;
+      try {
+        for (const auto &[path, methods] : path_methods) {
+          if (path.empty()) {
+            return std::nullopt;
+          }
+          std::string pattern = path;
+          if (pattern.front() != '^') {
+            pattern = "^" + pattern;
+          }
+          if (pattern.back() != '$') {
+            pattern += "$";
+          }
+          scopes.push_back({std::make_shared<const std::regex>(pattern), methods});
+        }
+      } catch (const std::regex_error &) {
+        return std::nullopt;
+      }
+      return scopes;
+    }
+
     constexpr std::chrono::seconds default_remember_me_token_ttl {std::chrono::hours(24 * 7)};
     constexpr std::chrono::seconds default_refresh_token_ttl {std::chrono::hours(24)};
 
@@ -199,38 +223,27 @@ namespace confighttp {
       _dependencies(dependencies) {}
 
   bool ApiTokenManager::authenticate_token(const std::string &token, const std::string &path, const std::string &method) {
-    std::scoped_lock lock(_mutex);
-    std::string token_hash = _dependencies.hash(token);
-    auto it = _api_tokens.find(token_hash);
-    if (it == _api_tokens.end()) {
-      return false;
+    std::vector<std::shared_ptr<const std::regex>> patterns;
+    {
+      std::scoped_lock lock(_mutex);
+      auto it = _api_tokens.find(_dependencies.hash(token));
+      if (it == _api_tokens.end()) {
+        return false;
+      }
+      for (const auto &scope : it->second.compiled_scopes) {
+        if (std::ranges::any_of(scope.methods, [&](const auto &allowed) { return boost::iequals(allowed, method); })) {
+          patterns.push_back(scope.pattern);
+        }
+      }
     }
 
-    std::string req_method = boost::to_upper_copy(method);
-
-    auto is_method_allowed = [&](const std::set<std::string, std::less<>> &methods) {
-      return std::ranges::any_of(methods, [&](const std::string &m) {
-        return boost::iequals(m, req_method);
-      });
-    };
-
-    auto regex_path_match = [](const std::string &scope_path, const std::string &request_path) {
-      std::string pattern = scope_path;
-      if (pattern.empty() || pattern[0] != '^') {
-        pattern = "^" + pattern;
-      }
-      if (pattern.empty() || pattern.back() != '$') {
-        pattern += "$";
-      }
-      std::regex re(pattern);
-      return std::regex_match(request_path, re);
-    };
-
-    return std::ranges::any_of(it->second.path_methods, [&](const auto &pair) {
-      const auto &scope_path = pair.first;
-      const auto &methods = pair.second;
-      return regex_path_match(scope_path, path) && is_method_allowed(methods);
-    });
+    // Compilation happens at admission/restore. Matching must not hold the
+    // manager lock or delay unrelated authentication and token revocation.
+    try {
+      return std::ranges::any_of(patterns, [&](const auto &pattern) { return std::regex_match(path, *pattern); });
+    } catch (const std::regex_error &) {
+      return false;
+    }
   }
 
   bool ApiTokenManager::authenticate_bearer(std::string_view raw_auth, const std::string &path, const std::string &method) {
@@ -246,9 +259,13 @@ namespace confighttp {
     if (!path_methods) {
       return std::nullopt;
     }
+    auto compiled_scopes = compile_api_token_scopes(*path_methods);
+    if (!compiled_scopes) {
+      return std::nullopt;
+    }
     std::string token = _dependencies.rand_alphabet(32);
     std::string token_hash = _dependencies.hash(token);
-    ApiTokenInfo info {token_hash, *path_methods, username, _dependencies.now()};
+    ApiTokenInfo info {token_hash, *path_methods, username, _dependencies.now(), std::move(*compiled_scopes)};
     {
       std::scoped_lock lock(_mutex);
       _api_tokens[token_hash] = info;
@@ -273,14 +290,21 @@ namespace confighttp {
   std::optional<std::map<std::string, std::set<std::string, std::less<>>, std::less<>>>
     ApiTokenManager::parse_json_scopes(const nlohmann::json &scopes_json) const {
     std::map<std::string, std::set<std::string, std::less<>>, std::less<>> path_methods;
+    if (!scopes_json.is_array()) {
+      return std::nullopt;
+    }
     try {
       for (const auto &s : scopes_json) {
-        if (!s.contains("path") || !s.contains("methods") || !s["methods"].is_array()) {
+        if (!s.is_object() || !s.contains("path") || !s["path"].is_string() ||
+            !s.contains("methods") || !s["methods"].is_array()) {
           throw InvalidScopeException("Invalid scopes configured on API Token, missing 'path' or 'methods' array");
         }
         std::string path = s["path"].get<std::string>();
         std::set<std::string, std::less<>> methods;
         for (const auto &m : s["methods"]) {
+          if (!m.is_string()) {
+            throw InvalidScopeException("API token methods must be strings");
+          }
           methods.insert(boost::to_upper_copy(m.get<std::string>()));
         }
         path_methods[path] = methods;
@@ -456,6 +480,11 @@ namespace confighttp {
         if (auto scopes_node = token_tree.get_child_optional("scopes")) {
           info.path_methods = build_scope_map(*scopes_node);
         }
+        auto compiled_scopes = compile_api_token_scopes(info.path_methods);
+        if (!compiled_scopes) {
+          continue;
+        }
+        info.compiled_scopes = std::move(*compiled_scopes);
         _api_tokens.try_emplace(info.hash, std::move(info));
       }
     }
