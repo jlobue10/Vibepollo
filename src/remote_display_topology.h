@@ -121,6 +121,12 @@ namespace remote_display_topology {
     void release_drained_normal_game_identities();
     void release_all_normal_game_identities();
     void note_lease_lost(const std::string &client_uuid);
+    /**
+     * Every managed display is gone (terminal cleanup, driver reset): drop the normal-game
+     * identities and mark every Remote Monitor lease lost so Resume recreates its display
+     * instead of composing a node that no longer resolves.
+     */
+    void forget_all_leases();
     void disconnect_monitor(const std::string &client_uuid);
     void unpair_client(const std::string &client_uuid);
     /** Drop runtime state, optionally preserving every platform display untouched. */

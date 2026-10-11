@@ -263,7 +263,11 @@ namespace platf::virtual_display_cleanup {
     // its ping/watchdog worker; a later new session may open it again.
     VDISPLAY::closeVDisplayDevice();
     display_helper_integration::stop_watchdog(true);
-    BOOST_LOG(info) << "Virtual display cleanup: terminal driver and helper watchdog shutdown completed (reason="
+    // The coordinator must not keep believing those leases are held: a stale lease
+    // skipped create_or_reclaim on Resume and its unresolvable node failed every
+    // later composition, so no other identity could be released until a restart.
+    remote_display_topology::instance().forget_all_leases();
+    BOOST_LOG(info) << "Virtual display cleanup: terminal driver and helper shutdown completed; coordinator leases forgotten (reason="
                     << (reason.empty() ? "unspecified" : std::string(reason)) << ").";
     return result;
   }

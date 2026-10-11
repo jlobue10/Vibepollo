@@ -314,6 +314,11 @@ namespace confighttp {
      * @return `true` if a session was removed.
      */
     bool revoke_refresh_token(const std::string &refresh_token);
+    /**
+     * @brief Revoke every session and refresh token (password change).
+     * @return Number of sessions removed.
+     */
+    std::size_t revoke_all();
 
   private:
     SessionTokenManagerDependencies _dependencies;  ///< Injected dependencies

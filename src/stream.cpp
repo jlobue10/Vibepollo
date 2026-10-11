@@ -4068,7 +4068,11 @@ namespace stream {
       session->secondary_game_client = launch_session.secondary_game_client;
       session->remote_role = launch_session.role;
       session->remote_role_generation = launch_session.role_generation;
-#ifdef __linux__
+      // Every platform retains the app's display while this capture runs: the
+      // coordinator only defers the per-client display release while a reference
+      // is held, so without this Windows removed the VDD under a live stream when
+      // the game exited (proc_t::terminate releases the identity before deciding
+      // whether cleanup must wait).
       if (launch_session.role == remote_session::role_e::game) {
         const auto app = proc::proc.active_session_guard();
         const auto token = launch_session.normal_vdd_identity_token != 0 ?
@@ -4086,7 +4090,6 @@ namespace stream {
           throw std::runtime_error("The previous app's display is still being released");
         }
       }
-#endif
       session->input_only =
         launch_session.input_only || launch_session.role == remote_session::role_e::input;
       session->audio_disabled =
