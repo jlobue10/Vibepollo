@@ -31,6 +31,7 @@
 #include "utility.h"
 
 #ifdef _WIN32
+  #include "deferred_launch_claim.h"
   #include "platform/windows/virtual_display.h"
 #include "tools/playnite_launcher/lossless_scaling.h"
 
@@ -301,9 +302,8 @@ namespace proc {
 #ifdef _WIN32
     // A launch waiting for a user session; claimed once (deferred_launch_claim.h) and
     // run on a launcher thread under the stream lifecycle gate, never by the poller.
-    std::atomic<bool> _deferred_launch {false};
-    std::atomic<bool> _deferred_launch_in_flight {false};
-    void resume_deferred_launch(int expected_app_id);
+    deferred_launch::state_t _deferred_launch;
+    void resume_deferred_launch(deferred_launch::state_t::ticket_t ticket);
     bool _lossless_should_start_support {false};
     playnite_launcher::lossless::lossless_scaling_app_metadata _lossless_metadata {};
 #endif

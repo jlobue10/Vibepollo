@@ -1,41 +1,73 @@
 /**
  * @file src/deferred_launch_claim.h
- * @brief Single-claimant hand-off for an app launch deferred until a user session exists.
+ * @brief Nonblocking, generation-bound hand-off for a launch deferred until sign-in.
  *
- * proc_t::running() is polled by several threads (the stream control thread every
- * 5-150 ms, nvhttp workers, the web UI). Exactly one of them may resume a deferred
- * launch, and none of them may run it inline: the control thread raises controlEnd,
- * which join() waits for under the hang watchdog.
+ * Pollers never run commands inline. The launcher checks its ticket under the
+ * lifecycle gate before touching app state; cancellation or a replacement launch
+ * invalidates that ticket, even when the replacement has the same app id.
  */
 #pragma once
 
 #include <atomic>
+#include <cstdint>
+#include <optional>
 
 namespace proc::deferred_launch {
-  /**
-   * @brief Claim the deferred launch. Returns true for exactly one caller while
-   * `deferred` is set; the claimant clears `deferred` and owns `in_flight` until release().
-   */
-  inline bool claim(std::atomic<bool> &deferred, std::atomic<bool> &in_flight) {
-    if (!deferred.load(std::memory_order_acquire)) {
-      return false;
-    }
-    bool expected = false;
-    if (!in_flight.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-      return false;
-    }
-    deferred.store(false, std::memory_order_release);
-    return true;
-  }
+  class state_t {
+  public:
+    using ticket_t = std::uint64_t;
 
-  /// The launch ran (or was abandoned); another deferral may be claimed again later.
-  inline void release(std::atomic<bool> &in_flight) {
-    in_flight.store(false, std::memory_order_release);
-  }
+    void defer() {
+      replace(pending);
+    }
 
-  /// The claimant could not start the launch (no thread): hand the deferral back for the next poll.
-  inline void requeue(std::atomic<bool> &deferred, std::atomic<bool> &in_flight) {
-    deferred.store(true, std::memory_order_release);
-    in_flight.store(false, std::memory_order_release);
-  }
+    void cancel() {
+      replace(idle);
+    }
+
+    bool active() const {
+      return (state.load(std::memory_order_acquire) & phase_mask) != idle;
+    }
+
+    std::optional<ticket_t> claim() {
+      auto expected = state.load(std::memory_order_acquire);
+      if ((expected & phase_mask) != pending) {
+        return std::nullopt;
+      }
+      const auto ticket = (expected & ~phase_mask) | launching;
+      // Compare the pending generation itself. A poller delayed until after
+      // another worker finishes must not claim its already-consumed request.
+      if (!state.compare_exchange_strong(expected, ticket, std::memory_order_acq_rel)) {
+        return std::nullopt;
+      }
+      return ticket;
+    }
+
+    bool is_current(ticket_t ticket) const {
+      return state.load(std::memory_order_acquire) == ticket;
+    }
+
+    void release(ticket_t ticket) {
+      state.compare_exchange_strong(ticket, ticket & ~phase_mask, std::memory_order_release);
+    }
+
+    void requeue(ticket_t ticket) {
+      // Thread creation may fail after another thread cancelled/replaced the
+      // app. Only return this request; never revive it over a newer generation.
+      state.compare_exchange_strong(ticket, (ticket & ~phase_mask) | pending, std::memory_order_release);
+    }
+
+  private:
+    static constexpr ticket_t idle = 0;
+    static constexpr ticket_t pending = 1;
+    static constexpr ticket_t launching = 2;
+    static constexpr ticket_t phase_mask = 3;
+    std::atomic<ticket_t> state {idle};
+
+    void replace(ticket_t phase) {
+      auto expected = state.load(std::memory_order_relaxed);
+      while (!state.compare_exchange_weak(expected, ((expected & ~phase_mask) + 4) | phase,
+                                          std::memory_order_acq_rel)) {}
+    }
+  };
 }  // namespace proc::deferred_launch

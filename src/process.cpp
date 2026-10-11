@@ -95,8 +95,6 @@
 #include "nvhttp.h"
 #include "process.h"
 
-#include "deferred_launch_claim.h"
-
 #include <cctype>
 #ifdef _WIN32
   #include "platform/windows/virtual_display.h"
@@ -1363,7 +1361,7 @@ namespace proc {
     std::string resolved_lossless_exe_utf8;
     _virtual_display_active = false;
     _virtual_display_guid = GUID {};
-    _deferred_launch = false;
+    _deferred_launch.cancel();
     _lossless_should_start_support = false;
     _lossless_metadata = {};
 #endif
@@ -2335,7 +2333,7 @@ namespace proc {
 
     if (platf::is_running_as_system() && requires_user_session() && !user_session_ready()) {
       BOOST_LOG(info) << "No active user session; deferring app launch until sign-in.";
-      _deferred_launch = true;
+      _deferred_launch.defer();
       return 0;
     }
 #endif
@@ -2731,15 +2729,15 @@ namespace proc {
   }
 
 #ifdef _WIN32
-  void proc_t::resume_deferred_launch(const int expected_app_id) {
-    auto in_flight = util::fail_guard([this]() {
-      deferred_launch::release(_deferred_launch_in_flight);
+  void proc_t::resume_deferred_launch(const deferred_launch::state_t::ticket_t ticket) {
+    auto in_flight = util::fail_guard([this, ticket]() {
+      _deferred_launch.release(ticket);
     });
     // The same gate /launch ran execute() under. nvhttp's app transitions queue
     // behind it; running()'s cleanup path uses try_to_lock and never waits here.
     std::unique_lock<std::mutex> stream_lifecycle_lock {nvhttp::stream_lifecycle_mutex()};
-    if (_app_id != expected_app_id) {
-      BOOST_LOG(info) << "Deferred launch for app id " << expected_app_id << " was cancelled before it could run.";
+    if (!_deferred_launch.is_current(ticket)) {
+      BOOST_LOG(info) << "Deferred launch was cancelled or replaced before it could run.";
       return;
     }
     std::optional<int> rtss_warmup_limit;
@@ -2814,7 +2812,7 @@ namespace proc {
 #endif
 
 #ifdef _WIN32
-    if (_deferred_launch.load(std::memory_order_acquire)) {
+    if (_deferred_launch.active()) {
       if (platf::is_running_as_system()) {
         HANDLE user_token = platf::dxgi::retrieve_users_token(false);
         if (!user_token) {
@@ -2828,15 +2826,15 @@ namespace proc {
       // services input and raises controlEnd under join()'s 10 s watchdog, and
       // its failure path re-took the lifecycle gate nvhttp may hold while
       // waiting for that same controlEnd.
-      if (deferred_launch::claim(_deferred_launch, _deferred_launch_in_flight)) {
-        BOOST_LOG(info) << "User session detected; resuming deferred launch for app '" << _app.name << "' on a launcher thread.";
+      if (const auto ticket = _deferred_launch.claim()) {
+        BOOST_LOG(info) << "User session detected; resuming deferred launch on a launcher thread.";
         try {
-          std::thread([this, app_id = _app_id.load(std::memory_order_acquire)]() {
-            resume_deferred_launch(app_id);
+          std::thread([this, ticket = *ticket]() {
+            resume_deferred_launch(ticket);
           }).detach();
         } catch (const std::exception &e) {
           BOOST_LOG(warning) << "Could not start the deferred launch thread (" << e.what() << "); retrying on the next poll.";
-          deferred_launch::requeue(_deferred_launch, _deferred_launch_in_flight);
+          _deferred_launch.requeue(*ticket);
         }
       }
       return _app_id;
@@ -3183,7 +3181,7 @@ namespace proc {
     placebo = false;
     std::chrono::seconds remaining_timeout = _app.exit_timeout;
 #ifdef _WIN32
-    _deferred_launch = false;
+    _deferred_launch.cancel();
     _lossless_should_start_support = false;
     stop_lossless_scaling_support();
 #endif
@@ -3493,7 +3491,7 @@ namespace proc {
   bool proc_t::is_launch_deferred() const {
 #ifdef _WIN32
     // In flight counts as deferred: /cancel must not treat the half-launched app as running.
-    return _deferred_launch.load(std::memory_order_acquire) || _deferred_launch_in_flight.load(std::memory_order_acquire);
+    return _deferred_launch.active();
 #else
     return false;
 #endif
