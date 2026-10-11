@@ -6456,6 +6456,24 @@ namespace nvhttp {
       response->close_connection_after_response = true;
       return;
     }
+    // The probe holds the stream-start lifecycle gate for seconds; one paired client
+    // looping on it made every other client's launch fail. One probe per client per
+    // cooldown window.
+    {
+      static std::mutex cooldown_mutex;
+      static std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_probe;
+      constexpr auto PROBE_COOLDOWN = std::chrono::seconds(10);
+      std::lock_guard lock {cooldown_mutex};
+      const auto now = std::chrono::steady_clock::now();
+      if (const auto it = last_probe.find(identity.uuid); it != last_probe.end() && now - it->second < PROBE_COOLDOWN) {
+        response->write(SimpleWeb::StatusCode::client_error_too_many_requests, "Probe cooldown; retry in a few seconds");
+        return;
+      }
+      last_probe[identity.uuid] = now;
+      if (last_probe.size() > 64) {
+        std::erase_if(last_probe, [&](const auto &entry) { return now - entry.second >= PROBE_COOLDOWN; });
+      }
+    }
     auto lifecycle_lock = acquire_stream_start_lifecycle_lock();
     // One bounded probe at a time; never contend with a running stream.
     static std::mutex probe_mutex;

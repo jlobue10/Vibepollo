@@ -156,7 +156,14 @@ namespace platf::playnite {
   }
 
   void IpcClient::accumulate_and_dispatch_lines(std::span<const uint8_t> bytes) {
+    // A peer that never sends a newline must not grow this without bound.
+    constexpr std::size_t MAX_PENDING_LINE_BYTES = 1 << 20;
     if (!bytes.empty()) {
+      if (recv_buffer_.size() + bytes.size() > MAX_PENDING_LINE_BYTES) {
+        BOOST_LOG(warning) << "Playnite IPC: dropping " << recv_buffer_.size() + bytes.size() << " bytes without a line break";
+        recv_buffer_.clear();
+        return;
+      }
       recv_buffer_.append(reinterpret_cast<const char *>(bytes.data()), bytes.size());
     }
     size_t start = 0;

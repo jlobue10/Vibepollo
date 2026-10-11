@@ -1253,11 +1253,24 @@ namespace config {
       }
     }
 
-    // Only a bracketed list spans lines (and can contain comment lines); a single-line
-    // value is taken verbatim, so one that starts with '#' is a value, not a comment.
+    // Only a bracketed list spans lines (and can contain comment lines). A single-line
+    // value keeps a '#' it starts with or that follows a non-blank ("#DRIVE", "a#b"); a
+    // blank-preceded '#' still starts a trailing comment ("port = 47989 # https"), as it
+    // always did for the plain options.
+    if (*begin_val != '[') {
+      auto end_val = endl;
+      for (auto it = begin_val + 1; it < endl; ++it) {
+        if (*it == '#' && space_tab(*(it - 1))) {
+          end_val = it;
+          break;
+        }
+      }
+      end_val = std::find_if_not(std::make_reverse_iterator(end_val), std::make_reverse_iterator(begin_val), space_tab).base();
+      return std::make_pair(endl, std::make_pair(to_string(begin, end_name), std::string(begin_val, end_val)));
+    }
     return std::make_pair(
       endl,
-      std::make_pair(to_string(begin, end_name), *begin_val == '[' ? to_string(begin_val, endl) : std::string(begin_val, endl))
+      std::make_pair(to_string(begin, end_name), to_string(begin_val, endl))
     );
   }
 
