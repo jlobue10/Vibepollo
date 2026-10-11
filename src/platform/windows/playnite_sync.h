@@ -21,6 +21,11 @@ namespace platf::playnite::sync {
 
   // Art conversion cache: identity of the source image (path+size+mtime) that produced a converted PNG.
   std::string image_source_signature(const std::filesystem::path &src);
+  // True for a plain drive-rooted local path ("C:\\dir\\file.png"): the only shape the host
+  // opens on a Playnite peer's say-so (WIC decode, LoadLibraryEx as a data file run as SYSTEM).
+  // UNC names, device/pipe namespaces, relative paths, '..' segments and alternate data
+  // streams are refused.
+  bool is_safe_local_media_path(const std::string &path);
   bool convert_playnite_image_to_png(const std::string &src_path, const std::filesystem::path &dst);
   void apply_game_metadata_to_app(const Game &g, nlohmann::json &app, const std::filesystem::path &covers_root);
   void apply_game_metadata_to_app(const Game &g, nlohmann::json &app);

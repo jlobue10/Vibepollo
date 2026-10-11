@@ -14,6 +14,7 @@
 #endif
 #include "src/utility.h"
 
+#include <algorithm>
 #include <chrono>
 #include <span>
 #include <string>
@@ -158,13 +159,31 @@ namespace platf::playnite {
   void IpcClient::accumulate_and_dispatch_lines(std::span<const uint8_t> bytes) {
     // A peer that never sends a newline must not grow this without bound.
     constexpr std::size_t MAX_PENDING_LINE_BYTES = 1 << 20;
-    if (!bytes.empty()) {
-      if (recv_buffer_.size() + bytes.size() > MAX_PENDING_LINE_BYTES) {
-        BOOST_LOG(warning) << "Playnite IPC: dropping " << recv_buffer_.size() + bytes.size() << " bytes without a line break";
-        recv_buffer_.clear();
+    if (discarding_line_) {
+      // The rest of an oversized line: skip to its end, then resume on a real boundary.
+      const auto newline = std::find(bytes.begin(), bytes.end(), static_cast<uint8_t>('\n'));
+      if (newline == bytes.end()) {
         return;
       }
-      recv_buffer_.append(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+      bytes = bytes.subspan(static_cast<std::size_t>(newline - bytes.begin()) + 1);
+      discarding_line_ = false;
+    }
+    bool overflow = false;
+    if (!bytes.empty()) {
+      if (recv_buffer_.size() + bytes.size() > MAX_PENDING_LINE_BYTES) {
+        // Keep only what this chunk completes; the unterminated tail is the oversized line.
+        const auto last_newline = std::find(bytes.rbegin(), bytes.rend(), static_cast<uint8_t>('\n'));
+        if (last_newline != bytes.rend()) {
+          const auto keep = static_cast<std::size_t>(bytes.rend() - last_newline);
+          if (recv_buffer_.size() + keep <= MAX_PENDING_LINE_BYTES) {
+            recv_buffer_.append(reinterpret_cast<const char *>(bytes.data()), keep);
+          }
+        }
+        BOOST_LOG(warning) << "Playnite IPC: discarding a line longer than " << MAX_PENDING_LINE_BYTES << " bytes";
+        overflow = true;
+      } else {
+        recv_buffer_.append(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+      }
     }
     size_t start = 0;
     while (true) {
@@ -187,6 +206,12 @@ namespace platf::playnite {
     }
     if (start > 0) {
       recv_buffer_.erase(0, start);
+    }
+    if (overflow) {
+      // Whatever remains is the start of the oversized line (or the chunk ended without a
+      // newline): drop it and skip until the line ends.
+      recv_buffer_.clear();
+      discarding_line_ = true;
     }
   }
 

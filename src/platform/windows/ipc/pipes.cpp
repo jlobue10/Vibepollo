@@ -845,7 +845,13 @@ namespace platf::dxgi {
       return nullptr;
     }
 
-    std::wstring wpipeName(msg.pipe_name);
+    // The peer fills a fixed 40-wchar field with no terminator guarantee; the server side
+    // generates a bare GUID name, so anything empty or path-like is not ours to open.
+    const std::wstring wpipeName(msg.pipe_name, wcsnlen(msg.pipe_name, sizeof(msg.pipe_name) / sizeof(msg.pipe_name[0])));
+    if (wpipeName.empty() || wpipeName.find_first_of(L"\\/") != std::wstring::npos) {
+      BOOST_LOG(warning) << "Anonymous handshake: rejecting data pipe name; using control pipe.";
+      return pipe;
+    }
     std::string pipeNameStr = wide_to_utf8(wpipeName);
     auto data_pipe = connect_to_data_pipe(pipeNameStr);
     if (!data_pipe) {

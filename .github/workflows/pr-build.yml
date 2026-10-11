@@ -78,6 +78,10 @@ jobs:
           python3 tests/input/test_config_hash_value.py
           python3 tests/input/test_server_cmd_budget.py
           python3 tests/input/test_api_token_scopes.py
+      - name: Check the Playnite media path guard and the anonymous handshake name bound
+        run: |
+          python3 tests/input/test_playnite_path_guard.py
+          python3 tests/input/test_anon_handshake_name.py
       - name: Fetch the libwebrtc C header the browser/peer-state harnesses read
         run: git submodule update --init --depth 1 third-party/libwebrtc
       - name: Check browser input context and peer-state bridge lifetimes
