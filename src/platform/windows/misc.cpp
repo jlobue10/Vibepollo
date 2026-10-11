@@ -786,26 +786,36 @@ namespace platf {
   }
 
   std::wstring create_environment_block(const bp::environment &env) {
-    int size = 0;
+    // The block is NAME=VALUE pairs separated by NULs: a NUL inside a name or value would
+    // start further entries of the attacker's choosing (client-supplied values such as the
+    // client name are copied into the environment). Such an entry is dropped, not split.
+    std::vector<std::pair<std::wstring, std::wstring>> entries;
     for (const auto &entry : env) {
-      auto name = entry.get_name();
-      auto value = entry.to_string();
-      size += utf_utils::from_utf8(name).length() + 1 /* L'=' */ + utf_utils::from_utf8(value).length() + 1 /* L'\0' */;
+      auto name = utf_utils::from_utf8(entry.get_name());
+      auto value = utf_utils::from_utf8(entry.to_string());
+      if (name.empty() || name.find(L'\0') != std::wstring::npos || name.find(L'=') != std::wstring::npos ||
+          value.find(L'\0') != std::wstring::npos) {
+        BOOST_LOG(warning) << "Dropping environment entry with an embedded NUL or '=' in its name";
+        continue;
+      }
+      entries.emplace_back(std::move(name), std::move(value));
+    }
+
+    int size = 0;
+    for (const auto &[name, value] : entries) {
+      size += name.length() + 1 /* L'=' */ + value.length() + 1 /* L'\0' */;
     }
 
     size += 1 /* L'\0' */;
 
     std::vector<wchar_t> env_block(size);
     int offset = 0;
-    for (const auto &entry : env) {
-      auto name = entry.get_name();
-      auto value = entry.to_string();
-
+    for (const auto &[name, value] : entries) {
       // Construct the NAME=VAL\0 string
-      append_string_to_environment_block(env_block.data(), offset, utf_utils::from_utf8(name));
+      append_string_to_environment_block(env_block.data(), offset, name);
       env_block[offset] = L'=';
       offset++;
-      append_string_to_environment_block(env_block.data(), offset, utf_utils::from_utf8(value));
+      append_string_to_environment_block(env_block.data(), offset, value);
       env_block[offset] = L'\0';
       offset++;
     }

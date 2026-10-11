@@ -349,10 +349,10 @@ def main():
     parser.add_argument('--source', type=Path, default=ROOT / 'src/input.cpp')
     args = parser.parse_args()
     source = args.source.read_text()
-    prelude = production_prelude(source).replace('std::list<int> input_queue;', 'std::list<std::vector<uint8_t>> input_queue;\n  std::atomic_bool input_queue_task_scheduled {false};\n  int feedback_queue = 0;\n  bool persist_gamepads = false;')
+    prelude = production_prelude(source).replace('std::list<int> input_queue;', 'std::list<std::vector<uint8_t>> input_queue;\n  std::atomic_bool input_queue_task_scheduled {false};\n  int feedback_queue = 0;\n  bool persist_gamepads = false;\n  std::uint64_t input_packets_dropped {};\n  std::chrono::steady_clock::time_point input_drop_logged_at {};')
     prelude = prelude.replace('void push(std::function<void()> f) { tasks.push_back(std::move(f)); }',
                               'template<class F, class... A> void push(F f, A... a) { tasks.push_back([=] { f(a...); }); }')
-    prelude = prelude.replace('constexpr int KEY_UP_EVENT_MAGIC = 2;', 'constexpr int KEY_UP_EVENT_MAGIC = 0x04;')
+    prelude = prelude.replace('constexpr int KEY_UP_EVENT_MAGIC = 2;', 'constexpr int KEY_UP_EVENT_MAGIC = 0x04;\nconstexpr std::size_t MAX_QUEUED_INPUT_PACKETS = 1024;')
     prelude = prelude.replace('constexpr int MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5 = 1;', 'constexpr int MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5 = 0x09;')
     crypto_source = (ROOT / 'src/crypto.h').read_text()
     permissions = crypto_source[crypto_source.index('  enum class PERM :'):crypto_source.index('  struct command_entry_t')]

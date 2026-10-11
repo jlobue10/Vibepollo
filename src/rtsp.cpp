@@ -2208,7 +2208,13 @@ namespace rtsp_stream {
     std::int64_t configuredBitrateKbps;
     config.audio.flags[audio::config_t::HOST_AUDIO] = session->host_audio;
     try {
-      config.audio.channels = (int) util::from_view(args.at("x-nv-audio.surround.numChannels"sv));
+      const auto channels_parsed = pending_policy::parse_bounded_int(args.at("x-nv-audio.surround.numChannels"sv), 1, 8);
+      if (!channels_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-nv-audio.surround.numChannels ["sv << args.at("x-nv-audio.surround.numChannels"sv) << "] is outside 1..8"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.audio.channels = *channels_parsed;
       config.audio.mask = (int) util::from_view(args.at("x-nv-audio.surround.channelMask"sv));
       const auto packet_duration = pending_policy::parse_packet_duration(args.at("x-nv-aqos.packetDuration"sv));
       if (!packet_duration) {
@@ -2260,8 +2266,20 @@ namespace rtsp_stream {
         config.encryptionFlagsEnabled |= SS_ENC_AUDIO;
       }
 
-      config.monitor.height = (int) util::from_view(args.at("x-nv-video[0].clientViewportHt"sv));
-      config.monitor.width = (int) util::from_view(args.at("x-nv-video[0].clientViewportWd"sv));
+      const auto height_parsed = pending_policy::parse_bounded_int(args.at("x-nv-video[0].clientViewportHt"sv), 16, 8192);
+      if (!height_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-nv-video[0].clientViewportHt ["sv << args.at("x-nv-video[0].clientViewportHt"sv) << "] is outside 16..8192"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.height = *height_parsed;
+      const auto width_parsed = pending_policy::parse_bounded_int(args.at("x-nv-video[0].clientViewportWd"sv), 16, 8192);
+      if (!width_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-nv-video[0].clientViewportWd ["sv << args.at("x-nv-video[0].clientViewportWd"sv) << "] is outside 16..8192"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.width = *width_parsed;
       const auto requested_framerate = args.at("x-nv-video[0].maxFPS"sv);
       const auto normalized_framerate = pending_policy::parse_requested_framerate(requested_framerate);
       if (!normalized_framerate) {
@@ -2271,7 +2289,13 @@ namespace rtsp_stream {
       }
       config.monitor.framerate = normalized_framerate->capture_framerate;
       config.monitor.encodingFramerate = normalized_framerate->encoding_framerate;
-      config.monitor.framerateX100 = (int) util::from_view(args.at("x-nv-video[0].clientRefreshRateX100"sv));
+      const auto framerateX100_parsed = pending_policy::parse_bounded_int(args.at("x-nv-video[0].clientRefreshRateX100"sv), 0, 100000);
+      if (!framerateX100_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-nv-video[0].clientRefreshRateX100 ["sv << args.at("x-nv-video[0].clientRefreshRateX100"sv) << "] is outside 0..100000"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.framerateX100 = *framerateX100_parsed;
       const auto maximum_bitrate = pending_policy::parse_bitrate_kbps(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv), false);
       if (!maximum_bitrate) {
         BOOST_LOG(warning) << "Rejecting ANNOUNCE: maximumBitrateKbps ["sv << args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv)
@@ -2281,13 +2305,55 @@ namespace rtsp_stream {
       }
       config.monitor.bitrate = *maximum_bitrate;
       config.monitor.client_requested_bitrate = config.monitor.bitrate;
-      config.monitor.slicesPerFrame = (int) util::from_view(args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv));
-      config.monitor.numRefFrames = (int) util::from_view(args.at("x-nv-video[0].maxNumReferenceFrames"sv));
-      config.monitor.encoderCscMode = (int) util::from_view(args.at("x-nv-video[0].encoderCscMode"sv));
-      config.monitor.videoFormat = (int) util::from_view(args.at("x-nv-vqos[0].bitStreamFormat"sv));
-      config.monitor.dynamicRange = (int) util::from_view(args.at("x-nv-video[0].dynamicRangeMode"sv));
-      config.monitor.chromaSamplingType = (int) util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
-      config.monitor.enableIntraRefresh = (int) util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
+      const auto slicesPerFrame_parsed = pending_policy::parse_bounded_int(args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv), 1, 64);
+      if (!slicesPerFrame_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-nv-video[0].videoEncoderSlicesPerFrame ["sv << args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv) << "] is outside 1..64"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.slicesPerFrame = *slicesPerFrame_parsed;
+      const auto numRefFrames_parsed = pending_policy::parse_bounded_int(args.at("x-nv-video[0].maxNumReferenceFrames"sv), 0, 16);
+      if (!numRefFrames_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-nv-video[0].maxNumReferenceFrames ["sv << args.at("x-nv-video[0].maxNumReferenceFrames"sv) << "] is outside 0..16"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.numRefFrames = *numRefFrames_parsed;
+      const auto encoderCscMode_parsed = pending_policy::parse_bounded_int(args.at("x-nv-video[0].encoderCscMode"sv), 0, 7);
+      if (!encoderCscMode_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-nv-video[0].encoderCscMode ["sv << args.at("x-nv-video[0].encoderCscMode"sv) << "] is outside 0..7"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.encoderCscMode = *encoderCscMode_parsed;
+      const auto videoFormat_parsed = pending_policy::parse_bounded_int(args.at("x-nv-vqos[0].bitStreamFormat"sv), 0, 3);
+      if (!videoFormat_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-nv-vqos[0].bitStreamFormat ["sv << args.at("x-nv-vqos[0].bitStreamFormat"sv) << "] is outside 0..3"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.videoFormat = *videoFormat_parsed;
+      const auto dynamicRange_parsed = pending_policy::parse_bounded_int(args.at("x-nv-video[0].dynamicRangeMode"sv), 0, 1);
+      if (!dynamicRange_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-nv-video[0].dynamicRangeMode ["sv << args.at("x-nv-video[0].dynamicRangeMode"sv) << "] is outside 0..1"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.dynamicRange = *dynamicRange_parsed;
+      const auto chromaSamplingType_parsed = pending_policy::parse_bounded_int(args.at("x-ss-video[0].chromaSamplingType"sv), 0, 1);
+      if (!chromaSamplingType_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-ss-video[0].chromaSamplingType ["sv << args.at("x-ss-video[0].chromaSamplingType"sv) << "] is outside 0..1"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.chromaSamplingType = *chromaSamplingType_parsed;
+      const auto enableIntraRefresh_parsed = pending_policy::parse_bounded_int(args.at("x-ss-video[0].intraRefresh"sv), 0, 1);
+      if (!enableIntraRefresh_parsed) {
+        BOOST_LOG(warning) << "Rejecting ANNOUNCE: x-ss-video[0].intraRefresh ["sv << args.at("x-ss-video[0].intraRefresh"sv) << "] is outside 0..1"sv;
+        respond(socket->sock, *session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return false;
+      }
+      config.monitor.enableIntraRefresh = *enableIntraRefresh_parsed;
       config.monitor.vrr_low_latency = session->client_vrr_requested;
 
       if (config::video.limit_framerate) {

@@ -607,7 +607,12 @@ namespace config {
       json_stream << "{\"dd_mode_remapping\":" << value << "}";
 
       boost::property_tree::ptree json_tree;
-      boost::property_tree::read_json(json_stream, json_tree);
+      try {
+        boost::property_tree::read_json(json_stream, json_tree);
+      } catch (const std::exception &e) {
+        BOOST_LOG(error) << "dd_mode_remapping is not valid JSON ("sv << e.what() << "); ignoring it"sv;
+        return {};
+      }
 
       video_t::dd_t::mode_remapping_t output;
       parse_entry_list(json_tree.get_child("dd_mode_remapping.mixed"), output.mixed);
@@ -1167,14 +1172,26 @@ namespace config {
     return space_tab(ch) || endline(ch);
   }
 
+  // A '#' starts a comment only as the first non-blank character of a line. Stripping
+  // it anywhere truncated values that legitimately contain one (a prep command's
+  // "echo #1", a Playnite title) and the truncated JSON then threw out of apply_config.
+  bool comment_line(const char *begin, const char *end) {
+    const auto first = std::find_if_not(begin, end, space_tab);
+    return first != end && *first == '#';
+  }
+
   std::string to_string(const char *begin, const char *end) {
     std::string result;
 
     KITTY_WHILE_LOOP(auto pos = begin, pos != end, {
-      auto comment = std::find(pos, end, '#');
-      auto endl = std::find_if(comment, end, endline);
-
-      result.append(pos, comment);
+      auto endl = std::find_if(pos, end, endline);
+      if (!comment_line(pos, endl)) {
+        result.append(pos, endl);
+      }
+      if (endl != end) {
+        result.push_back(*endl);
+        ++endl;
+      }
 
       pos = endl;
     })
@@ -1205,8 +1222,10 @@ namespace config {
     parse_option(::std::string_view::const_iterator begin, ::std::string_view::const_iterator end) {
     begin = std::find_if_not(begin, end, whitespace);
     auto endl = std::find_if(begin, end, endline);
-    auto endc = std::find(begin, endl, '#');
-    endc = std::find_if(std::make_reverse_iterator(endc), std::make_reverse_iterator(begin), std::not_fn(whitespace)).base();
+    if (begin != endl && *begin == '#') {
+      return std::make_pair(endl, std::nullopt);
+    }
+    auto endc = std::find_if(std::make_reverse_iterator(endl), std::make_reverse_iterator(begin), std::not_fn(whitespace)).base();
 
     auto eq = std::find(begin, endc, '=');
     if (eq == endc || eq == begin) {
@@ -1234,9 +1253,11 @@ namespace config {
       }
     }
 
+    // Only a bracketed list spans lines (and can contain comment lines); a single-line
+    // value is taken verbatim, so one that starts with '#' is a value, not a comment.
     return std::make_pair(
       endl,
-      std::make_pair(to_string(begin, end_name), to_string(begin_val, endl))
+      std::make_pair(to_string(begin, end_name), *begin_val == '[' ? to_string(begin_val, endl) : std::string(begin_val, endl))
     );
   }
 
@@ -1581,7 +1602,14 @@ namespace config {
     jsonStream << "{\"prep_cmd\":" << string << "}";
 
     boost::property_tree::ptree jsonTree;
-    boost::property_tree::read_json(jsonStream, jsonTree);
+    try {
+      boost::property_tree::read_json(jsonStream, jsonTree);
+    } catch (const std::exception &e) {
+      // A malformed list must not throw out of apply_config (the runtime config was
+      // already reset to defaults at that point) nor crash the service at start.
+      BOOST_LOG(error) << name << " is not valid JSON ("sv << e.what() << "); keeping the previous value"sv;
+      return;
+    }
 
     for (auto &[_, prep_cmd] : jsonTree.get_child("prep_cmd"s)) {
       auto do_cmd = prep_cmd.get_optional<std::string>("do"s);
@@ -1607,7 +1635,12 @@ namespace config {
     jsonStream << "{\"server_cmd\":" << string << "}";
 
     boost::property_tree::ptree jsonTree;
-    boost::property_tree::read_json(jsonStream, jsonTree);
+    try {
+      boost::property_tree::read_json(jsonStream, jsonTree);
+    } catch (const std::exception &e) {
+      BOOST_LOG(error) << name << " is not valid JSON ("sv << e.what() << "); keeping the previous value"sv;
+      return;
+    }
 
     for (auto &[_, prep_cmd] : jsonTree.get_child("server_cmd"s)) {
       auto cmd_name = prep_cmd.get_optional<std::string>("name"s);
@@ -2489,6 +2522,11 @@ namespace config {
       BOOST_LOG(fatal) << "Failed to apply config: "sv << err.what();
     } catch (const boost::filesystem::filesystem_error &err) {
       BOOST_LOG(fatal) << "Failed to apply config: "sv << err.what();
+    } catch (const std::exception &err) {
+      // Anything else (a parser error in a value) used to escape to main() before
+      // logging was even up, as a crash loop with no message.
+      BOOST_LOG(fatal) << "Failed to parse config: "sv << err.what();
+      return -1;
     }
 
 #ifdef _WIN32

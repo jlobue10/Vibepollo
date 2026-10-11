@@ -43,6 +43,11 @@ namespace rtsp_stream::pending_policy {
   // `allow_zero`, meaning "not configured"), otherwise std::nullopt.
   std::optional<int> parse_bitrate_kbps(std::string_view bitrate_kbps, bool allow_zero);
 
+  // Any other ANNOUNCE integer: digits only, within [minimum, maximum]; otherwise std::nullopt.
+  // Unbounded values reached the encoder (viewport, slices, reference frames) and the
+  // synthetic display before anything checked them.
+  std::optional<int> parse_bounded_int(std::string_view value, int minimum, int maximum);
+
   enum class initial_route_e { reject, plaintext, encrypted };
 
   struct pending_owner_t {
