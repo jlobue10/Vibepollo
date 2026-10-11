@@ -6379,9 +6379,7 @@ namespace video {
 
     auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
-#if defined(_WIN32) || (defined(__linux__) && defined(SUNSHINE_BUILD_CUDA))
     int consecutive_encoder_initialization_failures = 0;
-#endif
 #ifdef _WIN32
     int consecutive_native_amf_runtime_failures = 0;
 #endif
@@ -6557,6 +6555,9 @@ namespace video {
           BOOST_LOG(error) << "AMF: ending the stream after a watchdog timeout; host restart is required before retrying AMD encoding"sv;
           return;
         }
+#endif
+        // VAAPI and software encoders need the same bounded retry policy as
+        // NVENC/AMF, including Linux builds without CUDA support.
         ++consecutive_encoder_initialization_failures;
         if (consecutive_encoder_initialization_failures >= 3) {
           BOOST_LOG(error) << "Encoder initialization failed 3 times; ending the stream instead of busy-looping"sv;
@@ -6566,30 +6567,12 @@ namespace video {
         BOOST_LOG(warning) << "Encoder initialization failed; retrying in " << retry_delay.count() << "ms";
         std::this_thread::sleep_for(retry_delay);
         continue;
-#else
-  #if defined(__linux__) && defined(SUNSHINE_BUILD_CUDA)
-        if (&session_encoder == &nvenc) {
-          ++consecutive_encoder_initialization_failures;
-          if (consecutive_encoder_initialization_failures >= 3) {
-            BOOST_LOG(error) << "NvEnc: native session initialization failed 3 times; ending the stream without changing encoder implementations"sv;
-            return;
-          }
-          const auto retry_delay = std::chrono::milliseconds(100 * (1 << (consecutive_encoder_initialization_failures - 1)));
-          BOOST_LOG(warning) << "NvEnc: native session initialization failed; retrying in " << retry_delay.count()
-                             << "ms without falling back to FFmpeg NVENC"sv;
-          std::this_thread::sleep_for(retry_delay);
-        }
-  #endif
-        continue;
-#endif
       }
       if (encode_result == encode_run_result_e::temporarily_busy) {
         std::this_thread::sleep_for(100ms);
         continue;
       }
-#if defined(_WIN32) || (defined(__linux__) && defined(SUNSHINE_BUILD_CUDA))
       consecutive_encoder_initialization_failures = 0;
-#endif
 #ifdef _WIN32
       consecutive_native_amf_runtime_failures = 0;
 #endif
