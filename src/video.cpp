@@ -6398,15 +6398,21 @@ namespace video {
         std::this_thread::sleep_for(20ms);
         continue;
       }
-      // Wait for the display to be ready
+      // Wait for the display to be ready. The capture thread may still be
+      // selecting one (display retry/backoff, the virtual display readiness
+      // wait): without a pause this loop spun a full core per session for the
+      // whole selection window, and indefinitely for a Remote Monitor whose
+      // output never came back. Same cadence as the reinit branch above.
       std::shared_ptr<platf::display_t> display;
       {
         auto lg = source_ctx.display_wp.lock();
-        if (source_ctx.display_wp->expired()) {
-          continue;
+        if (!source_ctx.display_wp->expired()) {
+          display = source_ctx.display_wp->lock();
         }
-
-        display = source_ctx.display_wp->lock();
+      }
+      if (!display) {
+        std::this_thread::sleep_for(20ms);
+        continue;
       }
 
       if (config.videoFormat == 3) {

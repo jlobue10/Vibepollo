@@ -49,6 +49,8 @@ jobs:
           python3 tests/input/test_recv_ping_shutdown.py
           python3 tests/input/test_start_guard_limiter.py
           python3 tests/input/test_deferred_launch_claim.py
+          python3 tests/input/test_deferred_launch_lifecycle.py
+          python3 tests/input/test_capture_display_wait.py
       - name: Check mouse release ownership and Windows mouse mapping
         run: |
           python3 tests/input/test_delayed_mouse_release.py
