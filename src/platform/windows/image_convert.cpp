@@ -352,6 +352,11 @@ namespace platf::img {
           }
           std::error_code entry_ec;
           const fs::directory_entry &entry = *it;
+          // Never follow a reparse point (junction, symlink, mount) inside a peer-named install
+          // directory: it could lead the SYSTEM-side scan to a share or a device namespace.
+          if (GetFileAttributesW(entry.path().c_str()) & FILE_ATTRIBUTE_REPARSE_POINT) {
+            continue;
+          }
           if (entry.is_directory(entry_ec)) {
             if (!entry_ec && depth + 1 < kMaxDepth) {
               queue.emplace_back(entry.path(), depth + 1);

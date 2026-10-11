@@ -13,6 +13,8 @@
 #include <sstream>
 #include <string_view>
 
+#include <windows.h>
+
 namespace platf::playnite::sync {
   namespace {
     bool ensure_runtime_app_uuid(nlohmann::json &app) {
@@ -70,13 +72,48 @@ namespace platf::playnite::sync {
     return true;
   }
 
+  std::optional<std::wstring> resolve_local_media_path(const std::string &path) {
+    if (!is_safe_local_media_path(path)) return std::nullopt;
+    std::wstring wide;
+    try {
+      wide = std::filesystem::path(path).wstring();
+    } catch (...) {
+      return std::nullopt;
+    }
+    // FILE_FLAG_OPEN_REPARSE_POINT: a junction or symlink as the final component is opened as
+    // itself and refused below. SECURITY_IDENTIFICATION: even if the name reaches a pipe, the
+    // server gets no impersonation token. BACKUP_SEMANTICS: directories (install dirs) open too.
+    HANDLE handle = CreateFileW(wide.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return std::nullopt;
+    std::optional<std::wstring> resolved;
+    BY_HANDLE_FILE_INFORMATION info {};
+    if (GetFileInformationByHandle(handle, &info) && (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 && GetFileType(handle) == FILE_TYPE_DISK) {
+      std::wstring buffer(32768, L'\0');
+      const DWORD length = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+      if (length != 0 && length < buffer.size()) {
+        buffer.resize(length);
+        // "\\?\C:\..." is a local volume; "\\?\UNC\..." and "\\?\Volume{...}" are not what the peer may name.
+        if (buffer.rfind(L"\\\\?\\", 0) == 0) {
+          buffer.erase(0, 4);
+          try {
+            if (is_safe_local_media_path(std::filesystem::path(buffer).string())) resolved = buffer;
+          } catch (...) {}
+        }
+      }
+    }
+    CloseHandle(handle);
+    return resolved;
+  }
+
   bool convert_playnite_image_to_png(const std::string &src_path, const std::filesystem::path &dst) {
     if (src_path.empty()) return false;
-    if (!is_safe_local_media_path(src_path)) {
+    const auto resolved = resolve_local_media_path(src_path);
+    if (!resolved) {
       BOOST_LOG(warning) << "Playnite sync: refusing to open image path '" << src_path << "'";
       return false;
     }
-    const auto src = std::filesystem::path(src_path);
+    const auto src = std::filesystem::path(*resolved);
     file_handler::make_directory(dst.parent_path().string());
     const auto signature = image_source_signature(src);
     const std::string sidecar = dst.string() + ".src";
@@ -101,13 +138,14 @@ namespace platf::playnite::sync {
         std::string cached;
         if (platf::playnite::get_cached_install_dir(game.id, cached)) install_dir = cached;
       }
-      // Every path here came from the Playnite peer; the icon resolver opens them as SYSTEM.
-      const std::string icon_path = is_safe_local_media_path(game.icon_path) ? game.icon_path : std::string();
-      const std::string exe_path = is_safe_local_media_path(game.exe) ? game.exe : std::string();
+      // Every path here came from the Playnite peer; the icon resolver opens them as SYSTEM, so
+      // it only ever sees the resolved paths (handle-checked, no reparse points, drive-rooted).
       while (!install_dir.empty() && (install_dir.back() == '\\' || install_dir.back() == '/')) install_dir.pop_back();
-      if (!is_safe_local_media_path(install_dir + "\\d")) install_dir.clear();  // a directory: checked as a parent
+      const std::wstring icon_path = resolve_local_media_path(game.icon_path).value_or(L"");
+      const std::wstring exe_path = resolve_local_media_path(game.exe).value_or(L"");
+      const std::wstring install_path = resolve_local_media_path(install_dir).value_or(L"");
       platf::img::IconResolutionInfo diagnostics;
-      if (platf::img::resolve_best_app_icon_png(std::filesystem::path(icon_path).wstring(), std::filesystem::path(exe_path).wstring(), std::filesystem::path(install_dir).wstring(), destination.wstring(), &diagnostics)) {
+      if (platf::img::resolve_best_app_icon_png(icon_path, exe_path, install_path, destination.wstring(), &diagnostics)) {
         policy::apply_icon_path(app, destination.generic_string());
         BOOST_LOG(debug) << "Playnite sync icon: name='" << game.name << "' installDir='" << install_dir << "' exeIcon=" << diagnostics.exe_size << " playniteIcon=" << diagnostics.icon_size << " -> width=" << platf::img::image_pixel_width(destination.wstring());
       } else {

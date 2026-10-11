@@ -415,6 +415,9 @@ namespace nvhttp {
           std::memcpy(&guid, stable_uuid.b8, sizeof(guid));
           return VDISPLAY::removeVirtualDisplay(guid);
         },
+        .lease_present = [](const std::string &client_uuid) {
+          return VDISPLAY::resolveActiveVirtualDisplayDeviceIdForStableId(client_uuid, {}, {}, false).has_value();
+        },
         .client_identity_capacity = [] { return static_cast<std::size_t>(config::video.virtual_display_max_clients); },
         .terminate_owned_display = [](const std::string &client_uuid) {
           const auto stable_uuid = VDISPLAY::virtualDisplayUuidFromStableId(client_uuid);

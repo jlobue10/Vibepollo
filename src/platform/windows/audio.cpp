@@ -642,6 +642,9 @@ namespace platf::audio {
           // missing samples, independently of the endpoint's device period.
           auto samples_per_second = std::uint64_t {sample_rate_hz} * channels;
           wait_ms = (remaining * 1000 + samples_per_second - 1) / samples_per_second;
+          // Never shorter than the engine period: the capture event fires once per period, so a
+          // client frame shorter than it would time out (and be padded) while audio is active.
+          wait_ms = std::max<REFERENCE_TIME>(wait_ms, default_latency_ms);
         }
         auto capture_result = _fill_buffer(wait_ms);
         if (capture_result == capture_e::timeout && continuous_audio) {

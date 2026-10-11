@@ -69,7 +69,7 @@ int main(){
         Mic m;m.channels=channels;m.configure(48000,duration*48,true);
         std::vector<float> out(duration*48*channels,1);
         for(int i=0;i<10;++i)check(m.sample(out)==capture_e::ok,"continuous timeout produces a frame");
-        check(m.elapsed==duration*10,"silent audio duration matches elapsed capture time");
+        check(m.elapsed==std::max(duration,10)*10,"silent audio duration matches elapsed capture time (never shorter than the device period)");
         check(std::all_of(out.begin(),out.end(),[](float x){return x==0;}),"timeout output is silence");
         check(m.sample_buf_pos==m.sample_buf.begin(),"whole silent frames leave no surplus samples");
     }
@@ -78,8 +78,8 @@ int main(){
     std::vector<float> out(960);
     check(partial.sample(out)==capture_e::ok&&std::all_of(out.begin(),out.begin()+480,[](float x){return x==1;})&&
           std::all_of(out.begin()+480,out.end(),[](float x){return x==0;}),"partial captured audio is padded to one frame");
-    check(partial.waits==std::vector<REFERENCE_TIME>{5}&&partial.sample_buf_pos==partial.sample_buf.begin(),
-          "partial frame waits and pads only its missing duration");
+    check(partial.waits==std::vector<REFERENCE_TIME>{10}&&partial.sample_buf_pos==partial.sample_buf.begin(),
+          "partial frame waits at least the device period and pads only its missing samples");
     partial.chunks.push_back(std::vector<float>(960,2));partial.sample(out);
     check(std::all_of(out.begin(),out.end(),[](float x){return x==2;}),"resuming sound has no extra silence carried ahead of it");
     Mic active;active.configure(48000,480,true);active.chunks.push_back(std::vector<float>(1440,3));
