@@ -78,3 +78,11 @@ real mailbox queue under ASan/UBSan. The fake session excludes GPU/socket work.
 Cases cover queued and in-flight audio/video at teardown, concurrent audio/video,
 independent sessions, overflow/coalescing/stop, address reuse and encoder-owned
 vector/NAL destruction. `--baseline` reads HEAD for before/after reproduction.
+
+`python3 tests/input/test_ipc_pipe_contract.py` compiles the production framing
+and WinPipe completion methods with fake transport/Win32 boundaries under
+ASan/UBSan. It checks fragmented/coalesced frames, consumer buffer limits,
+completion winning timeout cancellation, cancelled operations, broken pipes,
+pending-I/O cleanup after a failed wait, and short overlapped writes.
+`--baseline` reads HEAD to reproduce the pre-fix failures. Actual Windows pipe
+scheduling and helper recovery still require a Windows integration run.
