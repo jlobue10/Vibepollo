@@ -962,17 +962,23 @@ namespace platf {
    * @param y The normalized 0.0-1.0 Y coordinate.
    */
   void populate_common_pointer_info(POINTER_INFO &pointerInfo, const touch_port_t &touchPort, uint8_t eventType, float x, float y) {
+    // POINTER_INFO::ptPixelLocation is screen-relative (origin at the primary monitor), while the
+    // touch port offset is virtual-desktop-relative: display_base subtracts SM_XVIRTUALSCREEN for
+    // MOUSEEVENTF_VIRTUALDESK. Convert back, or every pointer lands shifted by the virtual-screen
+    // origin whenever a monitor sits left of or above the primary.
+    const LONG screen_x = touchPort.offset_x + GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const LONG screen_y = touchPort.offset_y + GetSystemMetrics(SM_YVIRTUALSCREEN);
     switch (eventType) {
       case LI_TOUCH_EVENT_HOVER:
         pointerInfo.pointerFlags &= ~POINTER_FLAG_INCONTACT;
         pointerInfo.pointerFlags |= POINTER_FLAG_INRANGE | POINTER_FLAG_UPDATE;
-        pointerInfo.ptPixelLocation.x = x * touchPort.width + touchPort.offset_x;
-        pointerInfo.ptPixelLocation.y = y * touchPort.height + touchPort.offset_y;
+        pointerInfo.ptPixelLocation.x = x * touchPort.width + screen_x;
+        pointerInfo.ptPixelLocation.y = y * touchPort.height + screen_y;
         break;
       case LI_TOUCH_EVENT_DOWN:
         pointerInfo.pointerFlags |= POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN;
-        pointerInfo.ptPixelLocation.x = x * touchPort.width + touchPort.offset_x;
-        pointerInfo.ptPixelLocation.y = y * touchPort.height + touchPort.offset_y;
+        pointerInfo.ptPixelLocation.x = x * touchPort.width + screen_x;
+        pointerInfo.ptPixelLocation.y = y * touchPort.height + screen_y;
         break;
       case LI_TOUCH_EVENT_UP:
         // We expect to get another LI_TOUCH_EVENT_HOVER if the pointer remains in range
@@ -981,8 +987,8 @@ namespace platf {
         break;
       case LI_TOUCH_EVENT_MOVE:
         pointerInfo.pointerFlags |= POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE;
-        pointerInfo.ptPixelLocation.x = x * touchPort.width + touchPort.offset_x;
-        pointerInfo.ptPixelLocation.y = y * touchPort.height + touchPort.offset_y;
+        pointerInfo.ptPixelLocation.x = x * touchPort.width + screen_x;
+        pointerInfo.ptPixelLocation.y = y * touchPort.height + screen_y;
         break;
       case LI_TOUCH_EVENT_CANCEL:
       case LI_TOUCH_EVENT_CANCEL_ALL:
@@ -1078,6 +1084,24 @@ namespace platf {
   constexpr auto EDGE_TRIGGERED_POINTER_FLAGS = POINTER_FLAG_DOWN | POINTER_FLAG_UP | POINTER_FLAG_CANCELED | POINTER_FLAG_UPDATE;
 
   /**
+   * @brief Restores a pointer slot after InjectSyntheticPointerInput rejected its event.
+   *
+   * The edge-triggered flags describe the rejected frame only. Left set, the next event carries an
+   * invalid combination (DOWN|UPDATE, then DOWN|UP), Windows rejects the whole pointer array again,
+   * and the client's touch or pen input stays dead until CANCEL_ALL. A rejected release, cancel or
+   * hover-leave frees the slot: there is no contact left to describe.
+   * @param pointerInfo The slot's pointer state.
+   * @param eventType The LI_TOUCH_EVENT value whose injection failed.
+   */
+  void note_pointer_injection_failure(POINTER_INFO &pointerInfo, uint8_t eventType) {
+    pointerInfo.pointerFlags &= ~EDGE_TRIGGERED_POINTER_FLAGS;
+    if (eventType == LI_TOUCH_EVENT_UP || eventType == LI_TOUCH_EVENT_CANCEL ||
+        eventType == LI_TOUCH_EVENT_CANCEL_ALL || eventType == LI_TOUCH_EVENT_HOVER_LEAVE) {
+      pointerInfo.pointerFlags = POINTER_FLAG_NONE;
+    }
+  }
+
+  /**
    * @brief Sends a touch event to the OS.
    * @param input The client-specific input context.
    * @param touch_port The current viewport for translating to screen coordinates.
@@ -1169,10 +1193,13 @@ namespace platf {
         float contactHeight = (std::sin(majorAxisAngle) * touch.contactAreaMajor) + (std::sin(minorAxisAngle) * touch.contactAreaMinor);
 
         // Convert into screen coordinates centered at the touch location and constrained by screen dimensions
-        touchInfo.rcContact.left = std::max<LONG>(touch_port.offset_x, touchInfo.pointerInfo.ptPixelLocation.x - std::floor(contactWidth / 2));
-        touchInfo.rcContact.right = std::min<LONG>(touch_port.offset_x + touch_port.width, touchInfo.pointerInfo.ptPixelLocation.x + std::ceil(contactWidth / 2));
-        touchInfo.rcContact.top = std::max<LONG>(touch_port.offset_y, touchInfo.pointerInfo.ptPixelLocation.y - std::floor(contactHeight / 2));
-        touchInfo.rcContact.bottom = std::min<LONG>(touch_port.offset_y + touch_port.height, touchInfo.pointerInfo.ptPixelLocation.y + std::ceil(contactHeight / 2));
+        // Same screen-relative base as ptPixelLocation (see populate_common_pointer_info).
+        const LONG screen_left = touch_port.offset_x + GetSystemMetrics(SM_XVIRTUALSCREEN);
+        const LONG screen_top = touch_port.offset_y + GetSystemMetrics(SM_YVIRTUALSCREEN);
+        touchInfo.rcContact.left = std::max<LONG>(screen_left, touchInfo.pointerInfo.ptPixelLocation.x - std::floor(contactWidth / 2));
+        touchInfo.rcContact.right = std::min<LONG>(screen_left + touch_port.width, touchInfo.pointerInfo.ptPixelLocation.x + std::ceil(contactWidth / 2));
+        touchInfo.rcContact.top = std::max<LONG>(screen_top, touchInfo.pointerInfo.ptPixelLocation.y - std::floor(contactHeight / 2));
+        touchInfo.rcContact.bottom = std::min<LONG>(screen_top + touch_port.height, touchInfo.pointerInfo.ptPixelLocation.y + std::ceil(contactHeight / 2));
 
         touchInfo.touchMask |= TOUCH_MASK_CONTACTAREA;
       }
@@ -1191,6 +1218,7 @@ namespace platf {
     if (!inject_synthetic_pointer_input(raw->global, raw->touch, raw->touchInfo, raw->activeTouchSlots)) {
       auto err = GetLastError();
       BOOST_LOG(warning) << "Failed to inject virtual touch input: "sv << err;
+      note_pointer_injection_failure(touchInfo.pointerInfo, touch.eventType);
       return;
     }
 
@@ -1310,6 +1338,7 @@ namespace platf {
     if (!inject_synthetic_pointer_input(raw->global, raw->pen, &raw->penInfo, 1)) {
       auto err = GetLastError();
       BOOST_LOG(warning) << "Failed to inject virtual pen input: "sv << err;
+      note_pointer_injection_failure(penInfo.pointerInfo, pen.eventType);
       return;
     }
 

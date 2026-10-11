@@ -51,6 +51,8 @@
 #include "file_handler.h"
 #include "globals.h"
 #include "http_auth.h"
+#include "csrf_store.h"
+#include "login_backoff.h"
 #include "httpcommon.h"
 #include "platform/common.h"
 #ifdef _WIN32
@@ -666,7 +668,6 @@ namespace confighttp {
   };
 
   // SESSION COOKIE
-  std::string sessionCookie;
   static std::chrono::time_point<std::chrono::steady_clock> cookie_creation_time;
 
   /**
@@ -1353,56 +1354,38 @@ namespace confighttp {
     response->write(client_error_bad_request, error.dump(), headers);
   }
 
-  struct csrf_token_t {
-    std::string token;
-    std::chrono::steady_clock::time_point expiration;
-  };
-
-  std::map<std::string, csrf_token_t, std::less<>> csrf_tokens;
-  std::mutex csrf_tokens_mutex;
   constexpr auto CSRF_TOKEN_SIZE = 32;
   constexpr auto CSRF_TOKEN_LIFETIME = std::chrono::hours(1);
+  constexpr std::size_t CSRF_TOKEN_CAPACITY = 4096;
+
+  // Keyed by the remote address: /api/csrf-token is unauthenticated, and keying by the raw
+  // Authorization header let any client grow the store without bound (one map node per
+  // arbitrary header value). Browser clients call it with cookies only.
+  csrf_store_t csrf_tokens {CSRF_TOKEN_CAPACITY, CSRF_TOKEN_LIFETIME, [] {
+    return crypto::rand_alphabet(CSRF_TOKEN_SIZE);
+  }};
 
   std::string get_client_id(const req_https_t &request) {
-    if (const auto auth = request->header.find("authorization"); auth != request->header.end()) {
-      return auth->second;
-    }
     return net::addr_to_normalized_string(request->remote_endpoint().address());
   }
 
-  std::string generate_csrf_token(const std::string &client_id) {
-    const auto now = std::chrono::steady_clock::now();
-    std::scoped_lock lock(csrf_tokens_mutex);
-    std::erase_if(csrf_tokens, [&now](const auto &entry) {
-      return entry.second.expiration < now;
-    });
-    if (const auto existing = csrf_tokens.find(client_id); existing != csrf_tokens.end()) {
-      return existing->second.token;
-    }
+  login_backoff_t login_backoff;
 
-    std::string token = crypto::rand_alphabet(CSRF_TOKEN_SIZE);
-    csrf_tokens[client_id] = csrf_token_t {token, now + CSRF_TOKEN_LIFETIME};
-    return token;
+  std::string generate_csrf_token(const std::string &client_id) {
+    return csrf_tokens.issue(client_id);
   }
 
   bool validate_stored_csrf_token(const resp_https_t &response, const req_https_t &request, std::string_view client_id, std::string_view provided_token) {
-    std::scoped_lock lock(csrf_tokens_mutex);
-    auto token_it = csrf_tokens.find(client_id);
-    if (token_it == csrf_tokens.end()) {
-      bad_request(response, request, "Invalid CSRF token");
-      return false;
+    switch (csrf_tokens.validate(client_id, provided_token)) {
+      case csrf_store_t::validation_e::ok:
+        return true;
+      case csrf_store_t::validation_e::expired:
+        bad_request(response, request, "CSRF token expired");
+        return false;
+      default:
+        bad_request(response, request, "Invalid CSRF token");
+        return false;
     }
-    const auto now = std::chrono::steady_clock::now();
-    if (token_it->second.expiration < now) {
-      csrf_tokens.erase(token_it);
-      bad_request(response, request, "CSRF token expired");
-      return false;
-    }
-    if (token_it->second.token != provided_token) {
-      bad_request(response, request, "Invalid CSRF token");
-      return false;
-    }
-    return true;
   }
 
   bool validate_csrf_token(const resp_https_t &response, const req_https_t &request, const std::string &client_id) {
@@ -4808,8 +4791,13 @@ namespace confighttp {
               service_unavailable(response, "Unable to reload credentials file");
               return;
             }
-            sessionCookie.clear();  // force re-login
+            // Every session, refresh token and CSRF token issued under the old password
+            // is revoked; the caller's own cookies fail validation on the next request.
+            const auto revoked = session_token_manager.revoke_all();
+            csrf_tokens.clear();
+            BOOST_LOG(info) << "Web UI password changed; revoked "sv << revoked << " session(s)"sv;
             output_tree["status"] = true;
+            output_tree["sessions_revoked"] = revoked;
           }
         } else {
           errors.push_back("Invalid Current Credentials");
@@ -6119,6 +6107,12 @@ namespace confighttp {
     clear_token_route_catalog();
     auto register_api_route = [&](const char *pattern, const char *method, const auto &handler) {
       server.resource[pattern][method] = [method, handler](resp_https_t response, req_https_t request) {
+        // origin_web_ui_allowed used to be checked only inside authenticate(), so the
+        // pre-login routes (login, refresh, csrf-token, first-run password) answered
+        // from any network that could reach the port.
+        if (!checkIPOrigin(response, request)) {
+          return;
+        }
         const std::string_view verb {method};
         if (verb == "POST" || verb == "PATCH" || verb == "PUT" || verb == "DELETE") {
           const auto client_id = get_client_id(request);
@@ -6281,6 +6275,10 @@ namespace confighttp {
     server.config.reuse_address = true;
     server.config.address = net::get_bind_address(address_family);
     server.config.port = port_https;
+    // SimpleWeb buffers the whole body (and the header block) before any route code runs;
+    // unbounded, a pre-auth POST with a huge Content-Length is a memory sink.
+    server.config.max_request_streambuf_size = 16 << 20;
+    server.config.timeout_content = 30;
 
     auto accept_and_run = [&](auto *server) {
       try {
@@ -6416,8 +6414,29 @@ namespace confighttp {
         user_agent = ua->second;
       }
       std::string remote_address = net::addr_to_normalized_string(request->remote_endpoint().address());
-
+      const auto now = std::chrono::steady_clock::now();
+      if (const auto gate = login_backoff.check(remote_address, now); !gate.allowed) {
+        nlohmann::json tree;
+        tree["status_code"] = static_cast<int>(SimpleWeb::StatusCode::client_error_too_many_requests);
+        tree["status"] = false;
+        tree["error"] = "Too many failed login attempts; retry later";
+        tree["retry_after"] = gate.retry_after.count();
+        SimpleWeb::CaseInsensitiveMultimap headers {
+          {"Content-Type", "application/json"},
+          {"Retry-After", std::to_string(gate.retry_after.count())}
+        };
+        add_cors_headers(headers);
+        response->write(SimpleWeb::StatusCode::client_error_too_many_requests, tree.dump(), headers);
+        return;
+      }
       APIResponse api_response = session_token_api.login(username, password, redirect_url, remember_me, user_agent, remote_address);
+      if (api_response.status_code == SimpleWeb::StatusCode::client_error_unauthorized) {
+        if (const auto lockout = login_backoff.note_failure(remote_address, now); lockout.count() > 0) {
+          BOOST_LOG(warning) << "Web UI: ["sv << remote_address << "] locked out of login for "sv << lockout.count() << " s after repeated failures"sv;
+        }
+      } else if (api_response.status_code == SimpleWeb::StatusCode::success_ok) {
+        login_backoff.note_success(remote_address);
+      }
       write_api_response(response, api_response);
 
     } catch (const nlohmann::json::exception &e) {

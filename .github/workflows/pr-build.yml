@@ -59,6 +59,13 @@ jobs:
           python3 tests/input/test_delayed_mouse_release.py
           python3 tests/input/test_windows_absolute_mouse.py
           python3 tests/input/test_windows_mouse_keys.py
+          python3 tests/input/test_windows_pointer_offset.py
+      - name: Check the web UI request policies (CSRF store, login backoff, cookie names, revoke-all)
+        run: |
+          python3 tests/input/test_csrf_store.py
+          python3 tests/input/test_login_backoff.py
+          python3 tests/input/test_cookie_extract.py
+          python3 tests/input/test_session_revoke_all.py
       - name: Fetch the libwebrtc C header the browser/peer-state harnesses read
         run: git submodule update --init --depth 1 third-party/libwebrtc
       - name: Check browser input context and peer-state bridge lifetimes

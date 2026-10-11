@@ -431,6 +431,26 @@ namespace remote_display_topology {
     }
   }
 
+  void coordinator_t::forget_all_leases() {
+    std::lock_guard lock(mutex_);
+    for (auto it = clients_.begin(); it != clients_.end();) {
+      auto &state = it->second;
+      state.normal_game = false;
+      state.normal_requested_mode.reset();
+      state.normal_game_token = 0;
+      state.normal_release_pending = false;
+      state.normal_capture_references.clear();
+      if (state.remote_monitor) {
+        state.lease_held = false;
+        state.lifecycle = lifecycle_e::retryable;
+        state.warning = "The owned virtual display was removed; Resume will recreate it.";
+        ++it;
+      } else {
+        it = clients_.erase(it);
+      }
+    }
+  }
+
   void coordinator_t::disconnect_monitor(const std::string &client_uuid) {
     std::lock_guard lock(mutex_);
     const auto it = clients_.find(client_uuid);
