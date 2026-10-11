@@ -42,6 +42,14 @@ namespace platf {
   int limiter_starts = 0;
   void frame_limiter_streaming_start(frame_limiter_owner, const policy_t &) { ++limiter_starts; }
 }
+namespace stream::deferred_start {
+  // Upstream's helper (src/deferred_stream_start_policy.h): a try_to_lock on the gate.
+  template<class Mutex, class Apply> bool try_apply_with_lifecycle_gate(Mutex &gate, Apply &&apply) {
+    std::unique_lock<Mutex> lock {gate, std::try_to_lock};
+    if (!lock.owns_lock()) return false;
+    return apply();
+  }
+}
 namespace stream {
   struct deferred_stream_start_t { std::optional<platf::policy_t> policy; };
   std::mutex &deferred_stream_start_mutex() { static std::mutex m; return m; }

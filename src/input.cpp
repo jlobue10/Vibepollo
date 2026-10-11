@@ -251,6 +251,7 @@ namespace input {
 
     safe::mail_raw_t::event_t<input::touch_port_t> touch_port_event;
     platf::feedback_queue_t feedback_queue;
+    bool persist_gamepads = false;
 
     std::list<std::vector<uint8_t>> input_queue;
     std::mutex input_queue_lock;
@@ -1106,6 +1107,7 @@ namespace input {
       packet->type,
       util::endian::little(packet->capabilities),
       util::endian::little(packet->supportedButtonFlags),
+      input->persist_gamepads,
     };
 
     auto id = alloc_id(gamepadMask);
@@ -1393,7 +1395,7 @@ namespace input {
         return;
       }
 
-      if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, {}, input->feedback_queue)) {
+      if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, {0, 0, 0, input->persist_gamepads}, input->feedback_queue)) {
         free_id(gamepadMask, id);
         // Every state packet would otherwise repeat the attempt (a driver connect, enumeration
         // and handshake on the single input worker) and its error lines.
@@ -2093,11 +2095,12 @@ namespace input {
     return input && input->allocated_gamepads.load(std::memory_order_relaxed) != 0;
   }
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, bool persist_gamepads) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
       mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback, platf::GAMEPAD_FEEDBACK_QUEUE_CAPACITY, false)
     );
+    input->persist_gamepads = persist_gamepads;
 
     // Workaround to ensure new frames will be captured when a client connects
     task_pool.pushDelayed([]() {

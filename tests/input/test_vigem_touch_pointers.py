@@ -51,9 +51,11 @@ namespace platf {
   };
   struct vigem_t { gamepad_context_t gamepads[16]; int sends = 0; };
   struct vhf_t { void touch(int, const gamepad_touch_t &) {} };
-  struct input_raw_t { vigem_t *vigem = nullptr; vhf_t *vhf = nullptr; };
+  struct usbip_t { int touches = 0; void touch(int, const gamepad_touch_t &) { ++touches; } };
+  struct input_raw_t { vigem_t *vigem = nullptr; vhf_t *vhf = nullptr; usbip_t *usbip = nullptr; };
   using input_t = std::shared_ptr<input_raw_t>;
   bool vhf_owns_gamepad(input_raw_t *, int) { return false; }
+  bool usbip_owns_gamepad(const input_raw_t *, int) { return false; }
   VIGEM_TARGET_TYPE vigem_target_get_type(int *) { return DualShock4Wired; }
   void ds4_update_ts_and_send(vigem_t *vigem, int) { ++vigem->sends; }
 """

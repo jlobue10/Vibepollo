@@ -26,7 +26,8 @@ def block(text, marker):
     return text[start:end + 1]
 
 policy = (ROOT/'src/platform/windows/vhf_gamepad_policy.h').read_text()
-header = (ROOT/'src/platform/windows/vhf_gamepad.h').read_text()
+# vhf_profile_e moved into the policy header upstream; keep both texts searchable.
+header = policy + '\n' + (ROOT/'src/platform/windows/vhf_gamepad.h').read_text()
 prefix = r'''
 #include <cstdint>
 #include <iostream>
@@ -46,12 +47,14 @@ void* GetProcAddress(void*,const char*){return nullptr;}
 namespace platf {
 namespace platform_caps {typedef std::uint32_t caps_t;constexpr caps_t pen_touch=0x01,controller_touch=0x02;}
 PROFILE_ENUM;
-namespace vhf_gamepad {BACKEND_ENUM; BACKEND_SELECT}
+namespace vhf_gamepad {BACKEND_ENUM; BACKEND_SELECT
+SELECT_DESIRED}
+namespace dualsense_usbip_gamepad {bool enabled(){return false;} bool select_composite_dualsense(std::string_view,vhf_profile_e,bool,bool){return false;}}
 struct gamepad_id_t {int globalIndex,clientRelativeIndex;};
 struct gamepad_arrival_t {int type;std::uint16_t capabilities=0;};
 using feedback_queue_t=std::shared_ptr<int>;
 enum VIGEM_TARGET_TYPE {Xbox360Wired,DualShock4Wired};
-enum class gamepad_backend_e {none,vhf,vigem};
+enum class gamepad_backend_e {none,vhf,vigem,usbip};
 struct FakeVhf {
  bool live=true,requested_success=false,automatic_success=true;
  std::vector<vhf_profile_e> calls;
@@ -67,8 +70,10 @@ struct FakeVigem {
  bool available(){return live;}
  int alloc_gamepad_internal(const gamepad_id_t&,feedback_queue_t&,VIGEM_TARGET_TYPE){++calls;return live?0:-1;}
 };
+struct FakeUsbip {bool available(){return false;} int alloc(const gamepad_id_t&,const gamepad_arrival_t&,feedback_queue_t&){return -1;}};
 struct input_raw_t {
  std::unique_ptr<FakeVhf> vhf=std::make_unique<FakeVhf>();
+ std::unique_ptr<FakeUsbip> usbip;
  std::unique_ptr<FakeVigem> vigem=std::make_unique<FakeVigem>();
  gamepad_backend_e gamepad_backend[MAX_GAMEPADS]{};
 };
@@ -76,6 +81,9 @@ using input_t=std::shared_ptr<input_raw_t>;
 '''.replace('PROFILE_ENUM',block(header,'enum class vhf_profile_e'))
 prefix=prefix.replace('BACKEND_ENUM',block(policy,'enum class backend_e'))
 prefix=prefix.replace('BACKEND_SELECT',block(policy,'[[nodiscard]] constexpr backend_e select_automatic_backend('))
+# The production profile-selection policy (upstream moved it out of input.cpp).
+policy_cpp=(ROOT/'src/platform/windows/vhf_gamepad_policy.cpp').read_text()
+prefix=prefix.replace('SELECT_DESIRED',block(policy_cpp,'vhf_profile_e select_desired_profile('))
 suffix = r'''
 }
 int main(){

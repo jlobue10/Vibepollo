@@ -35,7 +35,7 @@ namespace input {
 
   bool probe_gamepads();
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail);
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, bool persist_gamepads = false);
 
   /**
    * @brief Whether any gamepad slot of this input context is currently allocated.
