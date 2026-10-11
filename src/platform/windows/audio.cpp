@@ -635,11 +635,19 @@ namespace platf::audio {
 
       // Refill the sample buffer if needed
       while (sample_buf_pos - std::begin(sample_buf) < sample_size) {
-        auto capture_result = _fill_buffer();
+        auto remaining = sample_size - (sample_buf_pos - std::begin(sample_buf));
+        auto wait_ms = default_latency_ms;
+        if (continuous_audio) {
+          // A silent frame must account for the time spent waiting for its
+          // missing samples, independently of the endpoint's device period.
+          auto samples_per_second = std::uint64_t {sample_rate_hz} * channels;
+          wait_ms = (remaining * 1000 + samples_per_second - 1) / samples_per_second;
+        }
+        auto capture_result = _fill_buffer(wait_ms);
         if (capture_result == capture_e::timeout && continuous_audio) {
-          // Write silence to sample_buf
-          std::fill_n(sample_buf_pos, sample_size, 0.0f);
-          sample_buf_pos += sample_size;
+          // Pad only the missing samples, preserving any captured audio.
+          std::fill_n(sample_buf_pos, remaining, 0.0f);
+          sample_buf_pos += remaining;
         } else if (capture_result != capture_e::ok) {
           return capture_result;
         }
@@ -732,6 +740,7 @@ namespace platf::audio {
       }
       default_latency_ms = std::max<REFERENCE_TIME>(1, default_latency / 10000);
       continuous_audio = continuous;
+      sample_rate_hz = sample_rate;
 
       std::uint32_t frames;
       status = audio_client->GetBufferSize(&frames);
@@ -792,7 +801,7 @@ namespace platf::audio {
     }
 
   private:
-    capture_e _fill_buffer() {
+    capture_e _fill_buffer(REFERENCE_TIME timeout_ms) {
       HRESULT status;
 
       // Total number of samples
@@ -817,7 +826,7 @@ namespace platf::audio {
         return capture_e::reinit;
       }
 
-      status = WaitForSingleObjectEx(audio_event.get(), default_latency_ms, FALSE);
+      status = WaitForSingleObjectEx(audio_event.get(), timeout_ms, FALSE);
       switch (status) {
         case WAIT_OBJECT_0:
           break;
@@ -898,6 +907,7 @@ namespace platf::audio {
     std::optional<std::function<void()>> default_endpt_changed_cb;
 
     REFERENCE_TIME default_latency_ms;
+    std::uint32_t sample_rate_hz;
 
     util::buffer_t<float> sample_buf;
     float *sample_buf_pos;
