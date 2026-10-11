@@ -755,6 +755,19 @@ namespace confighttp {
     return valid;
   }
 
+  std::size_t SessionTokenManager::revoke_all() {
+    std::size_t removed = 0;
+    {
+      std::scoped_lock lock(_mutex);
+      removed = _session_tokens.size();
+      _session_tokens.clear();
+      _refresh_index.clear();
+      _dirty = _dirty || removed != 0;
+    }
+    save_session_tokens();
+    return removed;
+  }
+
   void SessionTokenManager::revoke_session_token(const std::string &token) {
     std::string token_hash = _dependencies.hash(token);
     revoke_session_by_hash(token_hash);
@@ -1523,15 +1536,17 @@ namespace confighttp {
 
   namespace {
     [[maybe_unused]] std::string extract_cookie_value(const SimpleWeb::CaseInsensitiveMultimap &headers, std::string_view name) {
+      // Exact cookie-name match (see RequestAuthPolicy::extract_cookie).
       if (auto cookie_it = headers.find("Cookie"); cookie_it != headers.end()) {
-        const std::string &cookies = cookie_it->second;
-        const std::string prefix = std::string(name) + "=";
-        auto pos = cookies.find(prefix);
-        if (pos != std::string::npos) {
-          pos += prefix.size();
-          auto end = cookies.find(';', pos);
-          auto raw = cookies.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
-          return http::cookie_unescape(raw);
+        std::string_view cookies = cookie_it->second;
+        while (!cookies.empty()) {
+          const auto end = cookies.find(';');
+          auto pair = cookies.substr(0, end);
+          cookies = end == std::string_view::npos ? std::string_view {} : cookies.substr(end + 1);
+          while (!pair.empty() && (pair.front() == ' ' || pair.front() == '\t')) pair.remove_prefix(1);
+          const auto eq = pair.find('=');
+          if (eq == std::string_view::npos || pair.substr(0, eq) != name) continue;
+          return http::cookie_unescape(std::string(pair.substr(eq + 1)));
         }
       }
       return {};

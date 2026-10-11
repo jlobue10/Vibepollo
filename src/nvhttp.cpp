@@ -330,7 +330,12 @@ namespace nvhttp {
         std::string device_id = node.device_id.empty() ? node.id : node.device_id;
         if (!node.physical && !node.preexisting) {
           const auto resolved = VDISPLAY::resolveActiveVirtualDisplayDeviceIdForStableId(node.id, {}, {}, false);
-          if (!resolved) return false;
+          if (!resolved) {
+            // A peer's display that no longer exists must not block this client's
+            // release or activation; the owner recreates it on its own Resume.
+            BOOST_LOG(warning) << "Remote display composition: client node '" << node.id << "' has no active virtual display; composing without it";
+            continue;
+          }
           device_id = *resolved;
         }
         if (!has_device(device_id)) topology.topology.push_back({device_id});
@@ -6073,6 +6078,16 @@ namespace nvhttp {
       return;
     }
 
+    // The host-side copies (CRLF expansion, UTF-16, GlobalAlloc) multiply this several
+    // times and every desktop app then has to cope with the result.
+    constexpr std::size_t MAX_CLIPBOARD_BYTES = 1 << 20;
+    if (request->content.size() > MAX_CLIPBOARD_BYTES) {
+      BOOST_LOG(warning) << "Client [" << verified_client->name << "] clipboard payload of " << request->content.size() << " bytes exceeds the " << MAX_CLIPBOARD_BYTES << " byte limit";
+      response->write(SimpleWeb::StatusCode::client_error_payload_too_large);
+      response->close_connection_after_response = true;
+      return;
+    }
+
     std::string content = request->content.string();
 
     bool success = platf::set_clipboard(content);
@@ -6472,6 +6487,8 @@ namespace nvhttp {
     https_server.config.reuse_address = true;
     https_server.config.address = net::get_bind_address(address_family);
     https_server.config.port = port_https;
+    https_server.config.max_request_streambuf_size = 4 << 20;
+    https_server.config.timeout_content = 30;
 
     http_server.default_resource["GET"] = not_found<SimpleWeb::HTTP>;
     http_server.default_resource["POST"] = not_found<SimpleWeb::HTTP>;
@@ -6488,6 +6505,8 @@ namespace nvhttp {
     http_server.config.reuse_address = true;
     http_server.config.address = net::get_bind_address(address_family);
     http_server.config.port = port_http;
+    http_server.config.max_request_streambuf_size = 1 << 20;
+    http_server.config.timeout_content = 30;
 
     auto accept_and_run = [&](auto *http_server) {
       try {

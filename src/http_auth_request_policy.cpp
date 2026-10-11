@@ -69,11 +69,18 @@ namespace confighttp::policy {
   std::string RequestAuthPolicy::extract_cookie(const SimpleWeb::CaseInsensitiveMultimap &headers, std::string_view name) const {
     const auto it = headers.find("Cookie");
     if (it == headers.end()) return {};
-    const auto prefix = std::string(name) + "=";
-    auto start = it->second.find(prefix);
-    if (start == std::string::npos) return {};
-    start += prefix.size();
-    const auto end = it->second.find(';', start);
-    return _dependencies.cookie_unescape(it->second.substr(start, end == std::string::npos ? std::string::npos : end - start));
+    // Exact name match per cookie pair: a substring search also accepted a cookie whose name
+    // merely ends in ours (set by a sibling host under a shared parent domain).
+    std::string_view cookies = it->second;
+    while (!cookies.empty()) {
+      const auto end = cookies.find(';');
+      auto pair = cookies.substr(0, end);
+      cookies = end == std::string_view::npos ? std::string_view {} : cookies.substr(end + 1);
+      while (!pair.empty() && (pair.front() == ' ' || pair.front() == '\t')) pair.remove_prefix(1);
+      const auto eq = pair.find('=');
+      if (eq == std::string_view::npos || pair.substr(0, eq) != name) continue;
+      return _dependencies.cookie_unescape(std::string(pair.substr(eq + 1)));
+    }
+    return {};
   }
 }  // namespace confighttp::policy
