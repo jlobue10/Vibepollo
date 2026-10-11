@@ -4650,8 +4650,10 @@ namespace proc {
         ctx.detached = std::move(detached);
 
         apps.emplace_back(std::move(ctx));
-                  } catch (const std::exception &e) {
-            BOOST_LOG(warning) << "Skipping app entry " << i << " (" << app_node.value("name", std::string {"?"}) << "): " << e.what();
+          } catch (const std::exception &e) {
+            // The entry itself may be a scalar or have a non-string name.
+            // Do not parse it again while recovering from a parse failure.
+            BOOST_LOG(warning) << "Skipping app entry " << i << ": " << e.what();
             ++i;
           }
         }
