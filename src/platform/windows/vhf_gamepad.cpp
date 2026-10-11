@@ -78,6 +78,10 @@ namespace platf {
     static_assert(RIGHT_GRIP_TOUCH == lvg::button_mask::right_grip_touch);
     static_assert(LEFT_STICK_TOUCH == lvg::button_mask::left_stick_touch);
     static_assert(RIGHT_STICK_TOUCH == lvg::button_mask::right_stick_touch);
+    static_assert(LEFT_PAD_CLICK == lvg::button_mask::left_pad_click);
+    static_assert(RIGHT_PAD_CLICK == lvg::button_mask::right_pad_click);
+    static_assert(LEFT_TRIGGER_CLICK == lvg::button_mask::left_trigger_click);
+    static_assert(RIGHT_TRIGGER_CLICK == lvg::button_mask::right_trigger_click);
 
     // Global indices address driver slots directly, so the two limits have to agree.
     static_assert(MAX_GAMEPADS <= lvg::k_max_controllers);
@@ -915,7 +919,8 @@ namespace platf {
       gamepad_state.rsY
     };
 
-    const auto request = vhf_gamepad::make_input_state(static_cast<std::uint32_t>(nr), normalized);
+    const auto request = vhf_gamepad::make_input_state(
+      static_cast<std::uint32_t>(nr), normalized, slot.profile, slot.client_capabilities);
     const DWORD status = impl->client.submit_input_state(request);
     if (status != ERROR_SUCCESS) {
       // A wedged or removed device would otherwise log on every input packet.

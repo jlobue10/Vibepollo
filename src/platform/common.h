@@ -101,6 +101,11 @@ namespace platf {
   // sticks, held rather than pressed. Same consumer as the grips.
   constexpr std::uint32_t LEFT_STICK_TOUCH = 0x1000000;
   constexpr std::uint32_t RIGHT_STICK_TOUCH = 0x2000000;
+  // LI_CCAP_SC26_BUTTONS: independent physical pad and trigger end-stop clicks.
+  constexpr std::uint32_t LEFT_PAD_CLICK = 0x04000000;
+  constexpr std::uint32_t RIGHT_PAD_CLICK = 0x08000000;
+  constexpr std::uint32_t LEFT_TRIGGER_CLICK = 0x10000000;
+  constexpr std::uint32_t RIGHT_TRIGGER_CLICK = 0x20000000;
 
   struct supported_gamepad_t {
     std::string name;

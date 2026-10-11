@@ -18,6 +18,9 @@ extern "C" {
 #ifndef LI_CTYPE_STEAM
   #define LI_CTYPE_STEAM 0x04
 #endif
+#ifndef LI_CCAP_SC26_BUTTONS
+  #define LI_CCAP_SC26_BUTTONS 0x1000
+#endif
 }
 
 namespace platf::vhf_gamepad {
@@ -116,7 +119,9 @@ namespace platf::vhf_gamepad {
 
   lvg::input_state_request make_input_state(
     const std::uint32_t controller_id,
-    const normalized_state_t &state
+    const normalized_state_t &state,
+    const lvg::profile profile,
+    const std::uint16_t client_capabilities
   ) noexcept {
     lvg::input_state_request request {};
     request.header.size = sizeof(request);
@@ -126,6 +131,11 @@ namespace platf::vhf_gamepad {
     // The protocol's button bits are defined to match Vibepollo's normalized flags, so the
     // supported bits are a straight copy and the driver owns the HID button/hat encoding.
     request.buttons = state.button_flags & supported_button_mask;
+    // The client cannot inject this driver metadata bit. Derive it from the
+    // arrival capability so an all-released first report is authoritative too.
+    if (profile == lvg::profile::steam_controller && (client_capabilities & LI_CCAP_SC26_BUTTONS)) {
+      request.buttons |= lvg::button_mask::sc26_buttons_explicit;
+    }
 
     // Axes go over the wire as Vibepollo's normalized state, positive-up. Each
     // driver profile converts to its own device's convention, and they disagree:

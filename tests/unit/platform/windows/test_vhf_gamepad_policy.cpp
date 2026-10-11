@@ -208,6 +208,21 @@ namespace {
               lvg::button_mask::left_stick_touch | lvg::button_mask::right_stick_touch);
   }
 
+  TEST_F(VhfGamepadPolicyTest, ExplicitSc26ClicksRequireCapabilityAndProfile) {
+    normalized_state_t state {};
+    state.button_flags = lvg::button_mask::left_pad_click | lvg::button_mask::right_trigger_click |
+                         lvg::button_mask::sc26_buttons_explicit;
+    const auto clicks = lvg::button_mask::left_pad_click | lvg::button_mask::right_trigger_click;
+    EXPECT_EQ(make_input_state(0, state).buttons, clicks);
+    EXPECT_EQ(make_input_state(0, state, lvg::profile::steam_controller, 0).buttons, clicks);
+    EXPECT_EQ(make_input_state(0, state, lvg::profile::dualsense, 0x1000).buttons, clicks);
+    EXPECT_EQ(make_input_state(0, state, lvg::profile::steam_controller, 0x1000).buttons,
+              clicks | lvg::button_mask::sc26_buttons_explicit);
+    state.button_flags = 0;
+    EXPECT_EQ(make_input_state(0, state, lvg::profile::steam_controller, 0x1000).buttons,
+              static_cast<std::uint32_t>(lvg::button_mask::sc26_buttons_explicit));
+  }
+
   TEST_F(VhfGamepadPolicyTest, UnknownButtonBitsAreDropped) {
     normalized_state_t state {};
     state.button_flags = lvg::button_mask::south | 0x00000800u | 0x80000000u;

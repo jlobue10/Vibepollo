@@ -183,7 +183,9 @@ namespace platf::vhf_gamepad {
     lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch |
     // Stick touch (LI_CCAP_STICK_TOUCH): the driver stops guessing it from deflection
     // once a client has sent one of these.
-    lvg::button_mask::left_stick_touch | lvg::button_mask::right_stick_touch;
+    lvg::button_mask::left_stick_touch | lvg::button_mask::right_stick_touch |
+    lvg::button_mask::left_pad_click | lvg::button_mask::right_pad_click |
+    lvg::button_mask::left_trigger_click | lvg::button_mask::right_trigger_click;
 
   /**
    * @brief Selects the preferred public console profile from a driver mask.
@@ -204,7 +206,9 @@ namespace platf::vhf_gamepad {
    */
   [[nodiscard]] lvg::input_state_request make_input_state(
     std::uint32_t controller_id,
-    const normalized_state_t &state
+    const normalized_state_t &state,
+    lvg::profile profile = lvg::profile::xbox_series,
+    std::uint16_t client_capabilities = 0
   ) noexcept;
 
   /**
