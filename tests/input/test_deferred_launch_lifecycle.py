@@ -53,6 +53,8 @@ code = r'''
 #include <string>
 #include <utility>
 #include <vector>
+#include <chrono>
+#include <memory>
 #include "state.h"
 #define _WIN32 1
 #define BOOST_LOG(level) Log{}
@@ -67,6 +69,8 @@ void CloseHandle(HANDLE) {}
 namespace platf {
   bool user_ready = true;
   bool is_running_as_system() { return true; }
+  // Upstream's DualSense launch readiness: no composite controller in these scenarios.
+  namespace dualsense_usbip_gamepad { bool has_ready_controller() { return true; } }
   namespace dxgi { HANDLE retrieve_users_token(bool) { return user_ready ? reinterpret_cast<HANDLE>(1) : nullptr; } }
 }
 std::vector<std::function<void()>> jobs;
@@ -82,8 +86,14 @@ void run_next() {
   auto job = std::move(jobs.front()); jobs.erase(jobs.begin()); job();
 }
 namespace proc {
+namespace dualsense_launch {
+  enum class decision { proceed, wait, timed_out };
+  template<class T> decision evaluate(bool waiting, bool ready, const T &, const T &) { return !waiting || ready ? decision::proceed : decision::wait; }
+}
 struct proc_t {
   std::atomic<int> _app_id {-1};
+  std::shared_ptr<int> _dualsense_usbip_session;
+  void terminate(bool, bool, bool, bool) { cancel(); }
   struct { std::string name = "game"; } _app;
   int normal_result = 0, launches = 0;
   MEMBERS
