@@ -49,10 +49,26 @@ int main() {
   }
   check(parse_bounded_int("0", 0, 1) == 0 && parse_bounded_int("1", 0, 1) == 1 && !parse_bounded_int("2", 0, 1), "a flag field is 0 or 1");
   check(parse_bounded_int("64", 1, 64) == 64 && !parse_bounded_int("0", 1, 64), "slices are 1..64");
+  check(parse_bounded_int("0", 0, 64) == 0 && parse_bounded_int("64", 0, 64) == 64 && !parse_bounded_int("65", 0, 64) && !parse_bounded_int("1000000", 0, 64),
+        "the FEC parity minimum is 0..64");
+  check(!parse_requested_framerate("1") && !parse_requested_framerate("9") && !parse_requested_framerate("9499"),
+        "a capture framerate below 10 fps is refused (the software encoder divided by zero at 1 fps)");
+  check(parse_requested_framerate("10") && parse_requested_framerate("10")->capture_framerate == 10 &&
+        parse_requested_framerate("60000") && parse_requested_framerate("60000")->capture_framerate == 60,
+        "10 fps and millihertz framerates still parse");
   std::cout << checks << " checks; " << failures << " failures\n";
   return failures ? 1 : 0;
 }
 """
+
+# The ANNOUNCE handler must route the FEC parity minimum through the bounded parser (H24-01).
+rtsp = (subprocess.check_output(['git', 'show', 'HEAD:src/rtsp.cpp'], cwd=ROOT, text=True, encoding='utf-8')
+        if '--baseline' in sys.argv else (ROOT / 'src/rtsp.cpp').read_text(encoding='utf-8'))
+fec_bounded = 'parse_bounded_int(args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv), 0, 64)' in rtsp and \
+    'util::from_view(args.at("x-nv-vqos[0].fec.minRequiredFecPackets"sv))' not in rtsp
+print(('PASS ' if fec_bounded else 'FAIL ') + 'minRequiredFecPackets is parsed through the bounded parser')
+if not fec_bounded:
+    sys.exit(1)
 with tempfile.TemporaryDirectory(prefix='announce-validation-') as directory:
     work = Path(directory)
     (work / 'rtsp_pending_policy.h').write_text(header)

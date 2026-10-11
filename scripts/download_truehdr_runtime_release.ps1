@@ -75,12 +75,42 @@ if ([string]::IsNullOrWhiteSpace($AssetName)) {
   $AssetName = "vibeshine-truehdr-runtime-$version-windows-x64.zip"
 }
 
+# The release tag is mutable and these DLLs end up inside the signed MSI: the archive and each
+# DLL must match the pins committed next to this script. An unpinned release is refused unless
+# TRUEHDR_RUNTIME_ALLOW_UNPINNED=1 (local experiments only; never set in CI).
+$pinsPath = Join-Path $PSScriptRoot 'truehdr_runtime_pins.json'
+$pins = (Get-Content -LiteralPath $pinsPath -Raw | ConvertFrom-Json)
+$repoPins = $pins.PSObject.Properties[$Repository]
+$pin = if ($repoPins) { $repoPins.Value.PSObject.Properties[$Tag] } else { $null }
+$pin = if ($pin) { $pin.Value } else { $null }
+if (-not $pin) {
+  if ($env:TRUEHDR_RUNTIME_ALLOW_UNPINNED -eq '1') {
+    Write-Step "WARNING: no pin for $Repository@$Tag; continuing because TRUEHDR_RUNTIME_ALLOW_UNPINNED=1"
+  } else {
+    throw "No SHA-256 pin for TrueHDR runtime $Repository@$Tag in $pinsPath; add one before packaging it."
+  }
+} elseif ($pin.asset -and $pin.asset -ne $AssetName) {
+  throw "TrueHDR runtime asset '$AssetName' is not the pinned asset '$($pin.asset)' for $Repository@$Tag."
+}
+
+function Assert-PinnedHash {
+  param([string]$Path, [string]$Expected, [string]$What)
+  if (-not $Expected) { return }
+  $actual = Get-Sha256 -Path $Path
+  if ($actual -ne $Expected.ToLowerInvariant()) {
+    throw "TrueHDR runtime $What hash mismatch: expected $Expected, got $actual ($Path)."
+  }
+}
+
 $requiredDlls = @("vibeshine_truehdr.dll", "nvngx_truehdr.dll")
 $missingOrEmpty = @()
 foreach ($dll in $requiredDlls) {
   $path = Join-Path $OutDir $dll
   $item = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
   if (-not $item -or $item.Length -le 0) {
+    $missingOrEmpty += $dll
+  } elseif ($pin -and $pin.files.PSObject.Properties[$dll] -and (Get-Sha256 -Path $path) -ne $pin.files.PSObject.Properties[$dll].Value) {
+    Write-Step "Staged $dll does not match its pin; re-downloading"
     $missingOrEmpty += $dll
   }
 }
@@ -139,6 +169,7 @@ try {
     Invoke-WebRequest -Uri $asset.url -Headers $downloadHeaders -OutFile $archivePath
   }
 
+  if ($pin) { Assert-PinnedHash -Path $archivePath -Expected $pin.archive_sha256 -What "archive $AssetName" }
   Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDir -Force
 
   $requiredDlls = @("vibeshine_truehdr.dll", "nvngx_truehdr.dll")
@@ -151,6 +182,9 @@ try {
     }
     if ($matches[0].Length -le 0) {
       throw "TrueHDR runtime file is empty: $($matches[0].FullName)"
+    }
+    if ($pin -and $pin.files.PSObject.Properties[$dll]) {
+      Assert-PinnedHash -Path $matches[0].FullName -Expected $pin.files.PSObject.Properties[$dll].Value -What $dll
     }
     $resolved[$dll] = $matches[0].FullName
   }

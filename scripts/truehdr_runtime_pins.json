@@ -1,0 +1,13 @@
+{
+  "comment": "SHA-256 pins for the TrueHDR runtime bundled into the signed MSI. The release tag is mutable, so the archive and each DLL are verified against these before anything is packaged. Update together with the tag.",
+  "Nonary/vibeshine_truehdr_runtime": {
+    "v1.0.0": {
+      "asset": "vibeshine-truehdr-runtime-1.0.0-windows-x64.zip",
+      "archive_sha256": "1e1e5c4d231900fec78375f0ced643bb3e7dafa5d6e0325474e4412a30ea4abf",
+      "files": {
+        "vibeshine_truehdr.dll": "17e69dc6edf0c171adea981e3fbc49199d5326c068234093860554fe5cc824b8",
+        "nvngx_truehdr.dll": "9a80575f247190c05fe80eac0c4baa1d0d4d932348f26808310b5ec4bf9eeb4b"
+      }
+    }
+  }
+}

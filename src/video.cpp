@@ -2211,12 +2211,13 @@ namespace video {
          }}},
         {"enforce_hrd"s, &config::video.amd.amd_enforce_hrd},
         {"level"s, [](const config_t &cfg) {
-           auto size = cfg.width * cfg.height;
+           const auto size = static_cast<std::int64_t>(cfg.width) * cfg.height;
            // For 4K and below, try to use level 5.1 or 5.2 if possible
            if (size <= 8912896) {
-             if (size * cfg.framerate <= 534773760) {
+             const auto rate = size * cfg.framerate;  // 64-bit: 4K at 259+ fps overflowed int
+             if (rate <= 534773760) {
                return "5.1"s;
-             } else if (size * cfg.framerate <= 1069547520) {
+             } else if (rate <= 1069547520) {
                return "5.2"s;
              }
            }
@@ -4226,7 +4227,7 @@ namespace video {
           // because libx264 can severely degrade quality if the buffer is too small.
           // libx265 encounters this issue more frequently, so always scale the
           // buffer by 1.5x for software HEVC encoding.
-          ctx->rc_buffer_size = bitrate / ((config.framerate * 10) / 15);
+          ctx->rc_buffer_size = bitrate / std::max(1, (config.framerate * 10) / 15);
         } else {
           ctx->rc_buffer_size = bitrate / config.framerate;
 

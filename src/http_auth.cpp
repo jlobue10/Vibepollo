@@ -1132,7 +1132,12 @@ namespace confighttp {
 
   APIResponse SessionTokenAPI::login(const std::string &username, const std::string &password, const std::string &redirect_url, bool remember_me, const std::string &user_agent, const std::string &remote_address) {
     if (!validate_credentials(username, password)) {
-      BOOST_LOG(info) << "Configuration API: Login failed for user: " << username;
+      // Unauthenticated input: printable and short in the log (no forged lines, no megabytes).
+      std::string shown = username.substr(0, 64);
+      for (auto &c : shown) {
+        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f) c = '?';
+      }
+      BOOST_LOG(info) << "Configuration API: Login failed for user: " << shown << (username.size() > 64 ? "..." : "") << " from " << remote_address;
       return create_error_response("Invalid credentials", StatusCode::client_error_unauthorized);
     }
 

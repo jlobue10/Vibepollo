@@ -3591,7 +3591,10 @@ namespace nvhttp {
     template<class T>
     void unpair(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
       print_req<T>(request);
-      std::lock_guard pairing_lock {pairing_sessions_mutex};
+      // No pending-pairing state is touched here (an unauthenticated unpair cannot replace the
+      // PIN approval target), so the pairing lock is not taken: unpair_client takes the stream
+      // lifecycle gate and tears sessions down, and holding the pairing lock across that
+      // stalled every other pairing client behind a launch.
 
       pt::ptree tree;
 
@@ -3606,7 +3609,6 @@ namespace nvhttp {
       auto args = request->parse_query_string();
       auto unique_id = get_arg(args, "uniqueid", "");
 
-      // An unauthenticated unpair request cannot replace the PIN approval target.
       const bool cleaned_pending_pair = false;
       bool removed = false;
 
@@ -3710,6 +3712,8 @@ namespace nvhttp {
               one_time_pin.clear();
               otp_passphrase.clear();
               otp_device_name.clear();
+              // Nothing can complete this session: do not let it hold the single pending slot.
+              map_id_sess.erase(ptr);
               tree.put("root.<xmlattr>.status_code", 503);
               tree.put("root.<xmlattr>.status_message", "OTP auth not available.");
               return;
@@ -6932,6 +6936,8 @@ namespace nvhttp {
       return "";
     }
 
+    // pair() reads and clears these under the pairing lock; the web UI writes them here.
+    std::lock_guard pairing_lock {pairing_sessions_mutex};
     one_time_pin = crypto::rand_alphabet(4, "0123456789"sv);
     otp_passphrase = passphrase;
     otp_device_name = deviceName;

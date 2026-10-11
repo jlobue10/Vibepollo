@@ -5954,7 +5954,12 @@ namespace confighttp {
           BOOST_LOG(info) << "Launching app ["sv << app.name << "] from web UI"sv;
           (void) proc::proc.running();
           std::unique_lock<std::mutex> lifecycle_lock(nvhttp::stream_lifecycle_mutex());
-          auto launch_session = nvhttp::make_launch_session(true, false, request->parse_query_string(), &named_cert);
+          // The web UI has no client uniqueid: use the host's own, which parses as a UUID
+          // (a per-client app identity derives its display GUID from it).
+          auto launch_args = request->parse_query_string();
+          launch_args.erase("uniqueid");
+          launch_args.emplace("uniqueid", http::unique_id);
+          auto launch_session = nvhttp::make_launch_session(true, false, launch_args, &named_cert);
           auto err = proc::proc.execute(app, launch_session);
           if (err) {
             bad_request(response, request, err == 503 ? "Failed to initialize video capture/encoding. Is a display connected and turned on?" : "Failed to start the specified application");
