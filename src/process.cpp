@@ -4327,6 +4327,7 @@ namespace proc {
         }
 
         // Iterate over each application in the "apps" array.
+        std::set<std::string> accepted_app_uuids;
         for (auto &app_node : tree["apps"]) {
           // One malformed entry (an unbalanced "$(" in any command, a missing field)
           // used to throw out of this loop, drop the whole catalog to the fallback
@@ -4338,6 +4339,9 @@ namespace proc {
           ctx.idx = std::to_string(i);
           ctx.uuid = app_node.at("uuid");
           entry_uuid = ctx.uuid;
+          if (!ctx.uuid.empty() && accepted_app_uuids.contains(ctx.uuid)) {
+            throw std::invalid_argument("Duplicate app UUID: " + ctx.uuid);
+          }
 
           // Build the list of preparation commands.
           std::vector<proc::cmd_t> prep_cmds;
@@ -4652,6 +4656,11 @@ namespace proc {
         ctx.detached = std::move(detached);
 
         apps.emplace_back(std::move(ctx));
+        // Reserve only successfully parsed entries. A malformed entry must not
+        // hide a later usable entry with the same UUID.
+        if (!apps.back().uuid.empty()) {
+          accepted_app_uuids.insert(apps.back().uuid);
+        }
           } catch (const std::exception &e) {
             // The entry itself may be a scalar or have a non-string name.
             // Do not parse it again while recovering from a parse failure.

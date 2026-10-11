@@ -19,7 +19,10 @@ source = (subprocess.check_output(['git', 'show', 'HEAD:src/process.cpp'], cwd=R
 start = source.index('        for (auto &app_node : tree["apps"]) {')
 end = source.index('        fail_count = 0;', start)
 loop = source[start:end]
-uuid_read = re.search(r'ctx\.uuid = app_node\.at\("uuid"\);', loop).group()
+uuid_read = loop[loop.index('ctx.uuid = app_node.at("uuid");'):loop.index('// Build the list of preparation commands.')]
+accept_start = loop.index('apps.emplace_back(std::move(ctx));')
+accept_end = loop.index('} catch (const std::exception &e)', accept_start)
+accept = loop[accept_start:accept_end]
 name_read = re.search(r'std::string name = parse_env_val\(this_env, app_node\.value\("name", ""\)\);', loop).group()
 handler = loop[loop.index('catch (const std::exception &e)', loop.index('apps.emplace_back')):]
 # Exclude the final brace of the enclosing app loop, retaining the catch block.
@@ -39,6 +42,7 @@ struct context { std::string uuid; };
 int main() {
     using nlohmann::json;
     const json good = {{"uuid", "good"}, {"name", "Good"}};
+    const json other = {{"uuid", "other"}, {"name", "Other"}};
     const std::vector<json> bad_entries = {
         {{"uuid", "bad"}, {"name", 7}},
         {{"uuid", "bad"}, {"name", nullptr}},
@@ -48,8 +52,10 @@ int main() {
     };
     int checks = 0, failures = 0;
     for (const auto &bad : bad_entries) {
-        json tree = {{"apps", json::array({good, bad, good})}};
+        json tree = {{"apps", json::array({good, bad, other})}};
         std::vector<int> retained;
+        std::vector<context> apps;
+        std::set<std::string> accepted_app_uuids;
         std::set<std::string> active_app_uuids;
         int i = 0, this_env = 0;
         bool escaped = false;
@@ -63,6 +69,7 @@ int main() {
                     NAME_READ
                     active_app_uuids.insert(ctx.uuid);
                     retained.push_back(i++);
+                    ACCEPT
                 } HANDLER
             }
         } catch (const std::exception &) {
@@ -76,11 +83,32 @@ int main() {
         failures += !ok;
         std::cout << (ok ? "PASS " : "FAIL ") << "catalog continues around " << bad.dump() << '\n';
     }
+    for (bool malformed_first : {false, true}) {
+        json first = malformed_first ? json{{"uuid", "shared"}, {"name", 7}} : json{{"uuid", "shared"}, {"name", "First"}};
+        json tree = {{"apps", json::array({first, {{"uuid", "shared"}, {"name", "Second"}}, other})}};
+        std::vector<context> apps;
+        std::set<std::string> active_app_uuids, accepted_app_uuids;
+        int i = 0, this_env = 0;
+        for (auto &app_node : tree["apps"]) {
+            std::string entry_uuid;
+            try {
+                context ctx;
+                UUID_READ
+                NAME_READ
+                ++i;
+                active_app_uuids.insert(ctx.uuid);
+                ACCEPT
+            } HANDLER
+        }
+        const bool ok = apps.size() == 2 && apps[0].uuid == "shared" && apps[1].uuid == "other" && i == 3;
+        ++checks; failures += !ok;
+        std::cout << (ok ? "PASS " : "FAIL ") << (malformed_first ? "a malformed duplicate does not reserve the UUID" : "a duplicate UUID cannot publish a second launch target") << '\n';
+    }
     std::cout << checks << " checks; " << failures << " failures\n";
     return failures != 0;
 }
 '''
-code = code.replace('UUID_READ', uuid_read).replace('NAME_READ', name_read).replace('HANDLER', handler)
+code = code.replace('ACCEPT', accept).replace('UUID_READ', uuid_read).replace('NAME_READ', name_read).replace('HANDLER', handler)
 with tempfile.TemporaryDirectory() as temp:
     work = Path(temp)
     (work / 'test.cpp').write_text(code, encoding='utf-8')

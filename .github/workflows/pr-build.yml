@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install host test headers
-        run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev
+        run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev libboost-dev
       - name: Check input teardown, feedback and raw haptic backpressure
         run: |
           python3 tests/input/test_disconnect_release.py
@@ -66,6 +66,7 @@ jobs:
           python3 tests/input/test_login_backoff.py
           python3 tests/input/test_cookie_extract.py
           python3 tests/input/test_session_revoke_all.py
+          python3 tests/input/test_api_token_scopes.py
       - name: Fetch the libwebrtc C header the browser/peer-state harnesses read
         run: git submodule update --init --depth 1 third-party/libwebrtc
       - name: Check browser input context and peer-state bridge lifetimes

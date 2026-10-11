@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <set>
 #include <string>
 #include <string_view>
@@ -53,11 +54,17 @@ namespace confighttp {
     ApiTokenManagerDependencies &operator=(ApiTokenManagerDependencies &&) noexcept = default;
   };
 
+  struct ApiTokenScope {
+    std::shared_ptr<const std::regex> pattern;
+    std::set<std::string, std::less<>> methods;
+  };
+
   struct ApiTokenInfo {
     std::string hash;
     std::map<std::string, std::set<std::string, std::less<>>, std::less<>> path_methods;
     std::string username;
     std::chrono::system_clock::time_point created_at;
+    std::vector<ApiTokenScope> compiled_scopes;
   };
 
   class InvalidScopeException: public std::exception {
