@@ -2209,10 +2209,13 @@ namespace confighttp {
         return;
       }
 
-      std::ifstream in(bundle_path, std::ios::binary);
-      if (!in) {
+      // Remove the temp file on every exit (a throwing write left it behind).
+      auto bundle_cleanup = util::fail_guard([&]() {
         std::error_code ec {};
         std::filesystem::remove(bundle_path, ec);
+      });
+      std::ifstream in(bundle_path, std::ios::binary);
+      if (!in) {
         bad_request(response, request, "Failed to open crash bundle");
         return;
       }
@@ -2226,8 +2229,6 @@ namespace confighttp {
       headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
       response->write(SimpleWeb::StatusCode::success_ok, in, headers);
       in.close();
-      std::error_code ec {};
-      std::filesystem::remove(bundle_path, ec);
     } catch (const std::exception &e) {
       bad_request(response, request, e.what());
     }

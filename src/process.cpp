@@ -4328,6 +4328,11 @@ namespace proc {
 
         // Iterate over each application in the "apps" array.
         for (auto &app_node : tree["apps"]) {
+          // One malformed entry (an unbalanced "$(" in any command, a missing field)
+          // used to throw out of this loop, drop the whole catalog to the fallback
+          // Desktop entry and rewrite apps.json through re-migration. Skip the
+          // entry instead.
+          try {
           proc::ctx_t ctx {};
           ctx.idx = std::to_string(i);
           ctx.uuid = app_node.at("uuid");
@@ -4645,6 +4650,10 @@ namespace proc {
         ctx.detached = std::move(detached);
 
         apps.emplace_back(std::move(ctx));
+                  } catch (const std::exception &e) {
+            BOOST_LOG(warning) << "Skipping app entry " << i << " (" << app_node.value("name", std::string {"?"}) << "): " << e.what();
+            ++i;
+          }
         }
 
         fail_count = 0;

@@ -2192,9 +2192,15 @@ namespace config {
     }
 
     double repeat_frequency {0};
-    double_between_f(vars, "key_repeat_frequency", repeat_frequency, {0, std::numeric_limits<double>::max()});
+    // 0 keeps the default; otherwise 0.1..1000 Hz. A tiny value made the repeat
+    // period overflow the delayed-task arithmetic, a huge one pinned the input worker.
+    double_between_f(vars, "key_repeat_frequency", repeat_frequency, {0, 1000});
 
     if (repeat_frequency > 0) {
+      if (repeat_frequency < 0.1) {
+        BOOST_LOG(warning) << "key_repeat_frequency " << repeat_frequency << " is below 0.1 Hz; using 0.1";
+        repeat_frequency = 0.1;
+      }
       config::input.key_repeat_period = std::chrono::duration<double> {1 / repeat_frequency};
     }
 
