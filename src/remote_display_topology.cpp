@@ -577,6 +577,11 @@ namespace remote_display_topology {
       state.warning = "Remote Monitor runtime wiring is unavailable; ownership was retained for Resume.";
       return {true, false, state.warning};
     }
+    if (state.lease_held && callbacks_.lease_present && !callbacks_.lease_present(client_uuid)) {
+      // The display behind this lease is gone: recreate it rather than compose a node that
+      // never resolves.
+      state.lease_held = false;
+    }
     if (!state.lease_held) {
       state.lifecycle = lifecycle_e::leased;
       if (!callbacks_.create_or_reclaim(client_uuid, state.label, desired_mode(state))) {

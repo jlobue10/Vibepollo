@@ -129,6 +129,18 @@ namespace confighttp {
   }
 #endif
 
+  // One `key = value` line of sunshine.conf. A key is an identifier; a value is one line (a
+  // CR/LF inside it would plant another option on reload, and the parser treats a
+  // blank-preceded '#' as a comment). Returns false for a key that is not an identifier.
+  static bool append_config_line(std::stringstream &out, const std::string &key, std::string value) {
+    if (key.empty() || !std::all_of(key.begin(), key.end(), [](unsigned char c) { return std::isalnum(c) || c == '_' || c == '-' || c == '.'; })) {
+      return false;
+    }
+    std::erase_if(value, [](char c) { return c == '\r' || c == '\n'; });
+    out << key << " = " << value << std::endl;
+    return true;
+  }
+
   // Global MIME type lookup used for static file responses
   const std::map<std::string, std::string> mime_types = {
     {"css", "text/css"},
@@ -677,6 +689,14 @@ namespace confighttp {
    * @brief Log the request details.
    * @param request The HTTP request object.
    */
+  // Headers and query parameters that carry credentials: never logged (the log is readable
+  // through /api/logs and the export).
+  static bool credential_field(std::string name) {
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return name == "authorization" || name == "proxy-authorization" || name == "cookie" || name == "set-cookie" ||
+           name == "x-api-key" || name == "csrf_token" || name == "token" || name == "api_token" || name == "password" || name == "pin";
+  }
+
   void print_req(const req_https_t &request) {
     BOOST_LOG(debug) << "HTTP "sv << request->method << ' ' << request->path;
 
@@ -684,7 +704,7 @@ namespace confighttp {
       BOOST_LOG(verbose) << "Headers:"sv;
       for (auto &[name, val] : request->header) {
         BOOST_LOG(verbose) << name << " -- "
-                           << (name == "Authorization" ? "CREDENTIALS REDACTED" : val);
+                           << (credential_field(name) ? "CREDENTIALS REDACTED" : val);
       }
     }
 
@@ -692,7 +712,7 @@ namespace confighttp {
     if (!query.empty()) {
       BOOST_LOG(verbose) << "Query Params:"sv;
       for (auto &[name, val] : query) {
-        BOOST_LOG(verbose) << name << " -- " << val;
+        BOOST_LOG(verbose) << name << " -- " << (credential_field(name) ? "CREDENTIALS REDACTED" : val);
       }
     }
   }
@@ -2322,13 +2342,20 @@ namespace confighttp {
         break;
       }
 
-      if (icon_path.empty() || !fs::exists(icon_path)) {
+      // The icon is a PNG the host itself wrote into appdata/covers; nothing else is served
+      // (apps.json is operator-writable, so the path is not trusted on its own).
+      std::error_code ec;
+      const auto covers_root = fs::weakly_canonical(fs::path(platf::appdata()) / "covers", ec);
+      const auto icon_file = icon_path.empty() ? fs::path() : fs::weakly_canonical(icon_path, ec);
+      const auto inside_covers = !ec && !icon_file.empty() &&
+                                 icon_file.native().rfind(covers_root.native() + static_cast<fs::path::value_type>(fs::path::preferred_separator), 0) == 0;
+      if (!inside_covers || icon_file.extension() != ".png" || !fs::is_regular_file(icon_file, ec)) {
         not_found(response, request);
         return;
       }
 
-      std::ifstream in(icon_path, std::ios::binary);
-      if (!in) {
+      const auto image = proc::read_validated_app_image(icon_file.string());
+      if (!image) {
         bad_request(response, request, "Unable to read application icon");
         return;
       }
@@ -2337,7 +2364,7 @@ namespace confighttp {
       headers.emplace("Content-Type", "image/png");
       headers.emplace("X-Frame-Options", "DENY");
       headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
-      response->write(success_ok, in, headers);
+      response->write(success_ok, *image, headers);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "GetAppIcon: "sv << e.what();
       bad_request(response, request, e.what());
@@ -2633,7 +2660,7 @@ namespace confighttp {
             current_cfg["playnite_fullscreen_entry_enabled"] = "false";
             std::stringstream config_stream;
             for (const auto &kv : current_cfg) {
-              config_stream << kv.first << " = " << kv.second << std::endl;
+              (void) append_config_line(config_stream, kv.first, kv.second);
             }
             file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
             config::apply_config_now();
@@ -3406,7 +3433,10 @@ namespace confighttp {
 
         // v.dump() will dump valid json, which we do not want for strings in the config right now
         // we should migrate the config file to straight json and get rid of all this nonsense
-        config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
+        if (!append_config_line(config_stream, k, v.is_string() ? v.get<std::string>() : v.dump())) {
+          bad_request(response, request, "Invalid configuration key");
+          return;
+        }
       }
       file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
 
@@ -3515,7 +3545,7 @@ namespace confighttp {
       // Write back full merged config file
       std::stringstream config_stream;
       for (const auto &kv : current) {
-        config_stream << kv.first << " = " << kv.second << std::endl;
+        (void) append_config_line(config_stream, kv.first, kv.second);
       }
       file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
 

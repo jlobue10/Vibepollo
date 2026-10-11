@@ -103,3 +103,10 @@ SYSTEM-side open. `--baseline` reads HEAD.
 client against a peer whose 40-wchar pipe-name field has no terminator (ASan reported the over-read
 before the fix) and checks that empty or path-like names keep the control pipe. `--baseline` reads
 HEAD. No Windows pipes are opened.
+
+`python3 tests/input/test_remote_monitor_lease_recovery.py` compiles the production Remote
+Monitor coordinator (`src/remote_display_topology.cpp`) with fake runtime callbacks and checks
+that a lease whose display was lost (driver watchdog failure, reinstall) is recreated on the next
+resume or activation, that a present display is not recreated, and that `forget_all_leases`
+(the watchdog-failure path) leads to recreation. `--baseline` reads HEAD. No platform display
+code runs.

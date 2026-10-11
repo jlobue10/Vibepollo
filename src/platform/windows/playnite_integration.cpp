@@ -1760,14 +1760,18 @@ namespace platf::playnite {
       std::filesystem::path dstDir = platf::appdata() / "covers";
       file_handler::make_directory(dstDir.string());
       std::filesystem::path dst = dstDir / ("playnite_icon_" + playnite_id + ".png");
+      // The paths came from the Playnite peer and the resolver opens them as SYSTEM: only the
+      // handle-checked, resolved paths reach it (same rule as playnite_sync).
+      while (!install_dir.empty() && (install_dir.back() == '\\' || install_dir.back() == '/')) install_dir.pop_back();
+      const std::wstring icon_path = platf::playnite::sync::resolve_local_media_path(gptr->icon_path).value_or(L"");
+      const std::wstring exe_path = platf::playnite::sync::resolve_local_media_path(gptr->exe).value_or(L"");
+      const std::wstring install_path = platf::playnite::sync::resolve_local_media_path(install_dir).value_or(L"");
+      if (icon_path.empty() && exe_path.empty() && install_path.empty()) {
+        return false;
+      }
       // Prefer the executable's high-resolution icon over Playnite's stored (often 32x32) icon.
       platf::img::IconResolutionInfo diag;
-      if (platf::img::resolve_best_app_icon_png(
-            std::filesystem::path(gptr->icon_path).wstring(),
-            std::filesystem::path(gptr->exe).wstring(),
-            std::filesystem::path(install_dir).wstring(),
-            dst.wstring(),
-            &diag)) {
+      if (platf::img::resolve_best_app_icon_png(icon_path, exe_path, install_path, dst.wstring(), &diag)) {
         out_path = dst.generic_string();
         BOOST_LOG(debug) << "Playnite icon: id='" << playnite_id << "' name='" << gptr->name
                          << "' installDir='" << install_dir

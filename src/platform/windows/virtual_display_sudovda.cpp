@@ -4702,8 +4702,11 @@ namespace VDISPLAY_SUDOVDA {
         track_virtual_display_removed(guid_to_uuid(guid));
         note_virtual_display_teardown();
       } else if (error_code == ERROR_FILE_NOT_FOUND || error_code == ERROR_INVALID_PARAMETER) {
+        // Already gone (driver reset, reinstall, watchdog teardown): the removal is recorded
+        // above, and the owner must be able to release its lease instead of retrying forever.
         track_virtual_display_removed(guid_to_uuid(guid));
         note_virtual_display_teardown();
+        return {true, error_code};
       }
       return {removed, error_code};
     };

@@ -61,6 +61,10 @@ namespace remote_display_topology {
     // prevents a callback from treating a GUID/device-id lookup as readiness.
     std::function<std::optional<std::string>(const std::string &client_uuid, const mode_t &mode)> exact_target_has_current_mode_and_dxgi;
     std::function<bool(const std::string &client_uuid)> remove_owned_display;
+    // Optional: whether the display behind a held lease still exists. A lease whose display
+    // was lost (driver watchdog failure, reinstall) is recreated on the next activation
+    // instead of staying retryable forever.
+    std::function<bool(const std::string &client_uuid)> lease_present;
     // Total supported client identities, including retained normal/monitor owners.
     // Linux reports only provisioned managed outputs, never a desired pool size.
     std::function<std::size_t()> client_identity_capacity;

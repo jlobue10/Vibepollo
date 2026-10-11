@@ -79,9 +79,24 @@ def main():
     convert = function(source, 'bool convert_playnite_image_to_png(const std::string &src_path, const std::filesystem::path &dst)')
     apply = function(source, 'void apply_game_metadata_to_app(const Game &game, nlohmann::json &app, const std::filesystem::path &covers_root)')
     for ok, name in (
-        (convert.index('is_safe_local_media_path(src_path)') < convert.index('convert_to_png_96dpi'), 'the cover conversion checks the source path before WIC opens it'),
-        ('is_safe_local_media_path(game.icon_path)' in apply and 'is_safe_local_media_path(game.exe)' in apply and apply.index('is_safe_local_media_path(game.exe)') < apply.index('resolve_best_app_icon_png'), 'the icon resolver only sees checked icon/exe paths'),
-        ('install_dir.clear()' in apply and apply.index('install_dir.clear()') < apply.index('resolve_best_app_icon_png'), 'the icon resolver only sees a checked install dir'),
+        (convert.index('resolve_local_media_path(src_path)') < convert.index('convert_to_png_96dpi'), 'the cover conversion checks the source path before WIC opens it'),
+        ('resolve_local_media_path(game.icon_path)' in apply and 'resolve_local_media_path(game.exe)' in apply and apply.index('resolve_local_media_path(game.exe)') < apply.index('resolve_best_app_icon_png'), 'the icon resolver only sees checked icon/exe paths'),
+        ('resolve_local_media_path(install_dir)' in apply and apply.index('resolve_local_media_path(install_dir)') < apply.index('resolve_best_app_icon_png'), 'the icon resolver only sees a checked install dir'),
+    ):
+        print(('PASS: ' if ok else 'FAIL: ') + name)
+        failures += not ok
+    # The web UI's icon path and the executable scan are gated the same way (H23-02/H23-03).
+    integration = read('src/platform/windows/playnite_integration.cpp')
+    web_icon = function(integration, 'bool get_icon_png_for_playnite_game(const std::string &playnite_id, std::string &out_path)')
+    convert_cpp = read('src/platform/windows/image_convert.cpp')
+    scan = function(convert_cpp, 'fs::path find_primary_executable(const std::wstring &exe_hint, const std::wstring &install_dir)')
+    resolve = function(source, 'std::optional<std::wstring> resolve_local_media_path(const std::string &path)')
+    for ok, name in (
+        (web_icon.count('resolve_local_media_path(') >= 3 and web_icon.index('resolve_local_media_path(') < web_icon.index('resolve_best_app_icon_png'),
+         'the web UI icon path resolves icon, exe and install dir through the handle check first'),
+        ('FILE_ATTRIBUTE_REPARSE_POINT' in scan, 'the executable scan skips reparse points'),
+        ('FILE_FLAG_OPEN_REPARSE_POINT' in resolve and 'SECURITY_IDENTIFICATION' in resolve and 'GetFinalPathNameByHandleW' in resolve and 'is_safe_local_media_path' in resolve,
+         'the handle check refuses a final reparse point, grants no impersonation and re-checks the resolved path'),
     ):
         print(('PASS: ' if ok else 'FAIL: ') + name)
         failures += not ok

@@ -12,6 +12,7 @@
 #include "src/platform/windows/image_convert.h"
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -26,6 +27,12 @@ namespace platf::playnite::sync {
   // UNC names, device/pipe namespaces, relative paths, '..' segments and alternate data
   // streams are refused.
   bool is_safe_local_media_path(const std::string &path);
+  // The lexical rule plus a check on an opened handle: no reparse point as the final component
+  // (junction/symlink), a disk file or directory, opened without granting impersonation; the
+  // resolved final path must be drive-rooted (a junction in a parent that leads to a UNC share
+  // or a device namespace resolves to one) and pass the lexical rule again. Returns that
+  // resolved path, which is what the SYSTEM-side opens must use.
+  std::optional<std::wstring> resolve_local_media_path(const std::string &path);
   bool convert_playnite_image_to_png(const std::string &src_path, const std::filesystem::path &dst);
   void apply_game_metadata_to_app(const Game &g, nlohmann::json &app, const std::filesystem::path &covers_root);
   void apply_game_metadata_to_app(const Game &g, nlohmann::json &app);

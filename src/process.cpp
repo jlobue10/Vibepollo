@@ -1005,6 +1005,9 @@ namespace proc {
   void onVDisplayWatchdogFailed() {
     setVDisplayDriverStatus(VDISPLAY::DRIVER_STATUS::WATCHDOG_FAILED);
     VDISPLAY::closeVDisplayDevice();
+    // Closing the transport tears down every managed display: the leases are gone, so Resume
+    // must recreate them instead of composing nodes that no longer resolve.
+    remote_display_topology::instance().forget_all_leases();
   }
 
   void initVDisplayDriver() {
