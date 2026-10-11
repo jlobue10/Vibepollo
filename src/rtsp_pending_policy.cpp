@@ -82,6 +82,14 @@ namespace rtsp_stream::pending_policy {
     return static_cast<int>(*parsed);
   }
 
+  std::optional<int> parse_bounded_int(const std::string_view value, const int minimum, const int maximum) {
+    const auto parsed = parse_integer(value);
+    if (!parsed || *parsed < minimum || *parsed > maximum) {
+      return std::nullopt;
+    }
+    return static_cast<int>(*parsed);
+  }
+
   initial_route_e choose_initial_route(const bool plaintext_available, const bool encrypted_available, const std::array<std::uint8_t, 4> &first_word) {
     if (encrypted_available && (first_word[0] & 0x80U) != 0) return initial_route_e::encrypted;
     if (plaintext_available) return initial_route_e::plaintext;

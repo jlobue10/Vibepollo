@@ -66,6 +66,11 @@ jobs:
           python3 tests/input/test_login_backoff.py
           python3 tests/input/test_cookie_extract.py
           python3 tests/input/test_session_revoke_all.py
+      - name: Check the launch-argument and environment-block guards, config comment parsing and the server-command budget
+        run: |
+          python3 tests/input/test_env_block_nul.py
+          python3 tests/input/test_config_hash_value.py
+          python3 tests/input/test_server_cmd_budget.py
           python3 tests/input/test_api_token_scopes.py
       - name: Fetch the libwebrtc C header the browser/peer-state harnesses read
         run: git submodule update --init --depth 1 third-party/libwebrtc

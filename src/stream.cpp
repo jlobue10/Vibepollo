@@ -60,6 +60,7 @@ extern "C" {
 #include "rtsp_pending_policy.h"
 #include "session_history.h"
 #include "stream.h"
+#include "server_cmd_budget.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -613,6 +614,8 @@ namespace stream {
 
   struct session_t {
     packet_channel_t packet_channel = std::make_shared<packet_channel_state_t>(this);
+    // Control thread only (H20-06).
+    server_cmd_budget_t server_cmd_budget;
 
     ~session_t() {
       // A throwing start() is not published to RTSP's normal stop/join path,
@@ -1649,6 +1652,14 @@ namespace stream {
       const auto cmdIndex = util::packet::read_u8(payload, 0);
       if (!cmdIndex) {
         BOOST_LOG(warning) << "Ignoring short IDX_EXEC_SERVER_CMD payload (" << payload.size() << " bytes)";
+        return;
+      }
+
+      if (!session->server_cmd_budget.admit()) {
+        if (session->server_cmd_budget.rejected() % 100 == 1) {
+          BOOST_LOG(warning) << "Throttling server commands from [" << session->device_name << "]: "
+                             << session->server_cmd_budget.rejected() << " rejected";
+        }
         return;
       }
 
@@ -3315,12 +3326,11 @@ namespace stream {
     }
 
     bool has_shared_runtime_owner(const shared_runtime_finalize_context_t &context) {
+      // Every platform: a drained normal role whose restore failed is recovery state,
+      // not a live owner (it kept Windows from ever finalizing the shared runtime).
+      // A paused game still owns its per-client display by design.
       return has_capture_runtime_owner(context) ||
-#ifdef __linux__
              remote_display_topology::instance().has_live_managed_client_identity();
-#else
-             remote_display_topology::instance().managed_client_identity_count() != 0;
-#endif
     }
 
     void arm_shared_runtime_cleanup(

@@ -1087,6 +1087,8 @@ namespace confighttp {
    * @param request The HTTP request object.
    * @return AuthResult with outcome and response details if not authorized.
    */
+  extern login_backoff_t login_backoff;
+
   AuthResult check_auth(const req_https_t &request) {
     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
     std::string auth_header;
@@ -1099,7 +1101,28 @@ namespace confighttp {
         auth_header = "Session " + token;
       }
     }
-    return check_auth(address, auth_header, request->path, request->method);
+    // Basic credentials on any /api route are the same guessable secret as the login
+    // form: they share its per-address backoff, or the brute force just moves routes.
+    const bool basic = auth_header.size() > 6 && boost::iequals(auth_header.substr(0, 6), "Basic ");
+    const auto now = std::chrono::steady_clock::now();
+    if (basic) {
+      if (const auto gate = login_backoff.check(address, now); !gate.allowed) {
+        auto result = make_auth_error(StatusCode::client_error_too_many_requests, "Too many failed login attempts; retry later");
+        result.headers.emplace("Retry-After", std::to_string(gate.retry_after.count()));
+        return result;
+      }
+    }
+    auto result = check_auth(address, auth_header, request->path, request->method);
+    if (basic) {
+      if (result.ok) {
+        login_backoff.note_success(address);
+      } else if (result.code == StatusCode::client_error_unauthorized) {
+        if (const auto lockout = login_backoff.note_failure(address, now); lockout.count() > 0) {
+          BOOST_LOG(warning) << "Web UI: ["sv << address << "] locked out of Basic authentication for "sv << lockout.count() << " s after repeated failures"sv;
+        }
+      }
+    }
+    return result;
   }
 
   /**
@@ -2094,6 +2117,11 @@ namespace confighttp {
         index = static_cast<int>(*uuid_index);
       }
       input_tree.erase("index");
+      if (index < -1 || (index >= 0 && static_cast<std::size_t>(index) >= apps_node.size())) {
+        // Used to report success while writing the list back unchanged.
+        bad_request(response, request, "App index out of range");
+        return;
+      }
 
       if (index == -1) {
         if (input_uuid.empty()) {

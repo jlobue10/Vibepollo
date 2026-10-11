@@ -38,6 +38,9 @@ constexpr int WHEEL_DELTA = 120;
 using namespace std::literals;
 
 namespace input {
+  // Per-context cap on queued, not yet injected, packets (H20-02).
+  constexpr std::size_t MAX_QUEUED_INPUT_PACKETS = 1024;
+
 
   constexpr auto MAX_GAMEPADS = std::min((std::size_t) platf::MAX_GAMEPADS, sizeof(std::int16_t) * 8);
 
@@ -256,6 +259,10 @@ namespace input {
     std::list<std::vector<uint8_t>> input_queue;
     std::mutex input_queue_lock;
     std::atomic_bool input_queue_task_scheduled;
+    // Bounded: the single task_pool worker drains every client's queue, so an
+    // unbounded one let one client grow memory without limit and starve the rest.
+    std::uint64_t input_packets_dropped {};
+    std::chrono::steady_clock::time_point input_drop_logged_at {};
     // Protected by input_queue_lock; reset permanently closes this context.
     bool input_closed = false;
 
@@ -1990,6 +1997,18 @@ namespace input {
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
       if (input->input_closed) {
+        return;
+      }
+      if (input->input_queue.size() >= MAX_QUEUED_INPUT_PACKETS) {
+        // About a second of 1 kHz traffic is waiting already: injection cannot keep
+        // up, so the newest packet is dropped (coalescable state arrives again anyway).
+        ++input->input_packets_dropped;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - input->input_drop_logged_at >= std::chrono::seconds(1)) {
+          input->input_drop_logged_at = now;
+          BOOST_LOG(warning) << "Input queue full ("sv << input->input_queue.size() << " packets waiting); dropped "sv
+                             << input->input_packets_dropped << " so far"sv;
+        }
         return;
       }
       input->input_queue.push_back(std::move(input_data));

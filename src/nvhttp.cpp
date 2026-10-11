@@ -4435,6 +4435,16 @@ namespace nvhttp {
         tree.put("root.<xmlattr>.status_message", "Invalid rikey");
         return;
       }
+      for (const auto &[argument_name, argument_value] : args) {
+        if (!pairing_policy::launch_argument_printable(argument_name) || !pairing_policy::launch_argument_printable(argument_value)) {
+          // Values such as clientName and surroundParams reach the launched process's
+          // environment; a control character there is never a legitimate request.
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", "Invalid characters in a launch parameter");
+          return;
+        }
+      }
 
       const auto verified_client = get_verified_cert(request);
       const auto request_client_identity = resolve_client_identity(request, verified_client);
@@ -5449,6 +5459,16 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Invalid rikey");
 
       return;
+    }
+    for (const auto &[argument_name, argument_value] : args) {
+      if (!pairing_policy::launch_argument_printable(argument_name) || !pairing_policy::launch_argument_printable(argument_value)) {
+        // Values such as clientName and surroundParams reach the launched process's
+        // environment; a control character there is never a legitimate request.
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", "Invalid characters in a launch parameter");
+        return;
+      }
     }
 
     // Keep the resume gate explicit at this point as well: runtime overrides

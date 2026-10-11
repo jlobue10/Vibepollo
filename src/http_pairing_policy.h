@@ -76,6 +76,10 @@ namespace nvhttp::pairing_policy {
 
   bool valid_unique_id(std::string_view value);
   bool valid_hex_field(std::string_view value, std::size_t minimum, std::size_t maximum = max_pairing_hex_field_length);
+  // A launch/resume query value may be copied into the launched process's environment and
+  // command lines: no control characters (a NUL would start a new NAME=VALUE entry in a
+  // Windows environment block, CR/LF break line-oriented consumers).
+  bool launch_argument_printable(std::string_view value);
   bool valid_paired_client_uuid(std::string_view value);
   bool paired_client_state_valid(std::span<const paired_client_record_view_t> clients);
   paired_client_resolution_t resolve_paired_client(

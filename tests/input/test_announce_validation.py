@@ -42,6 +42,13 @@ int main() {
   for (const char *bad : {"3000000000", "2147483647", "800001", "-1", "12abc", "", "99999999999999999999"}) {
     check(!parse_bitrate_kbps(bad, true) && !parse_bitrate_kbps(bad, false), bad);
   }
+  check(parse_bounded_int("1920", 16, 8192) == 1920 && parse_bounded_int("16", 16, 8192) == 16 && parse_bounded_int("8192", 16, 8192) == 8192,
+        "a viewport within 16..8192 parses (bounds inclusive)");
+  for (const char *bad : {"15", "8193", "16384", "2147483647", "99999999999999999999", "-1", "", "x", "1920x"}) {
+    check(!parse_bounded_int(bad, 16, 8192), bad);
+  }
+  check(parse_bounded_int("0", 0, 1) == 0 && parse_bounded_int("1", 0, 1) == 1 && !parse_bounded_int("2", 0, 1), "a flag field is 0 or 1");
+  check(parse_bounded_int("64", 1, 64) == 64 && !parse_bounded_int("0", 1, 64), "slices are 1..64");
   std::cout << checks << " checks; " << failures << " failures\n";
   return failures ? 1 : 0;
 }

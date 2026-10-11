@@ -76,6 +76,12 @@ namespace nvhttp::pairing_policy {
            });
   }
 
+  bool launch_argument_printable(const std::string_view value) {
+    return std::none_of(value.begin(), value.end(), [](const unsigned char character) {
+      return character < 0x20 || character == 0x7F;
+    });
+  }
+
   bool valid_paired_client_uuid(const std::string_view value) {
     if (value.size() != 36 || value[8] != '-' || value[13] != '-' ||
         value[18] != '-' || value[23] != '-') {
