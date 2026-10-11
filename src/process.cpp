@@ -4332,10 +4332,12 @@ namespace proc {
           // used to throw out of this loop, drop the whole catalog to the fallback
           // Desktop entry and rewrite apps.json through re-migration. Skip the
           // entry instead.
+          std::string entry_uuid;
           try {
           proc::ctx_t ctx {};
           ctx.idx = std::to_string(i);
           ctx.uuid = app_node.at("uuid");
+          entry_uuid = ctx.uuid;
 
           // Build the list of preparation commands.
           std::vector<proc::cmd_t> prep_cmds;
@@ -4654,6 +4656,11 @@ namespace proc {
             // The entry itself may be a scalar or have a non-string name.
             // Do not parse it again while recovering from a parse failure.
             BOOST_LOG(warning) << "Skipping app entry " << i << ": " << e.what();
+            // The entry still exists in apps.json: keep its persisted app-id aliases
+            // alive, or the prune below would erase them for a parse hiccup.
+            if (!entry_uuid.empty()) {
+              active_app_uuids.insert(entry_uuid);
+            }
             ++i;
           }
         }

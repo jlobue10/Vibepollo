@@ -28,6 +28,7 @@ handler = handler[:handler.rfind('}')]
 code = r'''
 #include <nlohmann/json.hpp>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -49,21 +50,28 @@ int main() {
     for (const auto &bad : bad_entries) {
         json tree = {{"apps", json::array({good, bad, good})}};
         std::vector<int> retained;
+        std::set<std::string> active_app_uuids;
         int i = 0, this_env = 0;
         bool escaped = false;
         try {
             for (auto &app_node : tree["apps"]) {
+                std::string entry_uuid;
                 try {
                     context ctx;
                     UUID_READ
+                    entry_uuid = ctx.uuid;
                     NAME_READ
+                    active_app_uuids.insert(ctx.uuid);
                     retained.push_back(i++);
                 } HANDLER
             }
         } catch (const std::exception &) {
             escaped = true;
         }
-        const bool ok = !escaped && retained == std::vector<int>({0, 2}) && i == 3;
+        // A skipped entry that still carries a uuid keeps its app-id aliases alive.
+        const bool bad_has_uuid = bad.is_object() && bad.contains("uuid") && bad["uuid"].is_string();
+        const bool aliases_kept = !bad_has_uuid || active_app_uuids.count(bad["uuid"].get<std::string>()) == 1;
+        const bool ok = !escaped && retained == std::vector<int>({0, 2}) && i == 3 && aliases_kept;
         ++checks;
         failures += !ok;
         std::cout << (ok ? "PASS " : "FAIL ") << "catalog continues around " << bad.dump() << '\n';

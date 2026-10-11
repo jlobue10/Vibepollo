@@ -723,9 +723,14 @@ namespace platf::audio {
         return -1;
       }
 
-      REFERENCE_TIME default_latency;
-      audio_client->GetDevicePeriod(&default_latency, nullptr);
-      default_latency_ms = default_latency / 1000;
+      // REFERENCE_TIME is in 100 ns units: a 10 ms period is 100000, so the old
+      // "/ 1000" waited 100 ms per capture, injecting continuous-audio silence
+      // at a tenth of the expected rate and noticing device loss ten times late.
+      REFERENCE_TIME default_latency = 100000;  // 10 ms if the query fails
+      if (FAILED(audio_client->GetDevicePeriod(&default_latency, nullptr))) {
+        default_latency = 100000;
+      }
+      default_latency_ms = std::max<REFERENCE_TIME>(1, default_latency / 10000);
       continuous_audio = continuous;
 
       std::uint32_t frames;
@@ -1056,9 +1061,22 @@ namespace platf::audio {
         prop_var_t current_device_format;
 
         if (SUCCEEDED(current_default_dev->OpenPropertyStore(STGM_READ, &prop)) && SUCCEEDED(prop->GetValue(PKEY_AudioEngine_DeviceFormat, &current_device_format.prop))) {
-          auto *format = (WAVEFORMATEXTENSIBLE *) current_device_format.prop.blob.pBlobData;
-          wanted_bits_per_sample = format->Samples.wValidBitsPerSample;
-          BOOST_LOG(info) << "Virtual audio device will use "sv << wanted_bits_per_sample << "-bit to match default device"sv;
+          // The engine format may be a plain 18-byte WAVEFORMATEX (some Bluetooth
+          // and USB class-driver endpoints) or not a blob at all: reading
+          // Samples.wValidBitsPerSample at offset 18 then read past the blob and
+          // turned the first session's audio off on a format mismatch.
+          const auto &blob = current_device_format.prop.blob;
+          if (current_device_format.prop.vt == VT_BLOB && blob.pBlobData != nullptr && blob.cbSize >= sizeof(WAVEFORMATEX)) {
+            const auto *base = reinterpret_cast<const WAVEFORMATEX *>(blob.pBlobData);
+            if (base->wFormatTag == WAVE_FORMAT_EXTENSIBLE && base->cbSize >= 22 && blob.cbSize >= sizeof(WAVEFORMATEXTENSIBLE)) {
+              wanted_bits_per_sample = reinterpret_cast<const WAVEFORMATEXTENSIBLE *>(base)->Samples.wValidBitsPerSample;
+            } else {
+              wanted_bits_per_sample = base->wBitsPerSample;
+            }
+            BOOST_LOG(info) << "Virtual audio device will use "sv << wanted_bits_per_sample << "-bit to match default device"sv;
+          } else {
+            BOOST_LOG(warning) << "Default audio device format property is not a usable WAVEFORMATEX blob; keeping the "sv << wanted_bits_per_sample << "-bit default"sv;
+          }
         }
       }
 

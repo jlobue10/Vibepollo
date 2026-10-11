@@ -901,6 +901,25 @@ namespace webrtc_stream {
       std::optional<WebRtcCaptureConfigKey> config_key;
       std::optional<WebRtcStreamStartParams> stream_start_params;
       std::optional<int> published_bitrate_kbps;
+
+      // This object is a namespace-scope static. If a capture is still running
+      // when main() returns (nothing used to stop WebRTC at exit), destroying a
+      // joinable std::thread member is std::terminate; wake the threads and
+      // join them instead.
+      ~WebRtcCaptureState() {
+        if (mail) {
+          mail->event<bool>(mail::shutdown)->raise(true);
+        }
+        feedback_shutdown.store(true, std::memory_order_release);
+        if (feedback_queue) {
+          feedback_queue->stop();
+        }
+        for (std::thread *thread : {&video_thread, &audio_thread, &feedback_thread}) {
+          if (thread->joinable()) {
+            thread->join();
+          }
+        }
+      }
     };
 
     template<class T>
@@ -1547,7 +1566,8 @@ namespace webrtc_stream {
       }
 
       auto message = nlohmann::json::parse(payload.begin(), payload.end(), nullptr, false);
-      if (message.is_discarded()) {
+      if (message.is_discarded() || !message.is_object()) {
+        // value() throws on a non-object document; the caller also catches.
         return;
       }
 
@@ -3800,18 +3820,27 @@ namespace webrtc_stream {
       if (!ctx || !ctx->active.load(std::memory_order_acquire)) {
         return;
       }
-      if (binary) {
-        handle_input_message_binary(
-          ctx,
-          reinterpret_cast<const std::uint8_t *>(buffer),
-          static_cast<std::size_t>(length)
+      // This runs on libwebrtc's thread, which has no exception handler: a
+      // field of the wrong JSON type (nlohmann type_error from value()) used to
+      // unwind into the library and terminate the host.
+      try {
+        if (binary) {
+          handle_input_message_binary(
+            ctx,
+            reinterpret_cast<const std::uint8_t *>(buffer),
+            static_cast<std::size_t>(length)
+          );
+          return;
+        }
+        handle_input_message(
+          std::string_view {buffer, static_cast<std::size_t>(length)},
+          ctx->id
         );
-        return;
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "WebRTC: dropped a malformed input message on session " << ctx->id << ": " << e.what();
+      } catch (...) {
+        BOOST_LOG(warning) << "WebRTC: dropped a malformed input message on session " << ctx->id;
       }
-      handle_input_message(
-        std::string_view {buffer, static_cast<std::size_t>(length)},
-        ctx->id
-      );
     }
 
     void on_peer_state(void *user, int state) {
