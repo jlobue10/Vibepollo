@@ -1913,10 +1913,28 @@ namespace confighttp {
       if (file_tree.contains("apps") && file_tree["apps"].is_array()) {
         try {
           const auto apps_snapshot = proc::proc.get_apps();
-          const auto count = std::min(file_tree["apps"].size(), apps_snapshot.size());
-          for (size_t idx = 0; idx < count; ++idx) {
+          // Match by uuid: a file entry the loader skipped (malformed) has no
+          // parsed counterpart, and a positional zip then labelled every later
+          // entry with the next app's id.
+          std::unordered_map<std::string, const proc::ctx_t *> parsed_by_uuid;
+          for (const auto &parsed : apps_snapshot) {
+            parsed_by_uuid.emplace(parsed.uuid, &parsed);
+          }
+          for (size_t idx = 0; idx < file_tree["apps"].size(); ++idx) {
             auto &app = file_tree["apps"][idx];
-            app["id"] = apps_snapshot[idx].id;
+            if (!app.is_object()) {
+              continue;
+            }
+            const proc::ctx_t *parsed = nullptr;
+            if (app.contains("uuid") && app["uuid"].is_string()) {
+              const auto it = parsed_by_uuid.find(app["uuid"].get<std::string>());
+              if (it != parsed_by_uuid.end()) {
+                parsed = it->second;
+              }
+            }
+            if (parsed != nullptr) {
+              app["id"] = parsed->id;
+            }
             app["index"] = static_cast<int>(idx);
           }
         } catch (...) {

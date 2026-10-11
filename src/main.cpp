@@ -1049,6 +1049,15 @@ int main(int argc, char *argv[]) {
   httpThread.join();
   configThread.join();
   rtspThread.join();
+  // Browser (WebRTC) sessions and the shared WebRTC capture are not owned by any
+  // of the threads above; close them before the pools stop so their finalize
+  // (limiter owner, virtual display, helper) runs and no capture thread is left
+  // joinable for static destruction.
+  try {
+    webrtc_stream::shutdown_all_sessions();
+  } catch (const std::exception &e) {
+    BOOST_LOG(warning) << "WebRTC shutdown at exit failed: "sv << e.what();
+  }
 
 #ifdef __linux__
   platf::lutris::autosync::stop();

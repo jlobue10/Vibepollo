@@ -6547,10 +6547,13 @@ namespace video {
 #endif
       if (encode_result == encode_run_result_e::initialization_failed) {
 #ifdef _WIN32
-        if (&session_encoder != &amdvce_experimental && &session_encoder != &amdvce_ffmpeg) {
-          continue;
-        }
-        if (native_amf_lifecycle_gate.is_quarantined()) {
+        // Every encoder gets the strike cap and backoff. NVENC/QSV/software used
+        // to `continue` straight away: a persistent session failure (NVENC
+        // session limit, a driver mid-recovery) rebuilt a D3D device per spin,
+        // one core busy and tens of error lines per second until the client
+        // gave up.
+        const bool amd_encoder = &session_encoder == &amdvce_experimental || &session_encoder == &amdvce_ffmpeg;
+        if (amd_encoder && native_amf_lifecycle_gate.is_quarantined()) {
           BOOST_LOG(error) << "AMF: ending the stream after a watchdog timeout; host restart is required before retrying AMD encoding"sv;
           return;
         }
