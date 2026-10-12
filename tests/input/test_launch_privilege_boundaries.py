@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Text gates for three privilege boundaries the host used to cross as SYSTEM or hold open forever:
+"""Text gates for two privilege boundaries the host used to cross as SYSTEM:
 the Playnite plugin deploy runs under the interactive user's token (every filesystem write inside
 the impersonated lambda, which has its own catch so RevertToSelf always runs); the per-app output
-log is opened in launch_app_commands() under the user token and never by execute(); and an
-unauthenticated RTSP socket has an idle timer that every completion handler cancels first, with
-the pending-session candidates released at both binding points. --baseline reads HEAD.
+log is opened in launch_app_commands() under the user token and never by execute().
+RTSP first-message deadlines are exercised over real sockets by
+test_rtsp_first_message_deadline.py. --baseline reads HEAD.
 """
 from pathlib import Path
-import re
 import subprocess
 import sys
 
@@ -62,18 +61,4 @@ check('_wfsopen(' in open_log and 'platf::impersonate_current_user(log_token, op
       'the output log is opened under the user token when running as SYSTEM')
 check('if (!_pipe && !_app.output.empty()' in launch, 'a re-entered launch keeps the open handle')
 
-rtsp = read('src/rtsp.cpp')
-socket_class = block(rtsp, 'class socket_t: public std::enable_shared_from_this<socket_t>')
-check('boost::asio::steady_timer idle_timer;' in socket_class and 'void arm_idle_timer()' in socket_class, 'socket_t carries the idle timer')
-check('arm_idle_timer();' in block(socket_class, 'void read_unbound()'), 'an unbound read arms the idle timer')
-for handler in ('handle_read_unbound_prefix(', 'handle_read_unbound_encrypted_header_after_prefix(', 'handle_read_unbound_encrypted_message(',
-                'handle_read_encrypted_header(', 'handle_read_plaintext('):
-    body = block(socket_class, 'static void ' + handler)
-    first = body[body.index('{') + 1:].lstrip()
-    check(first.startswith('socket->idle_timer.cancel();'), handler + ' cancels the idle timer first')
-binds = [m.end() for m in re.finditer(r'socket->session = std::move\(reserved\);', socket_class)]
-check(len(binds) == 2 and all('encrypted_candidates.clear();' in socket_class[b:b + 260] and 'plaintext_candidate.reset();' in socket_class[b:b + 260] for b in binds),
-      'both binding points release the pending-session candidates')
-check(socket_class.count('socket->first_message_done = true;') == 3, 'every dispatch marks the first message done')
-check('socket.idle_timer.cancel();' in block(rtsp, 'void shutdown_socket(socket_t &socket)'), 'shutdown cancels the idle timer')
 sys.exit(1 if failures else 0)

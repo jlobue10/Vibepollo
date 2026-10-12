@@ -102,6 +102,8 @@ jobs:
         run: |
           python3 tests/input/test_launch_privilege_boundaries.py
           python3 tests/input/test_run_command_path.py
+      - name: Check RTSP first-message deadlines across partial reads
+        run: python3 tests/input/test_rtsp_first_message_deadline.py
       - name: Fetch the libwebrtc C header the browser/peer-state harnesses read
         run: git submodule update --init --depth 1 third-party/libwebrtc
       - name: Check browser input context and peer-state bridge lifetimes
