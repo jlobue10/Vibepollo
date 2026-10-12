@@ -95,8 +95,10 @@ jobs:
         run: python3 tests/input/test_find_match_bounds.py
       - name: Check the WebRTC option bounds and integer parsing
         run: |
+          git submodule update --init --depth 1 third-party/Simple-Web-Server
           python3 tests/input/test_webrtc_option_bounds.py
           python3 tests/input/test_webrtc_session_cap.py
+          python3 tests/input/test_webrtc_ice_stream.py
       - name: Check the per-app output log open and saved app paths
         run: |
           python3 tests/input/test_app_output_log_path.py

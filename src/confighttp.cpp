@@ -17,7 +17,6 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <future>
 #include <limits>
 #include <mutex>
 #include <numeric>
@@ -71,6 +70,7 @@
 #include "platform/common.h"
 #include "rtsp.h"
 #include "session_history.h"
+#include "sse_stream.h"
 #include "stream.h"
 #include "host_stats.h"
 #include "video.h"
@@ -4527,7 +4527,7 @@ namespace confighttp {
     send_response(response, output);
   }
 
-  void getWebRTCIceStream(resp_https_t response, req_https_t request) {
+  void getWebRTCIceStream(resp_https_t response, req_https_t request, sse_stream::workers_t &workers) {
     if (!authenticate(response, request)) {
       return;
     }
@@ -4554,80 +4554,82 @@ namespace confighttp {
       }
     }
 
-    std::thread([response, session_id, since]() mutable {
-      response->close_connection_after_response = true;
+    if (workers.start(session_id, [response, session_id, since](std::stop_token stop) {
+      try {
+        auto cancelled = [&] {
+          return stop.stop_requested() || !webrtc_stream::get_session(session_id);
+        };
+        response->close_connection_after_response = true;
 
-      response->write({
-        {"Content-Type", "text/event-stream"},
-        {"Cache-Control", "no-cache, no-transform"},
-        {"Connection", "keep-alive"},
-        {"X-Accel-Buffering", "no"},
-        {"Access-Control-Allow-Origin", get_cors_origin()},
-      });
+        response->write({
+          {"Content-Type", "text/event-stream"},
+          {"Cache-Control", "no-cache, no-transform"},
+          {"Connection", "keep-alive"},
+          {"X-Accel-Buffering", "no"},
+          {"Access-Control-Allow-Origin", get_cors_origin()},
+        });
 
-      std::promise<bool> header_error;
-      response->send([&header_error](const SimpleWeb::error_code &ec) {
-        header_error.set_value(static_cast<bool>(ec));
-      });
-      if (header_error.get_future().get()) {
-        return;
-      }
-
-      // Make the initial response large enough for buffering proxies to release
-      // the stream without adding padding to every browser-visible event.
-      constexpr std::size_t sse_proxy_prelude_size = 2048;
-      *response << ':' << std::string(sse_proxy_prelude_size - 3, ' ') << "\n\n";
-      std::promise<bool> prelude_error;
-      response->send([&prelude_error](const SimpleWeb::error_code &ec) {
-        prelude_error.set_value(static_cast<bool>(ec));
-      });
-      if (prelude_error.get_future().get()) {
-        return;
-      }
-
-      auto last_index = since;
-      auto last_keepalive = std::chrono::steady_clock::now();
-
-      while (true) {
-        auto candidates = webrtc_stream::get_local_candidates(session_id, last_index);
-        for (const auto &candidate : candidates) {
-          nlohmann::json payload;
-          payload["sdpMid"] = candidate.mid;
-          payload["sdpMLineIndex"] = candidate.mline_index;
-          payload["candidate"] = candidate.candidate;
-
-          *response << "event: candidate\n";
-          *response << "id: " << candidate.index << "\n";
-          *response << "data: " << payload.dump() << "\n\n";
-
-          std::promise<bool> error;
-          response->send([&error](const SimpleWeb::error_code &ec) {
-            error.set_value(static_cast<bool>(ec));
-          });
-          if (error.get_future().get()) {
-            return;
-          }
-
-          last_index = std::max(last_index, candidate.index);
+        if (!sse_stream::flush(response, cancelled)) {
+          return;
         }
 
-        auto now = std::chrono::steady_clock::now();
-        if (now - last_keepalive > std::chrono::seconds(2)) {
-          *response << "event: keepalive\n";
-          *response << "data: {}\n\n";
-          std::promise<bool> error;
-          response->send([&error](const SimpleWeb::error_code &ec) {
-            error.set_value(static_cast<bool>(ec));
-          });
-          if (error.get_future().get()) {
-            return;
-          }
-          last_keepalive = now;
+        // Make the initial response large enough for buffering proxies to release
+        // the stream without adding padding to every browser-visible event.
+        constexpr std::size_t sse_proxy_prelude_size = 2048;
+        *response << ':' << std::string(sse_proxy_prelude_size - 3, ' ') << "\n\n";
+        if (!sse_stream::flush(response, cancelled)) {
+          return;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        auto last_index = since;
+        auto last_keepalive = std::chrono::steady_clock::now();
+
+        while (!cancelled()) {
+          auto candidates = webrtc_stream::get_local_candidates(session_id, last_index);
+          for (const auto &candidate : candidates) {
+            nlohmann::json payload;
+            payload["sdpMid"] = candidate.mid;
+            payload["sdpMLineIndex"] = candidate.mline_index;
+            payload["candidate"] = candidate.candidate;
+
+            *response << "event: candidate\n";
+            *response << "id: " << candidate.index << "\n";
+            *response << "data: " << payload.dump() << "\n\n";
+
+            if (!sse_stream::flush(response, cancelled)) {
+              return;
+            }
+
+            last_index = std::max(last_index, candidate.index);
+          }
+
+          auto now = std::chrono::steady_clock::now();
+          if (now - last_keepalive > std::chrono::seconds(2)) {
+            *response << "event: keepalive\n";
+            *response << "data: {}\n\n";
+            if (!sse_stream::flush(response, cancelled)) {
+              return;
+            }
+            last_keepalive = now;
+          }
+
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "WebRTC ICE event stream failed: " << e.what();
+      } catch (...) {
+        BOOST_LOG(warning) << "WebRTC ICE event stream failed with an unknown exception";
       }
-    }).detach();
+    })) {
+      return;
+    }
+
+    nlohmann::json output {{"status", false}, {"error", "ICE event-stream capacity unavailable"}};
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    headers.emplace("Retry-After", "5");
+    add_cors_headers(headers);
+    response->write(SimpleWeb::StatusCode::server_error_service_unavailable, output.dump(), headers);
   }
 
   void getWebRTCCert(resp_https_t response, req_https_t request) {
@@ -6472,6 +6474,7 @@ namespace confighttp {
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
 
     https_server_t server(config::nvhttp.cert, config::nvhttp.pkey);
+    sse_stream::workers_t ice_stream_workers;
     server.default_resource["DELETE"] = [](resp_https_t response, req_https_t request) {
       bad_request(response, request);
     };
@@ -6619,7 +6622,9 @@ namespace confighttp {
     register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)/answer$", "GET", getWebRTCAnswer);
     register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)/ice$", "GET", getWebRTCIce);
     register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)/ice$", "POST", postWebRTCIce);
-    register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)/ice/stream$", "GET", getWebRTCIceStream);
+    register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)/ice/stream$", "GET", [&ice_stream_workers](resp_https_t response, req_https_t request) {
+      getWebRTCIceStream(std::move(response), std::move(request), ice_stream_workers);
+    });
     register_api_route("^/api/webrtc/cert$", "GET", getWebRTCCert);
     // Keep legacy cover upload endpoint present in upstream master
     register_api_route("^/api/covers/upload$", "POST", uploadCover);
@@ -6716,6 +6721,9 @@ namespace confighttp {
     // Wait for any event
     shutdown_event->view();
 
+    // Release event-stream responses while the server and its I/O loop still
+    // exist. Cancellation also wakes sends whose completion never arrives.
+    ice_stream_workers.stop();
     server.stop();
 
     tcp.join();
