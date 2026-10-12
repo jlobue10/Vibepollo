@@ -243,6 +243,7 @@ mutex = block(config, '  std::mutex &config_file_mutex(') if '  std::mutex &conf
 code = code.replace('@@MUTEX@@', mutex)
 code = code.replace('@@PARSER@@', config[config.index('  bool endline(char ch)'):config.index('  void string_f(')])
 code = code.replace('@@HTTP@@', '\n'.join(block(http, x) for x in [
+    *(['  static bool valid_config_key('] if '  static bool valid_config_key(' in http else []),
     '  static bool append_config_line(', '  void config_persistence_error(', '  void app_persistence_error(',
     '  std::recursive_mutex &apps_file_mutex(', '  std::optional<size_t> find_app_index_by_uuid(',
     '  std::optional<size_t> resolve_app_index_token(', '  void saveConfig(', '  void patchConfig(', '  void deleteApp(']))
