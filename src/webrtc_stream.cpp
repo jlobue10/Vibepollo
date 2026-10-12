@@ -4053,9 +4053,12 @@ namespace webrtc_stream {
         }
       }
       if (!offer_sdp.empty()) {
-        BOOST_LOG(error) << "WebRTC: rejected remote offer for " << ctx->session_id
-                         << " (" << offer_sdp.size() << " bytes):\n"
-                         << offer_sdp;
+        // Truncated: the offer is client-supplied and the route accepts up to 256 KiB.
+        constexpr std::size_t kLoggedSdpBytes = 4096;
+        BOOST_LOG(warning) << "WebRTC: rejected remote offer for " << ctx->session_id
+                           << " (" << offer_sdp.size() << " bytes):\n"
+                           << offer_sdp.substr(0, kLoggedSdpBytes)
+                           << (offer_sdp.size() > kLoggedSdpBytes ? "\n... (truncated)" : "");
       }
       store_negotiation_error(ctx->session_id, std::string {"Failed to set remote description: "} + (err ? err : "unknown"));
       delete ctx;

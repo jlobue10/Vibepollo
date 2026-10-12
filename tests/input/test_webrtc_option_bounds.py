@@ -19,6 +19,16 @@ def read(path):
     return (ROOT / path).read_text(encoding='utf-8')
 
 
+def block(source, marker):
+    start = source.index(marker)
+    end = source.index('{', start)
+    depth = 1
+    while depth:
+        end += 1
+        depth += (source[end] == '{') - (source[end] == '}')
+    return source[start:end + 1]
+
+
 confighttp = read('src/confighttp.cpp')
 webrtc = read('src/webrtc_stream.cpp')
 failures = 0
@@ -38,6 +48,11 @@ for ok, name in (
     ('bounded("app_id", 0,' in confighttp and 'bounded("video_pacing_slack_ms"' in confighttp and 'bounded("video_max_frame_age_ms"' in confighttp,
      'WebRTC app_id and pacing options are integer-checked through bounded()'),
     ('profile.size() > 64' in confighttp, 'the WebRTC profile string is capped'),
+    ('kMaxOfferSdpBytes' in block(confighttp, 'void postWebRTCOffer(') and
+     block(confighttp, 'void postWebRTCOffer(').index('kMaxOfferSdpBytes') < block(confighttp, 'void postWebRTCOffer(').index('set_remote_offer('),
+     'the remote offer SDP is bounded and type-checked before it reaches libwebrtc'),
+    ('substr(0, kLoggedSdpBytes)' in block(webrtc, 'void on_set_remote_failure(') and '<< offer_sdp;' not in block(webrtc, 'void on_set_remote_failure('),
+     'a rejected offer is logged truncated, never in full'),
     (webrtc.index('json_integer(message, "button"') < webrtc.index('make_abs_mouse_move_packet(x, y)', webrtc.index('if (type == "mouse_down" || type == "mouse_up")')),
      'mouse_down/mouse_up parses the button before dispatching the absolute move'),
 ):

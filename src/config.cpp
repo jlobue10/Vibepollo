@@ -1199,8 +1199,10 @@ namespace config {
     return result;
   }
 
+  // Returns the position after the closing ']' and whether the list closed at all; an
+  // unterminated list (or an unmatched quote inside one) ends at `end` with closed == false.
   template<class It>
-  It skip_list(It skipper, It end) {
+  std::pair<It, bool> skip_list(It skipper, It end) {
     int stack = 1;
     bool quoted = false;
     bool escaped = false;
@@ -1242,7 +1244,7 @@ namespace config {
       }
     }
 
-    return skipper;
+    return {skipper, stack == 0};
   }
 
   std::pair<
@@ -1269,16 +1271,16 @@ namespace config {
     }
 
     // Lists might contain newlines
+    bool list_value = false;
     if (*begin_val == '[') {
-      endl = skip_list(begin_val + 1, end);
-
-      // Check if we reached the end of the file without finding a closing bracket
-      // We know we have a valid closing bracket if:
-      // 1. We didn't reach the end, or
-      // 2. We reached the end but the last character was the matching closing bracket
-      if (endl == end && end == begin_val + 1) {
-        BOOST_LOG(warning) << "config: Missing ']' in config option: " << to_string(begin, end_name);
-        return std::make_pair(endl, std::nullopt);
+      const auto [list_end, closed] = skip_list(begin_val + 1, end);
+      if (closed) {
+        endl = list_end;
+        list_value = true;
+      } else {
+        // An unterminated list, or an unmatched quote inside one, must not swallow the
+        // options written after it: keep this option's first line and resume on the next.
+        BOOST_LOG(warning) << "config: Missing ']' in config option: " << to_string(begin, end_name) << "; value truncated to its first line";
       }
     }
 
@@ -1286,7 +1288,7 @@ namespace config {
     // value keeps a '#' it starts with or that follows a non-blank ("#DRIVE", "a#b"); a
     // blank-preceded '#' still starts a trailing comment ("port = 47989 # https"), as it
     // always did for the plain options.
-    if (*begin_val != '[') {
+    if (!list_value) {
       auto end_val = endl;
       for (auto it = begin_val + 1; it < endl; ++it) {
         if (*it == '#' && space_tab(*(it - 1))) {
@@ -1613,7 +1615,8 @@ namespace config {
     auto pos = begin;
     while (pos < std::cend(string)) {
       if (*pos == '[') {
-        pos = skip_list(pos + 1, std::cend(string)) + 1;
+        // skip_list already consumed the closing ']' (or stopped at the end of the string).
+        pos = skip_list(pos + 1, std::cend(string)).first;
       } else if (*pos == ']') {
         break;
       } else if (*pos == ',') {

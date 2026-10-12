@@ -2096,7 +2096,7 @@ namespace confighttp {
 
     BOOST_LOG(info) << config::stream.file_apps;
     try {
-      std::lock_guard apps_lock {apps_file_mutex()};
+      std::unique_lock apps_lock {apps_file_mutex()};
       // TODO: Input Validation
 
       // Read the input JSON from the request body.
@@ -2286,6 +2286,10 @@ namespace confighttp {
         app_persistence_error(response);
         return;
       }
+      // Hot apply acquires its reload gate before the apps-file lock (apply_steam /
+      // apply_playnite). The live RTX HDR hook below may reload the configuration, so
+      // end the catalogue transaction first (the same inversion #59 fixed in deleteApp).
+      apps_lock.unlock();
 #ifdef _WIN32
       const auto edited_uuid = input_tree.value("uuid", ""s);
       if (!edited_uuid.empty()) {
@@ -4323,8 +4327,19 @@ namespace confighttp {
     ss << request->content.rdbuf();
     try {
       nlohmann::json input = nlohmann::json::parse(ss.str());
+      // A browser offer is a few KiB; 256 KiB leaves room for simulcast/RTX lines. Anything
+      // larger is retained per session and used to be logged in full when libwebrtc refused it.
+      constexpr std::size_t kMaxOfferSdpBytes = 256 * 1024;
       auto sdp = input.at("sdp").get<std::string>();
       auto type = input.value("type", "offer");
+      if (sdp.size() > kMaxOfferSdpBytes || sdp.find('\0') != std::string::npos) {
+        bad_request(response, request, "SDP offer too large or malformed");
+        return;
+      }
+      if (type != "offer" && type != "pranswer" && type != "answer" && type != "rollback") {
+        bad_request(response, request, "Unsupported SDP type");
+        return;
+      }
       nlohmann::json output;
       if (!webrtc_stream::set_remote_offer(session_id, sdp, type)) {
         if (!webrtc_stream::get_session(session_id)) {
