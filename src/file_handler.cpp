@@ -177,7 +177,7 @@ namespace file_handler {
   }
 
   std::optional<std::string> read_file_checked(const char *path) {
-    std::ifstream input(path, std::ios::binary);
+    std::ifstream input(std::filesystem::path {path}, std::ios::binary);
     if (!input.is_open()) {
       return std::nullopt;
     }
