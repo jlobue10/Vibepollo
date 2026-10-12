@@ -34,6 +34,7 @@ state_end = source.index('      std::uint32_t connect_data;', state_start)
 state = source[state_start:state_end]
 
 prefix = r'''
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <limits>

@@ -712,6 +712,10 @@ namespace stream {
       crypto::aes_t incoming_iv;
       crypto::aes_t outgoing_iv;
       control_replay_window incoming_replay;
+      // Replay drops are logged at most once per second (an on-path replayer could
+      // otherwise grow the log at line rate).
+      std::uint32_t replay_drops = 0;
+      std::chrono::steady_clock::time_point replay_drop_logged_at {};
 
       std::uint32_t connect_data;  // Used for new clients with ML_FF_SESSION_ID_V1
       std::string expected_peer_address;  // Only used for legacy clients without ML_FF_SESSION_ID_V1
@@ -1788,7 +1792,14 @@ namespace stream {
         // overtake a reliable release on another channel. Reject sequences already
         // seen (or outside the retained window), not every sequence below the newest.
         if (!session->control.incoming_replay.accept(*seq)) {
-          BOOST_LOG(warning) << "Control: dropping replayed or expired encrypted packet (seq " << *seq << ')';
+          auto &control = session->control;
+          ++control.replay_drops;
+          const auto now = std::chrono::steady_clock::now();
+          if (now - control.replay_drop_logged_at >= std::chrono::seconds(1)) {
+            control.replay_drop_logged_at = now;
+            BOOST_LOG(warning) << "Control: dropping replayed or expired encrypted packet (seq " << *seq << "); "
+                               << control.replay_drops << " dropped so far";
+          }
           return;
         }
       }

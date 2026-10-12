@@ -1451,6 +1451,11 @@ namespace platf {
 
     // Temporarily prepend the specified working directory to PATH to ensure CreateProcess()
     // will (preferentially) find binaries that reside in the working directory.
+    // The host's own PATH is process-wide: concurrent launches (pause/resume, undo
+    // commands, helpers) used to restore each other's snapshot. One at a time, and the
+    // lock outlives the restore guard below.
+    static std::mutex host_path_mutex;
+    std::lock_guard<std::mutex> host_path_lock(host_path_mutex);
     sunshine_wenv[path_var_name].assign(start_dir + L";" + old_path_val);
 
     // Restore the old PATH value for our process when we're done here

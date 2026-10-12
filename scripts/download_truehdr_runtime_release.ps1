@@ -84,8 +84,11 @@ $repoPins = $pins.PSObject.Properties[$Repository]
 $pin = if ($repoPins) { $repoPins.Value.PSObject.Properties[$Tag] } else { $null }
 $pin = if ($pin) { $pin.Value } else { $null }
 if (-not $pin) {
-  if ($env:TRUEHDR_RUNTIME_ALLOW_UNPINNED -eq '1') {
-    Write-Step "WARNING: no pin for $Repository@$Tag; continuing because TRUEHDR_RUNTIME_ALLOW_UNPINNED=1"
+  # The override is for local experiments only: a CI run (hosted or self-hosted) packages
+  # these DLLs into the signed MSI and must never accept an unpinned runtime.
+  $inCi = $env:GITHUB_ACTIONS -eq 'true' -or $env:CI -eq 'true'
+  if ($env:TRUEHDR_RUNTIME_ALLOW_UNPINNED -eq '1' -and -not $inCi) {
+    Write-Step "WARNING: no pin for $Repository@$Tag; continuing because TRUEHDR_RUNTIME_ALLOW_UNPINNED=1 (not under CI)"
   } else {
     throw "No SHA-256 pin for TrueHDR runtime $Repository@$Tag in $pinsPath; add one before packaging it."
   }
