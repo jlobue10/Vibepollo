@@ -2081,9 +2081,8 @@ namespace confighttp {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       int index = input_tree.value("index", -1);
 
-      // Belt and braces for the launch side: output/working-dir must be plain local paths
-      // (no NUL, UNC, device, \\?\ or alternate-stream forms); command strings may be
-      // anything but must not carry an embedded NUL (CreateProcess would truncate them).
+      // Reject embedded NULs on every platform. Windows additionally excludes UNC,
+      // device and alternate-stream paths; those naming rules do not apply to POSIX.
       const auto plain_local_path = [](const std::string &v) {
         if (v.empty() || v == "null") {
           return true;  // unset
@@ -2091,6 +2090,7 @@ namespace confighttp {
         if (v.find('\0') != std::string::npos) {
           return false;
         }
+#ifdef _WIN32
         if (v.rfind("\\\\", 0) == 0 || v.rfind("//", 0) == 0) {
           return false;  // a UNC or device prefix (two leading separators)
         }
@@ -2117,6 +2117,7 @@ namespace confighttp {
             return false;
           }
         }
+#endif
         return true;
       };
       const auto string_or_empty = [](const nlohmann::json &node, const char *key) {
@@ -2124,7 +2125,11 @@ namespace confighttp {
       };
       for (const char *key : {"output", "working-dir"}) {
         if (!plain_local_path(string_or_empty(input_tree, key))) {
+#ifdef _WIN32
           bad_request(response, request, std::string(key) + " must be a plain local path (no UNC, device, \\\\?\\ or stream forms)");
+#else
+          bad_request(response, request, std::string(key) + " contains an embedded NUL");
+#endif
           return;
         }
       }

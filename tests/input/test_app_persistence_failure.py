@@ -113,6 +113,17 @@ static void check(bool ok,const char *name) {
 }
 int main() {
   const std::string original=R"({"apps":[{"uuid":"a","name":"Alpha"},{"uuid":"b","name":"Beta"}]})";
+  for (const std::string path : {"/home/games/Title: Subtitle", "/tmp/COM1.txt", "/tmp/NUL"}) {
+    storage.fault=0; storage.disk=original; storage.writes=proc::refreshes=0;
+    auto response=std::make_shared<response_t>(); auto request=std::make_shared<request_t>();
+    request->content<<json({{"uuid","a"},{"name","Alpha"},{"output",path},{"working-dir",path}}).dump();
+    confighttp::saveApp(response,request);
+    check(response->code==200 && storage.writes==1 && proc::refreshes==1,
+          "POSIX saves allow colons and Windows device names in both app paths");
+    check(json::parse(storage.disk)["apps"][0].value("output","")==path &&
+          json::parse(storage.disk)["apps"][0].value("working-dir","")==path,
+          "POSIX paths survive catalog persistence unchanged");
+  }
   for(int operation=0;operation<3;++operation) for(int fault=0;fault<3;++fault) {
     storage.fault=fault; storage.disk=original; storage.writes=proc::refreshes=0;
     auto response=std::make_shared<response_t>(); auto request=std::make_shared<request_t>();
