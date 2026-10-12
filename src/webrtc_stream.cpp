@@ -25,6 +25,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <stop_token>
 #include <string_view>
 #include <thread>
@@ -1354,12 +1355,19 @@ namespace webrtc_stream {
     // catch would see) and inside the range the consumer can hold.
     std::optional<std::int64_t> json_integer(const nlohmann::json &message, const char *key, std::int64_t minimum, std::int64_t maximum) {
       const auto it = message.find(key);
-      if (it == message.end() || !it->is_number_integer()) {
+      if (it == message.end()) {
         return std::nullopt;
+      }
+      // Only an absent field gets the caller's default. A present malformed
+      // field must reject the message before any arrival/state/disconnect is
+      // committed, as the data-channel callback's exception boundary expects.
+      if (!it->is_number_integer() ||
+          (it->is_number_unsigned() && it->get<std::uint64_t>() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))) {
+        throw std::invalid_argument(std::string(key) + " must be an in-range integer");
       }
       const auto value = it->get<std::int64_t>();
       if (value < minimum || value > maximum) {
-        return std::nullopt;
+        throw std::invalid_argument(std::string(key) + " is out of range");
       }
       return value;
     }

@@ -135,3 +135,13 @@ inputs: session options bounded like the RTSP ANNOUNCE (width/height 16..8192, f
 bitrate 0..500000, audio channels 2/6/8), stored ICE candidates capped per session, and input
 message integers read through `json_integer()` rather than float-to-int conversions.
 `--baseline` reads HEAD.
+
+The browser gamepad admission harness includes the production `json_integer()`
+helper. Missing optional metadata keeps its defaults; malformed present values
+(type, range, or unsigned overflow) reject the whole gamepad message before it
+can register a controller or send an active mask. It checks valid maximum wire
+values as well as malformed arrivals, states and disconnects (35 checks).
+
+`test_encoder_retry.py` reads the production result enum and executes the retry
+policy for Linux, Linux/CUDA and Windows selectors. It covers initialization and
+runtime failures, mixed failures, and resets after a completed run (18 checks).
