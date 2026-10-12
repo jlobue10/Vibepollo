@@ -185,3 +185,8 @@ working directory is searched first, then the host order; qualified paths and
 unknown programs fall back to CreateProcess's own lookup; only the child's PATH
 gets the working-directory prefix. It also pins that `run_command()` no longer
 edits the host PATH. `--baseline` reads HEAD.
+
+`test_apps_file_mutex.py` is a text gate that every web handler rewriting
+`apps.json` (reorder, save, delete) holds `apps_file_mutex()` across its whole
+read-modify-write, so a concurrent save or catalogue sync is never lost.
+`--baseline` reads HEAD.

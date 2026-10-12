@@ -2409,7 +2409,9 @@ namespace proc {
         _pipe.reset(_wfsopen(woutput.c_str(), L"a", _SH_DENYNO));
       };
       if (platf::is_running_as_system()) {
-        if (HANDLE log_token = platf::dxgi::retrieve_users_token(false)) {
+        // The same token the app itself launches with: an elevated app may log into a
+        // directory only its elevated token can open.
+        if (HANDLE log_token = platf::dxgi::retrieve_users_token(_app.elevated)) {
           auto close_log_token = util::fail_guard([log_token]() {
             CloseHandle(log_token);
           });
