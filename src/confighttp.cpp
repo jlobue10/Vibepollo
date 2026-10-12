@@ -1965,10 +1965,15 @@ namespace confighttp {
       // If any normalization occurred, persist back to disk
       if (mutated) {
         try {
-          file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
+          if (file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4)) != 0) {
+            app_persistence_error(response);
+            return;
+          }
           proc::refresh(config::stream.file_apps, false);
         } catch (std::exception &e) {
           BOOST_LOG(warning) << "GetApps persist normalization failed: "sv << e.what();
+          app_persistence_error(response);
+          return;
         }
       }
 
