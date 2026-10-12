@@ -2415,6 +2415,9 @@ namespace confighttp {
     print_req(request);
 
     try {
+      // Read-modify-write of apps.json: serialised with every other writer and the
+      // catalogue syncs, or a concurrent save/sync is lost.
+      std::lock_guard apps_lock {apps_file_mutex()};
       std::stringstream ss;
       ss << request->content.rdbuf();
 

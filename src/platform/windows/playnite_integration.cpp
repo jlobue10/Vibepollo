@@ -1932,17 +1932,23 @@ namespace platf::playnite {
     return true;
   }
 
-  static bool launch_playnite(const std::wstring &exe) {
+  // user_token: a token the caller already holds (the plugin deploy reuses the one it
+  // deployed with, so Playnite relaunches in the session it was stopped in); null acquires
+  // one here.
+  static bool launch_playnite(const std::wstring &exe, HANDLE user_token = nullptr) {
     std::filesystem::path exePath = exe;
     std::filesystem::path startDir = exePath.parent_path();
     std::string cmd = "\"" + platf::to_utf8(exe) + "\"";
     std::error_code ec_launch;
     boost::filesystem::path boostStartDir = boost::filesystem::path(startDir.wstring());
     if (platf::dxgi::is_running_as_system()) {
-      HANDLE tok = acquire_preferred_user_token_for_playnite();
+      const bool own_token = user_token == nullptr;
+      HANDLE tok = own_token ? acquire_preferred_user_token_for_playnite() : user_token;
       if (tok) {
         bool ok = launch_exe_as_token(tok, exe, startDir.wstring());
-        CloseHandle(tok);
+        if (own_token) {
+          CloseHandle(tok);
+        }
         if (!ok) {
           BOOST_LOG(warning) << "Playnite launch: CreateProcessAsUser failed";
           return false;
@@ -2024,23 +2030,13 @@ namespace platf::playnite {
         error_out = "Could not resolve the Playnite executable before installation.";
         return false;
       }
-      if (!stop_playnite()) {
-        error_out = "Could not stop Playnite before installing the plugin.";
-        return false;
-      }
-      bool launch_attempted = false;
-      auto relaunch_guard = util::fail_guard([&]() {
-        if (restart && !launch_attempted) {
-          try {
-            launch_playnite(playniteExe);
-          } catch (...) {}
-        }
-      });
 
       // The destination is inside the interactive user's profile. Every write there
       // (directory, staged copies, replaces, legacy removes, temp cleanup) runs under
       // that user's token when the host is SYSTEM, so the user's own ACLs apply and no
-      // SYSTEM-owned files are left in the profile.
+      // SYSTEM-owned files are left in the profile. Acquired BEFORE Playnite is stopped:
+      // the helper prefers the running Playnite's own token (the session whose profile
+      // the destination directory was resolved from), and the same token relaunches it.
       HANDLE deploy_token = nullptr;
       if (platf::is_running_as_system()) {
         deploy_token = acquire_preferred_user_token_for_playnite();
@@ -2052,6 +2048,19 @@ namespace platf::playnite {
       auto close_deploy_token = util::fail_guard([deploy_token]() {
         if (deploy_token) {
           CloseHandle(deploy_token);
+        }
+      });
+
+      if (!stop_playnite()) {
+        error_out = "Could not stop Playnite before installing the plugin.";
+        return false;
+      }
+      bool launch_attempted = false;
+      auto relaunch_guard = util::fail_guard([&]() {
+        if (restart && !launch_attempted) {
+          try {
+            launch_playnite(playniteExe, deploy_token);
+          } catch (...) {}
         }
       });
 
@@ -2162,7 +2171,7 @@ namespace platf::playnite {
       }
 
       launch_attempted = restart;
-      bool relaunched = !restart || launch_playnite(playniteExe);
+      bool relaunched = !restart || launch_playnite(playniteExe, deploy_token);
       relaunch_guard.disable();
       if (!relaunched) {
         if (!error_out.empty()) {

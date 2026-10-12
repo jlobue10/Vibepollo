@@ -1425,22 +1425,38 @@ namespace platf {
     return cmd.substr(0, cmd.find(L' '));
   }
 
-  // Resolve the program CreateProcess() would otherwise look up on the host's PATH: the
-  // working directory first, then the host search order. Empty when the first token is
-  // already qualified (a path separator or drive spec: association output and the cmd.exe
-  // trampoline pass through untouched) or when nothing is found, so the caller keeps
+  // Resolve the program CreateProcess() would otherwise look up on the host's PATH.
+  // CreateProcess' own order for an unqualified name is application dir, cwd, System32,
+  // System, Windows, then PATH; the working directory used to sit at the head of PATH, i.e.
+  // AFTER the Windows directories. Keep that precedence: the first pass searches
+  // "System32;Windows;working dir" (a same-named file in a writable game folder must not
+  // shadow cmd.exe, powershell.exe or reg.exe for launch, prep, state or undo commands),
+  // the second pass the host order. Empty when the first token is already qualified (a
+  // path separator or drive spec: association output and the cmd.exe trampoline pass
+  // through untouched) or when nothing is found, so the caller keeps
   // lpApplicationName = nullptr and the old lookup (incl. unquoted paths with spaces).
   // Pinning the program here means a PATH edit by anyone cannot change which binary
-  // starts, and the host's own PATH is never written (it used to be prepended to under a
-  // process-wide mutex that serialised every launch).
+  // starts, and the host's own PATH is never written.
   static std::wstring resolve_program_path(std::wstring_view wcmd, const std::wstring &start_dir) {
     const auto token = first_token(wcmd);
     if (token.empty() || token.find_first_of(L"\\/") != std::wstring_view::npos || (token.size() > 1 && token[1] == L':')) {
       return {};
     }
     const std::wstring name(token);
+    // No empty list element: an empty component means "current directory" to the loader.
+    std::wstring first_pass;
+    std::array<wchar_t, MAX_PATH> dir {};
+    if (const UINT n = GetSystemDirectoryW(dir.data(), (UINT) dir.size()); n && n < dir.size()) {
+      first_pass.assign(dir.data(), n);
+    }
+    if (const UINT n = GetWindowsDirectoryW(dir.data(), (UINT) dir.size()); n && n < dir.size()) {
+      first_pass += (first_pass.empty() ? L"" : L";") + std::wstring(dir.data(), n);
+    }
+    if (!start_dir.empty()) {
+      first_pass += (first_pass.empty() ? L"" : L";") + start_dir;
+    }
     std::array<wchar_t, 32768> buffer {};
-    for (const wchar_t *path : {start_dir.empty() ? nullptr : start_dir.c_str(), (const wchar_t *) nullptr}) {
+    for (const wchar_t *path : {first_pass.empty() ? nullptr : first_pass.c_str(), (const wchar_t *) nullptr}) {
       const DWORD len = SearchPathW(path, name.c_str(), L".exe", (DWORD) buffer.size(), buffer.data(), nullptr);
       if (len > 0 && len < buffer.size()) {
         return std::wstring(buffer.data(), len);
@@ -1452,9 +1468,9 @@ namespace platf {
     return {};
   }
 
-  // Prepend the working directory to the child's PATH (case-insensitive key, merged the way
+  // Append the working directory to the child's PATH (case-insensitive key, merged the way
   // merge_user_environment_block() merges), so binaries beside the launch target resolve for
-  // the child as they did when the host's PATH carried the prefix.
+  // the child as a last resort, never ahead of the system directories.
   static void prepend_child_path(bp::environment &env, const std::wstring &start_dir) {
     if (start_dir.empty()) {
       return;
@@ -1468,7 +1484,7 @@ namespace platf {
     }
     const std::string dir = utf_utils::to_utf8(start_dir);
     const std::string old = env[name].to_string();
-    env[name] = old.empty() ? dir : dir + ";" + old;
+    env[name] = old.empty() ? dir : old + ";" + dir;
   }
 
   bp::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {

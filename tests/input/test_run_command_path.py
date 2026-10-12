@@ -2,7 +2,8 @@
 """Compile the production program resolver and child-PATH helper from run_command() against a
 scripted SearchPathW and a map-backed environment. The host's own PATH used to be prepended to
 (under a process-wide mutex) so CreateProcess would find binaries beside the launch target; the
-program is now pinned by SearchPathW (working directory first, then the host order) and passed
+program is now pinned by SearchPathW (System32 and Windows, then the working directory, then the
+host order: a same-named file in a game folder never shadows a system program) and passed
 as lpApplicationName, and only the child's PATH carries the prefix. --baseline reads HEAD.
 """
 from pathlib import Path
@@ -46,6 +47,9 @@ check('this_process::wenv()' not in run_command and 'host_path_mutex' not in run
       'run_command() no longer edits the host PATH or serialises launches behind a mutex')
 check(run_command.count('program.empty() ? nullptr : program.c_str()') == 2,
       'both CreateProcess calls receive the resolved program as lpApplicationName')
+resolver = function(misc, '  static std::wstring resolve_program_path(')
+check('GetSystemDirectoryW(' in resolver and 'GetWindowsDirectoryW(' in resolver and resolver.index('GetSystemDirectoryW(') < resolver.index('SearchPathW('),
+      'the resolver composes the Windows directories ahead of the working directory before searching')
 check(run_command.count('prepend_child_path(cloned_env, start_dir)') == 2 and
       run_command.index('prepend_child_path(cloned_env, start_dir)') > run_command.index('merge_user_environment_block(cloned_env, user_token)'),
       'the working directory is prepended to the child PATH after the user block is merged')
@@ -63,6 +67,11 @@ PRELUDE = r"""
 typedef unsigned long DWORD;
 static std::map<std::wstring, std::wstring> hits;   // "<lpPath>|<name>" -> full path
 static std::vector<std::wstring> lookups;
+#include <cwchar>
+typedef unsigned int UINT;
+#define MAX_PATH 260
+static UINT GetSystemDirectoryW(wchar_t *buf, UINT n) { const wchar_t *d = L"C:\\Windows\\System32"; std::wcsncpy(buf, d, n); return (UINT) std::wcslen(d); }
+static UINT GetWindowsDirectoryW(wchar_t *buf, UINT n) { const wchar_t *d = L"C:\\Windows"; std::wcsncpy(buf, d, n); return (UINT) std::wcslen(d); }
 static DWORD SearchPathW(const wchar_t *path, const wchar_t *name, const wchar_t *ext, DWORD n, wchar_t *buf, wchar_t **part) {
   (void)ext; (void)part;
   const std::wstring key = std::wstring(path ? path : L"<null>") + L"|" + name;
@@ -101,15 +110,20 @@ int main() {
   int failures = 0;
   auto check = [&](bool ok, const char *name) { std::cout << (ok ? "PASS: " : "FAIL: ") << name << '\n'; failures += !ok; };
   const std::wstring dir = L"C:\\Games\\Foo";
-  hits[L"C:\\Games\\Foo|game.exe"] = L"C:\\Games\\Foo\\game.exe";
-  hits[L"<null>|cmd.exe"] = L"C:\\Windows\\System32\\cmd.exe";
+  const std::wstring first = L"C:\\Windows\\System32;C:\\Windows;C:\\Games\\Foo";
+  // The scripted SearchPathW answers the composed first pass the way the loader would: the
+  // first directory of the list that holds the name wins.
+  hits[first + L"|game.exe"] = L"C:\\Games\\Foo\\game.exe";
+  hits[first + L"|cmd.exe"] = L"C:\\Windows\\System32\\cmd.exe";
   hits[L"<null>|tool"] = L"C:\\Tools\\tool.exe";
-  check(resolve_program_path(L"game.exe --fullscreen", dir) == L"C:\\Games\\Foo\\game.exe", "a bare program is found in the working directory first");
+  check(resolve_program_path(L"game.exe --fullscreen", dir) == L"C:\\Games\\Foo\\game.exe", "a bare program beside the launch target is found");
   check(resolve_program_path(L"\"game.exe\" --fullscreen", dir) == L"C:\\Games\\Foo\\game.exe", "a quoted bare program resolves the same way");
   lookups.clear();
-  check(resolve_program_path(L"tool arg", dir) == L"C:\\Tools\\tool.exe" && lookups.size() == 2 && lookups[0].rfind(dir + L"|", 0) == 0,
-        "a program missing from the working directory falls back to the host search order");
-  check(resolve_program_path(L"cmd.exe /c start \"\" \"C:\\x\\y.lnk\"", dir) == L"C:\\Windows\\System32\\cmd.exe", "the cmd.exe trampoline resolves on the host order");
+  check(resolve_program_path(L"cmd.exe /c start \"\" \"C:\\x\\y.lnk\"", dir) == L"C:\\Windows\\System32\\cmd.exe" && lookups.size() == 1 && lookups[0].rfind(L"C:\\Windows\\System32;C:\\Windows;", 0) == 0,
+        "the Windows directories are searched before the working directory (a game-folder cmd.exe cannot shadow the system one)");
+  lookups.clear();
+  check(resolve_program_path(L"tool arg", dir) == L"C:\\Tools\\tool.exe" && lookups.size() == 2 && lookups[0] == first + L"|tool" && lookups[1] == L"<null>|tool",
+        "a program missing from the first pass falls back to the host search order");
   check(resolve_program_path(L"\"C:\\Program Files\\x\\a.exe\" args", dir).empty(), "a quoted qualified path is left to CreateProcess (lpApplicationName stays null)");
   check(resolve_program_path(L"C:\\Program Files\\x\\a.exe args", dir).empty(), "an unquoted qualified path with spaces keeps the old lookup");
   check(resolve_program_path(L"..\\bin\\a.exe", dir).empty() && resolve_program_path(L"bin/a.exe", dir).empty(), "relative paths with separators are not re-resolved");
@@ -117,16 +131,17 @@ int main() {
   check(resolve_program_path(L"", dir).empty(), "an empty command line resolves nothing");
   lookups.clear();
   hits[L"<null>|game.exe"] = L"C:\\Elsewhere\\game.exe";
-  check(resolve_program_path(L"game.exe", L"") == L"C:\\Elsewhere\\game.exe" && lookups.size() == 1 && lookups[0] == L"<null>|game.exe",
-        "without a working directory only the host order is searched");
+  hits[L"C:\\Windows\\System32;C:\\Windows|game.exe"] = L"";
+  check(resolve_program_path(L"game.exe", L"") == L"C:\\Elsewhere\\game.exe" && lookups.size() == 2 && lookups[0] == L"C:\\Windows\\System32;C:\\Windows|game.exe",
+        "without a working directory the first pass is the Windows directories alone (no empty list element)");
   bp::environment env; env.items = {{"Path", "C:\\Windows"}, {"OTHER", "1"}};
   prepend_child_path(env, dir);
-  check(env.items.size() == 2 && env.items[0].name == "Path" && env.items[0].value == "C:\\Games\\Foo;C:\\Windows", "the child PATH starts with the working directory (existing key kept)");
+  check(env.items.size() == 2 && env.items[0].name == "Path" && env.items[0].value == "C:\\Windows;C:\\Games\\Foo", "the child PATH ends with the working directory (existing key kept, system entries stay ahead)");
   bp::environment empty_env;
   prepend_child_path(empty_env, dir);
   check(empty_env.items.size() == 1 && empty_env.items[0].value == "C:\\Games\\Foo", "a missing PATH is created from the working directory");
   prepend_child_path(env, L"");
-  check(env.items[0].value == "C:\\Games\\Foo;C:\\Windows", "an empty working directory leaves the child PATH alone");
+  check(env.items[0].value == "C:\\Windows;C:\\Games\\Foo", "an empty working directory leaves the child PATH alone");
   std::cout << failures << " failures\n";
   return failures != 0;
 }
