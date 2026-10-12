@@ -1,5 +1,11 @@
 # Input disconnect regression tests
 
+`python3 tests/input/test_control_replay_window.py` executes the production v2
+encrypted-control replay gate with authenticated packets delivered out of order
+across independent ENet channels. It covers delayed keyboard/controller releases,
+duplicate rejection, window edges and jumps, session isolation, and the 32-bit
+sequence boundary. `--baseline` reads the gate from `HEAD`.
+
 Run from the repository root:
 
 ```sh
