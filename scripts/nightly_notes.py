@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import quote
 
 REPOSITORIES = {'Nonary/vibeshine', 'Nonary/Vibepollo', 'Nonary/moonlight-qt'}
 
@@ -27,15 +28,24 @@ def sequence(repo, tag, version=None, source=None):
         if not match or (version is not None and tag != 'v' + version):
             raise ValueError('Invalid Moonlight nightly identity')
         return int(match[1])
-    match = re.fullmatch(r'daily-(20[0-9]{2})-([0-9]{2})-([0-9]{2})', tag)
+    semver = re.fullmatch(r'([0-9]+\.[0-9]+\.[0-9]+)-daily\.d(20[0-9]{2})([0-9]{2})([0-9]{2})(?:\.([1-9][0-9]{0,2}))?', tag)
+    if semver:
+        if version is not None and version != tag + '+' + exact_sha(source)[:12]:
+            raise ValueError('SemVer nightly tag must equal its canonical version without build metadata')
+        legacy = f'daily-{semver[2]}-{semver[3]}-{semver[4]}' + ('.' + semver[5] if semver[5] else '')
+        return sequence(repo, legacy, version, source)
+    match = re.fullmatch(r'daily-(20[0-9]{2})-([0-9]{2})-([0-9]{2})(?:\.([1-9][0-9]{0,2}))?', tag)
     if not match:
         raise ValueError('Invalid host nightly tag')
     import datetime
-    datetime.date(*map(int, match.groups()))
-    day = ''.join(match.groups())
-    if version is not None and not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+-daily\.d' + day + r'\+' + exact_sha(source)[:12], version):
+    datetime.date(*map(int, match.groups()[:3]))
+    day = ''.join(match.groups()[:3])
+    revision = int(match[4]) if match[4] else 1
+    if revision > 999: raise ValueError('Nightly revision exceeds 999')
+    suffix = r'\.' + str(revision) if match[4] else ''
+    if version is not None and not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+-daily\.d' + day + suffix + r'\+' + exact_sha(source)[:12], version):
         raise ValueError('Invalid host nightly version/source identity')
-    return int(day)
+    return int(day) * 1000 + revision if match[4] else int(day)
 
 
 def previous_release(repo, releases, metadata_reader, tag_resolver):
@@ -90,7 +100,11 @@ def make_notes(repo, tag, version, source, previous, commits, ancestor=True):
                     commits_total=len(commits), commits_listed=len(commits))
     if repo == 'Nonary/moonlight-qt':
         metadata['windows_product_version'] = f'6.2.{seq}'
-    notes = [f'## Nightly changes ({version})', '', f'Source: [{source}](https://github.com/{repo}/commit/{source})', '']
+    product = {'Nonary/vibeshine': 'Vibeshine', 'Nonary/Vibepollo': 'Vibepollo', 'Nonary/moonlight-qt': 'Moonlight'}[repo]
+    notes = [f'This is a nightly release of {product} and contains several bug fixes and may contain new features. Check the commit log for more information.', '',
+             'Nightly Windows installers are unsigned and include self-signed gamepad components. They may cause false-positive antivirus alerts.', '',
+             '<details>', '<summary>Commit log</summary>', '',
+             f'Source: [{source[:12]}](https://github.com/{repo}/commit/{source})', '']
     if first:
         notes += ['First published nightly: no previous successful nightly baseline exists. No commit delta is claimed.']
     elif unchanged:
@@ -101,11 +115,12 @@ def make_notes(repo, tag, version, source, previous, commits, ancestor=True):
             notes += ['', '**Warning: source history diverged or was rewound.** The list is the exact newly reachable commit set `previous_source_commit..source_commit`, not a forward ancestry claim.']
         if not commits:
             notes += ['', 'No newly reachable commits in this exact range. Source identity changed (for example, a rewind).']
-        for sha, message in commits:
-            exact_sha(sha)
-            # Fence preserves the complete raw conventional commit message.
-            fence = '`' * max(3, max((len(m[0]) for m in re.finditer(r'`+', message)), default=0) + 1)
-            notes += ['', f'[{sha[:12]}](https://github.com/{repo}/commit/{sha})', fence + 'text', message.rstrip('\n'), fence]
+    for sha, message in commits:
+        exact_sha(sha)
+        # Fence preserves the complete raw conventional commit message.
+        fence = '`' * max(3, max((len(m[0]) for m in re.finditer(r'`+', message)), default=0) + 1)
+        notes += ['', f'[{sha[:12]}](https://github.com/{repo}/commit/{sha})', fence + 'text', message.rstrip('\n'), fence]
+    notes += ['', '</details>']
     return '\n'.join(notes) + '\n', metadata
 
 
@@ -122,7 +137,15 @@ def generate(repo, tag, version, source, assets, notes):
         if not isinstance(asset_id, int) or asset_id <= 0:
             raise ValueError('Invalid metadata asset ID')
         return json.loads(run('gh', 'api', '-H', 'Accept: application/octet-stream', f'repos/{repo}/releases/assets/{asset_id}'))
-    previous = previous_release(repo, [r for page in pages for r in page], read_metadata, resolve)
+    releases = [r for page in pages for r in page if r.get('tag_name') != tag]
+    previous = previous_release(repo, releases, read_metadata, resolve)
+    # The first nightly still needs an honest, useful commit log. A published
+    # stable release supplies its initial baseline; drafts never do.
+    if previous is None:
+        stable = [r for r in releases if r.get('draft') is False and r.get('prerelease') is False and r.get('published_at')]
+        if stable:
+            baseline = max(stable, key=lambda r: (r['published_at'], r.get('id', 0)))
+            previous = {'tag': baseline['tag_name'], 'source_commit': resolve(baseline['tag_name']), 'stable_baseline': True}
     commits, ancestor = [], True
     if previous:
         old = previous['source_commit']
@@ -136,10 +159,20 @@ def generate(repo, tag, version, source, assets, notes):
         for index in range(0, len(fields) - 1, 2):
             commits.append((exact_sha(fields[index].strip()), fields[index + 1]))
     body, metadata = make_notes(repo, tag, version, source, previous, commits, ancestor)
+    if previous and previous.get('stable_baseline'):
+        body = body.replace('preceding successfully published nightly', 'preceding stable release')
+        metadata.update(first_nightly=True, previous_successful_tag=None, initial_stable_tag=previous['tag'])
     root = Path(assets)
+    product = {'Nonary/vibeshine': 'Vibeshine', 'Nonary/Vibepollo': 'Vibepollo'}.get(repo)
+    if product and (root / (product + 'Setup.exe')).is_file():
+        downloads = [f'[Windows installer](https://github.com/{repo}/releases/download/{tag}/{product}Setup.exe)']
+        packages = list(root.glob(product.lower() + '-*.pkg.tar.zst'))
+        if len(packages) == 1:
+            downloads.append(f'[Linux (Arch x86_64)](https://github.com/{repo}/releases/download/{tag}/{quote(packages[0].name)})')
+        first_line, remainder = body.split('\n', 1)
+        body = first_line + '\n\n' + ' · '.join(downloads) + '\n' + remainder
     (root / 'nightly-metadata.json').write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
-    with Path(notes).open('a', encoding='utf-8') as output:
-        output.write('\n' + body)
+    Path(notes).write_text(body, encoding='utf-8')
     # Include metadata and existing manifest/provenance; never hash SHA256SUMS itself.
     files = sorted(p for p in root.iterdir() if p.name != 'SHA256SUMS')
     if any(not p.is_file() or p.is_symlink() or '\n' in p.name or '\r' in p.name for p in files):

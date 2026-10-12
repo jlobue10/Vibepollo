@@ -15,7 +15,7 @@ try {
         $block = [regex]::Match($text, '(?s)# DRIVER_INSTALL_SAFETY_BEGIN.*?# DRIVER_INSTALL_SAFETY_END').Value
         Assert-That ($block.Length -gt 0) "Missing safety policy: $driver"
         if ($driver -eq 'vhf-gamepad') {
-            Assert-That ($block.Contains('$LocalTestPackage -and $AllowUntrustedLocalPackage -and $signature.Status -eq ''NotTrusted''')) 'Only a signed local VHF candidate may defer trust for independent validation and recipient consent'
+            Assert-That ($block.Contains('$LocalTestPackage -and $AllowUntrustedLocalPackage -and') -and $block.Contains("@('NotTrusted', 'UnknownError')")) 'Only a signed local VHF candidate may defer trust for independent validation and recipient consent'
         } elseif ($null -eq $baseline) { $baseline = $block } else { Assert-That ($block -ceq $baseline) "Safety policy drift: $driver" }
         # Load only these pure/read-only functions, never the installer body.
         foreach ($name in @('ConvertTo-DriverComponentVersion', 'Get-InfComponentVersion', 'Test-SafeDriverInstall')) {
@@ -27,6 +27,13 @@ try {
         function Get-WindowsDriver { param([switch]$Online,[switch]$All,$ErrorAction) if ($script:queryFails) { throw 'Mock query failure' }; return $script:fakePackages }
         function Get-CimInstance { param($ClassName,$ErrorAction) if ($script:cimFails) { throw 'Mock CIM failure' }; return $script:fakeDevices }
         function Get-AuthenticodeSignature { param($LiteralPath,$ErrorAction) return $script:fakeSignature }
+        function Assert-ExpectedDisplayPackage {
+            param($InfPath,$CatalogPath,$HardwareId)
+            if (!$script:fakeSignature.SignerCertificate -or
+                ($script:fakeSignature.Status -ne 'Valid' -and $script:fakeSignature.SignerCertificate.Subject -ne $script:fakeSignature.SignerCertificate.Issuer)) { throw 'Mock rejected package identity/integrity' }
+            return $true
+        }
+
         $targetInf = Join-Path $testRoot 'component.inf'
         $storeDir = Join-Path $testRoot 'store'; New-Item -ItemType Directory -Path $storeDir -Force | Out-Null
         $storeInf = Join-Path $storeDir 'component.inf'
@@ -61,9 +68,9 @@ try {
                 self-signed { [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='CN=X';Issuer='CN=X'}} }
             }
             $script:fakePackages=@(); $script:fakeDevices=@()
-            if ($driver -eq 'vhf-gamepad' -and $mode -eq 'self-signed') {
-                Assert-That (Invoke-Decision) 'Already Windows-trusted selfsigned VHF missing must be eligible'
-                Set-Installed '1.2.0.9'; Assert-That (Invoke-Decision) 'Already Windows-trusted selfsigned VHF newer must be eligible'
+            if ($mode -eq 'self-signed') {
+                Assert-That (Invoke-Decision) 'Verified expected selfsigned missing must be eligible'
+                Set-Installed '1.2.0.9'; Assert-That (Invoke-Decision) 'Verified expected selfsigned newer must be eligible'
             } else {
                 Expect-Blocked "${driver}: $mode missing must block"
                 Set-Installed '1.2.0.9'; Expect-Blocked "${driver}: $mode newer candidate must block"
@@ -111,7 +118,7 @@ try {
                 $stop = [regex]::Match($body, '(?m)^Stop-(Sunshine|Apollo)ForDriverInstall').Index
                 Assert-That ($stage -gt $guard -and $stage -lt $stop -and $stage -lt $body.LastIndexOf('Stop-VirtualDisplayBrokerForDriverInstall')) 'Display catalog staging must precede service stops'
                 Assert-That ($text.Contains('[int]$DailyUnsignedPolicy = 0')) 'Stable display publisher handling must remain the default'
-                Assert-That ($body.Contains('if ($DailyUnsignedPolicy -eq 0) { Install-CatalogSignerCertificate }')) 'Daily display must not import a production publisher'
+                Assert-That ($body.Contains('Install-ExpectedDisplayTrust')) 'Display trust must use independently verified release identity'
             }
         }
         Write-Host "$driver safety matrix passed (mocked queries/signatures only)."
@@ -127,10 +134,15 @@ try {
     Assert-That ($bootstrap.Contains('its uninstaller cannot guarantee preservation of installed drivers')) 'Legacy pre-uninstall must fail safely'
     & (Join-Path $RepositoryRoot 'scripts/tests/test_display_producer_provenance.ps1') -RepositoryRoot $RepositoryRoot
     & (Join-Path $RepositoryRoot 'packaging/windows/test_gamepad_certificate_trust.ps1') -RepositoryRoot $RepositoryRoot
+    & (Join-Path $RepositoryRoot 'packaging/windows/bootstrapper/tests/test_driver_selections.ps1')
     & (Join-Path $RepositoryRoot 'packaging/windows/bootstrapper/tests/test_gamepad_certificate_consent.ps1')
     $windowsPowerShell = Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
     & $windowsPowerShell -NoProfile -File (Join-Path $RepositoryRoot 'packaging/windows/test_gamepad_certificate_crypto.ps1') -RepositoryRoot $RepositoryRoot
     if ($LASTEXITCODE -ne 0) { throw 'Read-only native VHF certificate verification tests failed.' }
+    & $windowsPowerShell -NoProfile -File (Join-Path $RepositoryRoot 'packaging/windows/test_display_release_trust.ps1') -RepositoryRoot $RepositoryRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Display release identity/trust validation tests failed.' }
+    & (Join-Path $RepositoryRoot 'packaging/windows/test_gamepad_cleanup_paths.ps1') -RepositoryRoot $RepositoryRoot
+    & (Join-Path $RepositoryRoot 'packaging/windows/test_optional_display_guard.ps1') -RepositoryRoot $RepositoryRoot
     Write-Host 'Driver installation safety checks passed. No installers, drivers, trust stores, services or restarts were executed.'
 } finally {
     # Only delete the exact uniquely created scratch directory.

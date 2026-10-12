@@ -15,6 +15,34 @@ def release(tag='daily-2026-10-10', **kwargs):
 
 
 class NightlyNotesTests(unittest.TestCase):
+    def test_revision_sequence_is_monotonic_across_dates_and_bound_to_version(self):
+        first = n.sequence(REPO, 'daily-2026-10-11.2', f'2.0.1-daily.d20261011.2+{A[:12]}', A)
+        next_day = n.sequence(REPO, 'daily-2026-10-12.1', f'2.0.1-daily.d20261012.1+{A[:12]}', A)
+        self.assertGreater(next_day, first)
+        self.assertGreater(first, n.sequence(REPO, 'daily-2026-10-11'))
+        for tag, version in [('daily-2026-10-11.2', f'2.0.1-daily.d20261011.3+{A[:12]}'), ('daily-2026-10-11.1000', f'2.0.1-daily.d20261011.1000+{A[:12]}')]:
+            with self.assertRaises(ValueError): n.sequence(REPO, tag, version, A)
+
+    def test_semver_tags_preserve_legacy_sequence_and_bind_exact_core(self):
+        tag = '2.0.1-daily.d20261011.3'
+        version = tag + '+' + A[:12]
+        self.assertEqual(n.sequence(REPO, tag, version, A), n.sequence(REPO, 'daily-2026-10-11.3', version, A))
+        for bad in ('2.0.2-daily.d20261011.3+' + A[:12], '2.0.1-daily.d20261012.3+' + A[:12]):
+            with self.assertRaises(ValueError): n.sequence(REPO, tag, bad, A)
+        notes, metadata = n.make_notes(REPO, tag, version, A, None, [])
+        self.assertEqual(metadata['tag'], tag)
+        self.assertEqual(metadata['nightly_sequence'], 20261011003)
+        self.assertIn('<details>', notes)
+
+    def test_user_summary_and_collapsible_real_commit_log(self):
+        notes, data = self.notes({'tag': 'daily-2026-10-10', 'source_commit': A}, [(B, 'fix: streaming')])
+        self.assertTrue(notes.startswith('This is a nightly release of Vibeshine'))
+        self.assertIn('<details>\n<summary>Commit log</summary>', notes)
+        self.assertIn('fix: streaming', notes)
+        self.assertTrue(notes.endswith('</details>\n'))
+        self.assertNotIn('All nightly builds are self-signed', notes)
+        self.assertIn('false-positive antivirus alerts', notes)
+
     def notes(self, previous=None, commits=(), ancestor=True):
         return n.make_notes(REPO, 'daily-2026-10-11', '1.2.3-daily.d20261011+' + B[:12], B, previous, list(commits), ancestor)
 

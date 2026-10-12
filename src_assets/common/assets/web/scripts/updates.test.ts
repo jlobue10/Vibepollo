@@ -189,3 +189,34 @@ test('Apollo macOS notices require the uploaded package for the reported archite
   nightly.assets = [arm.assets![0]!];
   assert.equal(selectAvailableUpdate('1.9.0', [nightly], true, 'macos', 'aarch64'), null);
 });
+
+test('post-stable nightly and same-day revisions upgrade, opt-out and final stable win', () => {
+  const revised = daily('2026-10-11', '2.0.1');
+  revised.tag_name = 'daily-2026-10-11.2';
+  Object.assign(revised.nightly_metadata!, {tag: revised.tag_name, version: '2.0.1-daily.d20261011.2+aaaaaaaaaaaa', nightly_sequence: 20261011002});
+  for (const installed of ['2.0.0', '2.0.0-daily.d20261011+aaa39188cc78', '2.0.0-daily.d20261011+0d62c962e081', '2.0.1-daily.d20261011+bbbbbbbbbbbb'])
+    assert.equal(selectAvailableUpdate(installed, [revised], true)?.tag, revised.tag_name);
+  for (const installed of ['2.0.1-daily.d20261011.2+aaaaaaaaaaaa', '2.0.1-daily.d20261012+bbbbbbbbbbbb', '2.0.1'])
+    assert.equal(selectAvailableUpdate(installed, [revised], true), null);
+  assert.equal(selectAvailableUpdate('2.0.0', [revised], false), null);
+  assert.equal(selectAvailableUpdate('2.0.1-daily.d20261011.2+aaaaaaaaaaaa', [revised, release('2.0.1')], true)?.tag, '2.0.1');
+  revised.nightly_metadata!['nightly_sequence'] = 20261011;
+  assert.equal(validNightlyMetadata(revised.tag_name!, revised.nightly_metadata), false);
+});
+
+
+test('SemVer GitHub nightly tags notify shipped stable clients and retain metadata gates', () => {
+  const next = daily('2026-10-12', '2.0.1');
+  next.tag_name = '2.0.1-daily.d20261012.1';
+  Object.assign(next.nightly_metadata!, { tag: next.tag_name, version: next.tag_name + '+aaaaaaaaaaaa', nightly_sequence: 20261012001 });
+  assert.equal(selectAvailableUpdate('2.0.0', [next], undefined)?.tag, next.tag_name);
+  assert.equal(selectAvailableUpdate('2.0.0', [next], false), null);
+  assert.equal(selectAvailableUpdate('2.0.1-daily.d20261011.2+aaaaaaaaaaaa', [next], true)?.tag, next.tag_name);
+  assert.equal(selectAvailableUpdate('2.0.1', [next], true), null);
+  for (const changed of [
+    {...next, nightly_metadata: undefined},
+    {...next, nightly_metadata: {...next.nightly_metadata, tag: 'daily-2026-10-12.1'}},
+    {...next, nightly_metadata: {...next.nightly_metadata, version: '2.0.2-daily.d20261012.1+aaaaaaaaaaaa'}},
+    {...next, assets: assets},
+  ]) assert.equal(selectAvailableUpdate('2.0.0', [changed], true), null);
+});
