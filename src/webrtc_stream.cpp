@@ -5679,10 +5679,10 @@ namespace webrtc_stream {
   // launch registry and the pending queue apply). Refused, never evicted.
   constexpr std::size_t kMaxWebRtcSessions = remote_session::max_client_vdds * 2;
 
-  std::optional<SessionState> create_session(const SessionOptions &options, create_error_e *error) {
+  std::optional<SessionState> create_session(const SessionOptions &options, create_error_e *create_error) {
     BOOST_LOG(debug) << "WebRTC: create_session enter";
-    if (error) {
-      *error = create_error_e::shutdown;
+    if (create_error) {
+      *create_error = create_error_e::shutdown;
     }
     auto reservation_guard = util::fail_guard([]() {
       cancel_pending_webrtc_session_creation();
@@ -5750,8 +5750,8 @@ namespace webrtc_stream {
         std::lock_guard lg {session_mutex};
         if (sessions.size() >= kMaxWebRtcSessions) {
           BOOST_LOG(warning) << "WebRTC: refusing session, " << sessions.size() << " already registered (limit " << kMaxWebRtcSessions << ')';
-          if (error) {
-            *error = create_error_e::limit;
+          if (create_error) {
+            *create_error = create_error_e::limit;
           }
           return std::nullopt;  // reservation_guard releases the capture reservation
         }

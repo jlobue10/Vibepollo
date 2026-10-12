@@ -107,7 +107,7 @@ namespace webrtc_stream {
     shutdown,
     limit,
   };
-  std::optional<SessionState> create_session(const SessionOptions &options, create_error_e *error = nullptr);
+  std::optional<SessionState> create_session(const SessionOptions &options, create_error_e *create_error = nullptr);
   std::optional<std::string> ensure_capture_started(const SessionOptions &options);
   bool close_session(std::string_view id);
   std::optional<SessionState> get_session(std::string_view id);
