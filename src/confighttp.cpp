@@ -2808,7 +2808,12 @@ namespace confighttp {
       if (disabled_fullscreen_flag) {
         try {
           std::unique_lock config_lock {config::config_file_mutex()};
-          auto current_cfg = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+          const auto contents = file_handler::read_file_checked(config::sunshine.config_file.c_str());
+          if (!contents) {
+            config_persistence_error(response, "The application was removed, but the existing configuration could not be read. The Playnite fullscreen setting was not changed. Check the host logs and storage permissions.");
+            return;
+          }
+          auto current_cfg = config::parse_config(*contents);
           current_cfg["playnite_fullscreen_entry_enabled"] = "false";
           std::stringstream config_stream;
           for (const auto &kv : current_cfg) {
@@ -2821,7 +2826,10 @@ namespace confighttp {
           }
           config_lock.unlock();
           config::apply_config_now();
-        } catch (...) {
+        } catch (const std::exception &e) {
+          BOOST_LOG(warning) << "deleteApp: could not update the Playnite fullscreen setting: "sv << e.what();
+          config_persistence_error(response, "The application was removed, but the Playnite fullscreen setting could not be updated. Check the host logs and storage permissions.");
+          return;
         }
       }
 #endif
@@ -3279,7 +3287,12 @@ namespace confighttp {
 #ifdef _WIN32
     output_tree["vdisplayStatus"] = static_cast<int>(proc::vDisplayDriverStatus.load(std::memory_order_acquire));
 #endif
-    auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+    const auto contents = file_handler::read_file_checked(config::sunshine.config_file.c_str());
+    if (!contents) {
+      config_persistence_error(response, "Could not read the configuration. Check the host logs and storage permissions.");
+      return;
+    }
+    auto vars = config::parse_config(*contents);
     for (auto &[name, value] : vars) {
       output_tree[name] = value;
     }
@@ -3674,9 +3687,12 @@ namespace confighttp {
 
       // Load existing config into a map
       std::unique_lock config_lock {config::config_file_mutex()};
-      std::unordered_map<std::string, std::string> current = config::parse_config(
-        file_handler::read_file(config::sunshine.config_file.c_str())
-      );
+      const auto contents = file_handler::read_file_checked(config::sunshine.config_file.c_str());
+      if (!contents) {
+        config_persistence_error(response, "Could not read the existing configuration. No changes were saved. Check the host logs and storage permissions.");
+        return;
+      }
+      std::unordered_map<std::string, std::string> current = config::parse_config(*contents);
 
       // Track which keys are being modified to detect restart requirements
       std::set<std::string> changed_keys;

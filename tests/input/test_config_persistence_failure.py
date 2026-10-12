@@ -106,6 +106,10 @@ struct storage_t: file_handler::filesystem_t {
 namespace file_handler {
   handler_t handler(storage);
   std::string read_file(const char *path) { return handler.read_file(path); }
+  std::optional<std::string> read_file_checked(const char *path) {
+    if(storage.fault==3)return std::nullopt;
+    return read_file(path);
+  }
   int write_file(const char *path,const std::string_view &contents) { return handler.write_file(path,contents); }
 }
 // Enable only the handler's Windows side-effect branch, after all system headers.
@@ -175,6 +179,11 @@ int main() {
             "invalid request has no side effects "+std::to_string(method)+" "+body.dump());
     }
   }
+  reset(3);
+  auto unreadable=invoke(1,json({{"min_log_level",2}}));
+  check(unreadable->code==500 && !unreadable->body.value("status",true),"PATCH reports a failed read as a storage error");
+  check(storage.writes==0 && storage.disk==original,"failed read never writes a replacement config");
+  check(config::applied==0 && config::deferred==0 && confighttp::vulkan==0,"failed read has no runtime or Vulkan effects");
   // A pre-existing non-identifier key on disk must not block a save (H30-01): it is dropped
   // with a warning, while a non-identifier key in the request is refused by name.
   for(int method=0;method<2;++method) {
