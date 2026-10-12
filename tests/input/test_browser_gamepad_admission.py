@@ -105,7 +105,9 @@ int main() {
     return failures != 0;
 }
 '''
-code = code.replace('TYPE_PARSER', block('    std::optional<std::int64_t> json_integer(') + '\n' + block('    uint8_t parse_gamepad_type('))
+helpers = ['    std::optional<std::int64_t> json_integer(', '    uint8_t parse_gamepad_type(']
+helpers += [m for m in ['    double json_finite_number(', '    int round_clamped_input('] if m in source]
+code = code.replace('TYPE_PARSER', '\n'.join(block(m) for m in helpers))
 for name in ['connect', 'state', 'disconnect']:
     code = code.replace('@@' + name.upper() + '@@', block('      if (type == "gamepad_' + name + '")'))
 with tempfile.TemporaryDirectory() as temp:

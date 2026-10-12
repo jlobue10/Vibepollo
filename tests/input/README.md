@@ -1,5 +1,11 @@
 # Input disconnect regression tests
 
+`python3 tests/input/test_browser_numeric_input.py` runs production browser
+gamepad and wheel parsing with real JSON. It checks saturation before integer
+conversion, fractional rounding, and rejection before partial dispatch under
+ASan/UBSan/float-cast-overflow. `--baseline` reads `HEAD`; JSON headers may be
+provided through `AUDIT_JSON_INCLUDE`.
+
 `python3 tests/input/test_video_fec_wire.py` compiles the production video FEC
 encoder and header writer with real Reed-Solomon under ASan/UBSan. It checks
 8-bit percentage and 10-bit shard-index boundaries, declared versus actual
