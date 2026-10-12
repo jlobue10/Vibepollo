@@ -1418,7 +1418,7 @@ namespace confighttp {
     response->write(SimpleWeb::StatusCode::server_error_internal_server_error, error.dump(), headers);
   }
 
-  void config_persistence_error(resp_https_t response) {
+  void config_persistence_error(resp_https_t response, const std::string &message = "Could not save the configuration. Check the host logs and storage permissions.") {
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "application/json; charset=utf-8");
     headers.emplace("X-Frame-Options", "DENY");
@@ -1426,7 +1426,7 @@ namespace confighttp {
     add_cors_headers(headers);
     nlohmann::json error = {
       {"status", false},
-      {"error", "Could not save the configuration. Check the host logs and storage permissions."},
+      {"error", message},
     };
     response->write(SimpleWeb::StatusCode::server_error_internal_server_error, error.dump(), headers);
   }
@@ -2682,7 +2682,7 @@ namespace confighttp {
     std::optional<size_t> target_index = index_from_body ? index_from_body : index_from_path;
 
     try {
-      std::lock_guard apps_lock {apps_file_mutex()};
+      std::unique_lock apps_lock {apps_file_mutex()};
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
       if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
@@ -2784,10 +2784,14 @@ namespace confighttp {
         return;
       }
       proc::refresh(config::stream.file_apps, false);
+      // Hot apply acquires its reload gate before the apps-file lock. Do not
+      // hold that lock while requesting a reload after deleting the launcher.
+      apps_lock.unlock();
 
 #ifdef _WIN32
       if (disabled_fullscreen_flag) {
         try {
+          std::unique_lock config_lock {config::config_file_mutex()};
           auto current_cfg = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
           current_cfg["playnite_fullscreen_entry_enabled"] = "false";
           std::stringstream config_stream;
@@ -2796,7 +2800,10 @@ namespace confighttp {
           }
           if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
             BOOST_LOG(warning) << "deleteApp: could not persist playnite_fullscreen_entry_enabled=false"sv;
+            config_persistence_error(response, "The application was removed, but the Playnite fullscreen setting could not be saved. Check the host logs and storage permissions.");
+            return;
           }
+          config_lock.unlock();
           config::apply_config_now();
         } catch (...) {
         }
@@ -3565,10 +3572,13 @@ namespace confighttp {
           return;
         }
       }
+      std::unique_lock config_lock {config::config_file_mutex()};
       if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
         config_persistence_error(response);
         return;
       }
+      // Hot apply can acquire the apps-file lock and call Playnite; end the file transaction first.
+      config_lock.unlock();
 
 #ifdef _WIN32
       reconcile_vulkan_hdr_layer_from_body(input_tree);
@@ -3643,6 +3653,7 @@ namespace confighttp {
       normalize_adapter_config_patch(patch_tree);
 
       // Load existing config into a map
+      std::unique_lock config_lock {config::config_file_mutex()};
       std::unordered_map<std::string, std::string> current = config::parse_config(
         file_handler::read_file(config::sunshine.config_file.c_str())
       );
@@ -3684,6 +3695,8 @@ namespace confighttp {
         config_persistence_error(response);
         return;
       }
+      // Hot apply can acquire the apps-file lock and call Playnite; end the file transaction first.
+      config_lock.unlock();
 
 #ifdef _WIN32
       reconcile_vulkan_hdr_layer_from_body(patch_tree);

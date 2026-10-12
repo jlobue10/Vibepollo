@@ -9,6 +9,7 @@
 #include <bitset>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -527,6 +528,11 @@ namespace config {
 
   int parse(int argc, char *argv[]);
   std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content);
+
+  // Serialize configuration-file writers across Web UI and Playnite IPC threads.
+  // Hold across the whole read-modify-write, not just the atomic replacement.
+  // Release before hot apply, which can acquire the apps-file lock and call Playnite.
+  std::mutex &config_file_mutex();
 
   /**
    * Merge one raw configuration layer into another while treating the Windows

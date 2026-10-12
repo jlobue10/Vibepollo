@@ -3251,6 +3251,11 @@ namespace config {
     return video.output_name;
   }
 
+  std::mutex &config_file_mutex() {
+    static std::mutex mutex;
+    return mutex;
+  }
+
   void apply_config_now() {
     // Ensure only one apply runs at a time and block session start/resume while applying.
     std::unique_lock<std::shared_mutex> write_gate(g_apply_gate);

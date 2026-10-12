@@ -43,6 +43,7 @@ code = r'''
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -82,6 +83,7 @@ namespace config {
   void apply_config_now() { ++applied; }
   void mark_deferred_reload() { ++deferred; }
   std::string normalize_config_key(std::string key) { return key; }
+  std::mutex &config_file_mutex() { static std::mutex mutex; return mutex; }
 @@PARSER@@
 }
 struct storage_t: file_handler::filesystem_t {
