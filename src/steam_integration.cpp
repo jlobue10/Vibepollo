@@ -23,10 +23,6 @@
 #include <unordered_set>
 
 #ifdef _WIN32
-  // platform/common.h pulls winsock2.h (Boost.Asio), which must precede windows.h.
-  #include "logging.h"
-  #include "platform/common.h"
-
   #include <windows.h>
 #elif defined(__APPLE__)
   #include <fcntl.h>
@@ -1347,28 +1343,15 @@ namespace platf::steam {
 #endif
   }
 
+#ifndef _WIN32
+  // Windows launches through platf::run_command next to the web route
+  // (confighttp_steam.cpp, launch_steam_app): this translation unit is also built
+  // standalone by the component tests and stays free of the process layer.
   bool launch(std::uint32_t app_id) {
     const auto uri = launch_uri(app_id);
     if (uri.empty()) {
       return false;
     }
-#ifdef _WIN32
-    // Through run_command, as the app catalog launches: the opener runs as the
-    // interactive user when the host is a service (ShellExecuteW started Steam as
-    // SYSTEM in session 0 if it was not running), cmd.exe is resolved system-first
-    // and nothing is inherited (no log is attached). Success means the opener was
-    // created, as open_url reports it.
-    bp::environment env = bp::this_process::env();
-    auto working_dir = boost::filesystem::path();
-    std::error_code ec;
-    auto child = platf::run_command(false, false, launch_command(app_id), working_dir, env, nullptr, ec, nullptr);
-    if (ec) {
-      BOOST_LOG(warning) << "Steam launch failed for app " << app_id << ": " << ec.message();
-      return false;
-    }
-    child.detach();
-    return true;
-#else
     // The opener must be detached, but the caller still needs to know whether
     // it was actually executed. A close-on-exec pipe reports only pre-exec
     // failures: successful exec closes the write end and produces EOF.
@@ -1433,6 +1416,6 @@ namespace platf::steam {
     } while (received < 0 && errno == EINTR);
     close(exec_error_pipe[0]);
     return received == 0 && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0;
-#endif
   }
+#endif
 }  // namespace platf::steam

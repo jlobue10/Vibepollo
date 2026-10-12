@@ -36,10 +36,14 @@ def check(ok, name):
 
 
 steam = read('src/steam_integration.cpp')
-launch = block(steam, 'bool launch(std::uint32_t app_id)')
+route = read('src/confighttp_steam.cpp')
+launch = block(route, 'bool launch_steam_app(std::uint32_t app_id)')
 windows = launch[launch.index('#ifdef _WIN32'):launch.index('#else')]
-check('ShellExecuteW(' not in steam and 'ShellExecuteExW(' not in steam, 'steam_integration.cpp never launches through ShellExecute')
-check('platf::run_command(false, false, launch_command(app_id)' in windows, 'the Windows launch runs launch_command(app_id) through platf::run_command')
+check('ShellExecuteW(' not in steam + route and 'ShellExecuteExW(' not in steam + route, 'the Steam launch never goes through ShellExecute')
+check('platf::run_command(false, false, command, ' in windows and 'platf::steam::launch_command(app_id)' in windows,
+      'the Windows launch runs launch_command(app_id) through platf::run_command')
 check('child.detach()' in windows and windows.index('if (ec)') < windows.index('child.detach()'), 'a failed opener is reported before the child is detached')
 check(', nullptr, ec, nullptr)' in windows, 'no log handle or process group is attached to the opener')
+check('launch_steam_app(requested_id)' in block(route, 'void postSteamLaunch('), 'the web route launches through launch_steam_app')
+check('"platform/common.h"' not in steam and 'BOOST_LOG' not in steam, 'steam_integration.cpp stays free of the process and logging layers (component tests link it standalone)')
 sys.exit(1 if failures else 0)
