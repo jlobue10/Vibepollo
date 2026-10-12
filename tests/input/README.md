@@ -142,6 +142,17 @@ bitrate 0..500000, audio channels 2/6/8), stored ICE candidates capped per sessi
 message integers read through `json_integer()` rather than float-to-int conversions.
 `--baseline` reads HEAD.
 
+`python3 tests/input/test_webrtc_ice_stream.py` executes the production ICE
+event-stream handler and its worker owner using real threads with fake HTTP and
+session boundaries. It covers per-session/global admission, concurrent requests,
+session removal, shutdown with withheld send callbacks, safe late completions,
+send deadlines/errors, and preserved candidate/keepalive/proxy framing under
+ASan/UBSan. It also checks shutdown and late callbacks with real SimpleWeb
+responses over loopback HTTP. Initialize `third-party/Simple-Web-Server`; Boost
+and JSON headers are required (`AUDIT_JSON_INCLUDE` may override the JSON path).
+`--baseline` reads the handler from `HEAD`. It does not replace a live TLS
+browser-streaming integration test.
+
 The browser gamepad admission harness includes the production `json_integer()`
 helper. Missing optional metadata keeps its defaults; malformed present values
 (type, range, or unsigned overflow) reject the whole gamepad message before it
