@@ -95,7 +95,7 @@ namespace config {
 namespace file_handler {
   std::mutex storage_mutex; std::condition_variable ready;
   std::string disk,apps; bool paused=false,resume=false; thread_local bool pause_read=false;
-  bool fail_config_write=false;
+  bool fail_config_write=false,fail_config_read=false;
   std::string read_file(const char *path) {
     std::unique_lock lock(storage_mutex);
     if(std::string_view(path)=="apps.json")return apps;
@@ -105,6 +105,10 @@ namespace file_handler {
       ready.wait(lock,[]{return resume;});
     }
     return snapshot;
+  }
+  std::optional<std::string> read_file_checked(const char *path) {
+    if(fail_config_read)return std::nullopt;
+    return read_file(path);
   }
   int write_file(const char *path,const std::string &contents) {
     std::lock_guard lock(storage_mutex);
@@ -217,6 +221,19 @@ int main() {
   check(config::applies==0,"failed flag write does not reload the old flag and recreate the deleted entry");
   check(file_handler::disk=="playnite_fullscreen_entry_enabled = true\n","failed flag write preserves the existing config");
   file_handler::fail_config_write=false;
+  // Catalog removal is already committed, but an unreadable config must stay intact.
+  file_handler::disk="encoder = software\nplaynite_fullscreen_entry_enabled = true\n";
+  file_handler::apps=R"({"apps":[{"uuid":"fullscreen","playnite-fullscreen":true}]})";
+  file_handler::fail_config_read=true;
+  const auto before_read_failure=file_handler::disk;
+  const auto applies_before_read_failure=config::applies.load();
+  auto unreadable=edit(2);
+  check(unreadable->code==500 && unreadable->body.value("error","").find("application was removed")!=std::string::npos,
+        "fullscreen deletion reports an unreadable configuration after catalog commit");
+  check(file_handler::disk==before_read_failure && json::parse(file_handler::apps)["apps"].empty(),
+        "fullscreen read failure preserves settings and reports the already-committed deletion");
+  check(config::applies==applies_before_read_failure,"fullscreen read failure skips hot apply");
+  file_handler::fail_config_read=false;
   // A deferred reload owns the apply gate while deleteApp owns apps.json.
   // Deletion must release the apps lock before asking for another config reload.
   file_handler::disk="playnite_fullscreen_entry_enabled = true\n";

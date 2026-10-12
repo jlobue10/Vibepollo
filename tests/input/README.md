@@ -217,6 +217,17 @@ without changing the file. HTTP/authentication, adapter normalization, reload
 and Vulkan registration are boundary fakes, and storage is scripted. This is
 not native Windows filesystem or Vulkan validation. `--baseline` reads HEAD.
 
+`test_config_read_failure.py` runs the production GET/PATCH handlers, parser and
+complete native filesystem adapter under ASan/UBSan on Linux. An unreadable file
+in a writable directory must return HTTP 500 and retain every saved setting;
+missing files and directory read errors also fail before a write or reload.
+Empty files remain valid, and reads spanning the buffer boundary preserve the
+complete contents. HTTP/authentication and reload are boundary fakes. Run as an
+account subject to file permissions (the harness refuses a vacuous chmod test).
+`--baseline` reads HEAD. The persistence/serialization fixtures also cover failed
+config reads before the Windows Vulkan hook and the Playnite fullscreen-flag
+update; the latter reports that the catalog deletion already committed.
+
 `test_config_write_serialization.py` pauses a production config read while the
 Playnite metadata refresh and a Web UI save run on separate threads. It verifies
 that POST/PATCH saves and the fullscreen-entry flag update cannot overwrite a
