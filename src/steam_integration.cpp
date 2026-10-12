@@ -23,12 +23,11 @@
 #include <unordered_set>
 
 #ifdef _WIN32
-  // clang-format off
-  // windows.h must precede shellapi.h: the latter relies on its type macros.
-  #include <windows.h>
-  // clang-format on
+  // platform/common.h pulls winsock2.h (Boost.Asio), which must precede windows.h.
   #include "logging.h"
   #include "platform/common.h"
+
+  #include <windows.h>
 #elif defined(__APPLE__)
   #include <fcntl.h>
   #include <sys/types.h>
