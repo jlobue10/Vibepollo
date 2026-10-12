@@ -98,6 +98,10 @@ jobs:
         run: python3 tests/input/test_launch_fallthrough.py
       - name: Check the Playnite IPC boundary (partial snapshot reset, pipe instance flags)
         run: python3 tests/input/test_playnite_ipc_hardening.py
+      - name: Check the launch privilege boundaries and the program resolver
+        run: |
+          python3 tests/input/test_launch_privilege_boundaries.py
+          python3 tests/input/test_run_command_path.py
       - name: Fetch the libwebrtc C header the browser/peer-state harnesses read
         run: git submodule update --init --depth 1 third-party/libwebrtc
       - name: Check browser input context and peer-state bridge lifetimes

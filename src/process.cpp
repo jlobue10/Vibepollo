@@ -2322,20 +2322,9 @@ namespace proc {
       clear_lossless_runtime_env();
     }
 
-    if (!_app.output.empty() && _app.output != "null"sv) {
-#ifdef _WIN32
-      // fopen() interprets the filename as an ANSI string on Windows, so we must convert it
-      // to UTF-16 and use the wchar_t variants for proper Unicode log file path support.
-      auto woutput = utf_utils::from_utf8(_app.output);
-
-      // Use _SH_DENYNO to allow us to open this log file again for writing even if it is
-      // still open from a previous execution. This is required to handle the case of a
-      // detached process executing again while the previous process is still running.
-      _pipe.reset(_wfsopen(woutput.c_str(), L"a", _SH_DENYNO));
-#else
-      _pipe.reset(fopen(_app.output.c_str(), "a"));
-#endif
-    }
+    // The per-app output log is opened in launch_app_commands(), after the user-session
+    // gate below and under the user's token: a deferred launch resumes through that
+    // function only, and a SYSTEM-owned handle on a user-chosen path is never created.
 
 #ifdef _WIN32
     const auto requires_user_session = [&]() {
@@ -2404,6 +2393,39 @@ namespace proc {
     std::error_code ec;
     _app_prep_begin = std::begin(_app.prep_cmds);
     _app_prep_it = _app_prep_begin;
+
+    // Open the per-app output log here, once (re-entry for a deferred launch keeps the
+    // handle), and as the interactive user when the host runs as SYSTEM so the path is
+    // subject to that user's access checks rather than SYSTEM's.
+    if (!_pipe && !_app.output.empty() && _app.output != "null"sv) {
+#ifdef _WIN32
+      // fopen() interprets the filename as an ANSI string on Windows, so we must convert it
+      // to UTF-16 and use the wchar_t variants for proper Unicode log file path support.
+      const auto woutput = utf_utils::from_utf8(_app.output);
+      const auto open_log = [&]() {
+        // Use _SH_DENYNO to allow us to open this log file again for writing even if it is
+        // still open from a previous execution. This is required to handle the case of a
+        // detached process executing again while the previous process is still running.
+        _pipe.reset(_wfsopen(woutput.c_str(), L"a", _SH_DENYNO));
+      };
+      if (platf::is_running_as_system()) {
+        if (HANDLE log_token = platf::dxgi::retrieve_users_token(false)) {
+          auto close_log_token = util::fail_guard([log_token]() {
+            CloseHandle(log_token);
+          });
+          if (platf::impersonate_current_user(log_token, open_log)) {
+            BOOST_LOG(warning) << "Could not impersonate the user to open the app output log; output is not redirected."sv;
+          }
+        } else {
+          BOOST_LOG(warning) << "No user session to open the app output log; output is not redirected."sv;
+        }
+      } else {
+        open_log();
+      }
+#else
+      _pipe.reset(fopen(_app.output.c_str(), "a"));
+#endif
+    }
 
     // Executed when returning from function on failure
     auto fg = util::fail_guard([&]() {

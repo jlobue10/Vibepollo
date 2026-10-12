@@ -4,8 +4,11 @@
  */
 // standard includes
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <initializer_list>
+#include <string_view>
 #include <cstddef>
 #include <cstdint>
 #include <csignal>
@@ -1410,6 +1413,64 @@ namespace platf {
    * @param group A pointer to a `bp::group` object to which the new process should belong (may be `nullptr`).
    * @return A `bp::child` object representing the new process, or an empty `bp::child` object if the launch fails.
    */
+  // First token of a CreateProcess command line (quoted, or up to the first space).
+  static std::wstring_view first_token(std::wstring_view cmd) {
+    if (cmd.empty()) {
+      return {};
+    }
+    if (cmd.front() == L'"') {
+      const auto close = cmd.find(L'"', 1);
+      return cmd.substr(1, close == std::wstring_view::npos ? cmd.size() - 1 : close - 1);
+    }
+    return cmd.substr(0, cmd.find(L' '));
+  }
+
+  // Resolve the program CreateProcess() would otherwise look up on the host's PATH: the
+  // working directory first, then the host search order. Empty when the first token is
+  // already qualified (a path separator or drive spec: association output and the cmd.exe
+  // trampoline pass through untouched) or when nothing is found, so the caller keeps
+  // lpApplicationName = nullptr and the old lookup (incl. unquoted paths with spaces).
+  // Pinning the program here means a PATH edit by anyone cannot change which binary
+  // starts, and the host's own PATH is never written (it used to be prepended to under a
+  // process-wide mutex that serialised every launch).
+  static std::wstring resolve_program_path(std::wstring_view wcmd, const std::wstring &start_dir) {
+    const auto token = first_token(wcmd);
+    if (token.empty() || token.find_first_of(L"\\/") != std::wstring_view::npos || (token.size() > 1 && token[1] == L':')) {
+      return {};
+    }
+    const std::wstring name(token);
+    std::array<wchar_t, 32768> buffer {};
+    for (const wchar_t *path : {start_dir.empty() ? nullptr : start_dir.c_str(), (const wchar_t *) nullptr}) {
+      const DWORD len = SearchPathW(path, name.c_str(), L".exe", (DWORD) buffer.size(), buffer.data(), nullptr);
+      if (len > 0 && len < buffer.size()) {
+        return std::wstring(buffer.data(), len);
+      }
+      if (!path) {
+        break;
+      }
+    }
+    return {};
+  }
+
+  // Prepend the working directory to the child's PATH (case-insensitive key, merged the way
+  // merge_user_environment_block() merges), so binaries beside the launch target resolve for
+  // the child as they did when the host's PATH carried the prefix.
+  static void prepend_child_path(bp::environment &env, const std::wstring &start_dir) {
+    if (start_dir.empty()) {
+      return;
+    }
+    std::string name = "PATH";
+    if (auto itr = std::find_if(env.begin(), env.end(), [&](const auto &e) {
+          return boost::iequals(e.get_name(), name);
+        });
+        itr != env.end()) {
+      name = itr->get_name();
+    }
+    const std::string dir = utf_utils::to_utf8(start_dir);
+    const std::string old = env[name].to_string();
+    env[name] = old.empty() ? dir : dir + ";" + old;
+  }
+
   bp::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {
     std::wstring start_dir = utf_utils::from_utf8(working_dir.string());
     HANDLE job = group ? group->native_handle() : nullptr;
@@ -1438,40 +1499,6 @@ namespace platf {
     // Create a new console for interactive processes and use no console for non-interactive processes
     creation_flags |= interactive ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW;
 
-    // The host's own PATH is process-wide: concurrent launches (pause/resume, undo
-    // commands, helpers) used to restore each other's snapshot. One at a time, the
-    // snapshot below is taken under the lock (a snapshot taken before it could capture
-    // a sibling's temporary prefix and restore it permanently), and the lock outlives
-    // the restore guard.
-    static std::mutex host_path_mutex;
-    std::lock_guard<std::mutex> host_path_lock(host_path_mutex);
-
-    // Find the PATH variable in our environment block using a case-insensitive search
-    auto sunshine_wenv = bp::this_process::wenv();
-    std::wstring path_var_name {L"PATH"};
-    std::wstring old_path_val;
-    auto itr = std::find_if(sunshine_wenv.cbegin(), sunshine_wenv.cend(), [&](const auto &e) {
-      return boost::iequals(e.get_name(), path_var_name);
-    });
-    if (itr != sunshine_wenv.cend()) {
-      // Use the existing variable if it exists, since Boost treats these as case-sensitive.
-      path_var_name = itr->get_name();
-      old_path_val = sunshine_wenv[path_var_name].to_string();
-    }
-
-    // Temporarily prepend the specified working directory to PATH to ensure CreateProcess()
-    // will (preferentially) find binaries that reside in the working directory.
-    sunshine_wenv[path_var_name].assign(start_dir + L";" + old_path_val);
-
-    // Restore the old PATH value for our process when we're done here
-    auto restore_path = util::fail_guard([&]() {
-      if (old_path_val.empty()) {
-        sunshine_wenv[path_var_name].clear();
-      } else {
-        sunshine_wenv[path_var_name].assign(old_path_val);
-      }
-    });
-
     BOOL ret = FALSE;
     if (is_running_as_system()) {
       // Duplicate the current user's token
@@ -1492,12 +1519,16 @@ namespace platf {
         ec = std::make_error_code(std::errc::not_enough_memory);
         return bp::child();
       }
+      prepend_child_path(cloned_env, start_dir);
 
       // Open the process as the current user account, elevation is handled in the token itself.
       ec = impersonate_current_user(user_token, [&]() {
         std::wstring env_block = create_environment_block(cloned_env);
         std::wstring wcmd = resolve_command_string(cmd, start_dir, user_token, creation_flags);
-        ret = CreateProcessAsUserW(user_token, nullptr, (LPWSTR) wcmd.c_str(), nullptr, nullptr, !!(startup_info.StartupInfo.dwFlags & STARTF_USESTDHANDLES), creation_flags, env_block.data(), start_dir.empty() ? nullptr : start_dir.c_str(), (LPSTARTUPINFOW) &startup_info, &process_info);
+        // Resolved while impersonating, so a program on a network share is found with
+        // the user's credentials.
+        const std::wstring program = resolve_program_path(wcmd, start_dir);
+        ret = CreateProcessAsUserW(user_token, program.empty() ? nullptr : program.c_str(), (LPWSTR) wcmd.c_str(), nullptr, nullptr, !!(startup_info.StartupInfo.dwFlags & STARTF_USESTDHANDLES), creation_flags, env_block.data(), start_dir.empty() ? nullptr : start_dir.c_str(), (LPSTARTUPINFOW) &startup_info, &process_info);
       });
     }
     // Otherwise, launch the process using CreateProcessW()
@@ -1518,10 +1549,12 @@ namespace platf {
         ec = std::make_error_code(std::errc::not_enough_memory);
         return bp::child();
       }
+      prepend_child_path(cloned_env, start_dir);
 
       std::wstring env_block = create_environment_block(cloned_env);
       std::wstring wcmd = resolve_command_string(cmd, start_dir, nullptr, creation_flags);
-      ret = CreateProcessW(nullptr, (LPWSTR) wcmd.c_str(), nullptr, nullptr, !!(startup_info.StartupInfo.dwFlags & STARTF_USESTDHANDLES), creation_flags, env_block.data(), start_dir.empty() ? nullptr : start_dir.c_str(), (LPSTARTUPINFOW) &startup_info, &process_info);
+      const std::wstring program = resolve_program_path(wcmd, start_dir);
+      ret = CreateProcessW(program.empty() ? nullptr : program.c_str(), (LPWSTR) wcmd.c_str(), nullptr, nullptr, !!(startup_info.StartupInfo.dwFlags & STARTF_USESTDHANDLES), creation_flags, env_block.data(), start_dir.empty() ? nullptr : start_dir.c_str(), (LPSTARTUPINFOW) &startup_info, &process_info);
     }
 
     // Use the results of the launch to create a bp::child object
