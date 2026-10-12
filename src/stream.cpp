@@ -39,6 +39,7 @@ extern "C" {
 
 // local includes
 #include "config.h"
+#include "control_replay_window.h"
 #include "crypto.h"
 #include "deferred_stream_start_policy.h"
 #include "display_device.h"
@@ -709,10 +710,7 @@ namespace stream {
       crypto::aes_t legacy_input_enc_iv;  // Only used when the client doesn't support full control stream encryption
       crypto::aes_t incoming_iv;
       crypto::aes_t outgoing_iv;
-      // Highest client sequence number accepted on the v2 encrypted control stream; an
-      // authenticated packet with an older or equal number is a replay.
-      std::uint32_t incoming_seq_high_water = 0;
-      bool incoming_seq_seen = false;
+      control_replay_window incoming_replay;
 
       std::uint32_t connect_data;  // Used for new clients with ML_FF_SESSION_ID_V1
       std::string expected_peer_address;  // Only used for legacy clients without ML_FF_SESSION_ID_V1
@@ -1790,16 +1788,13 @@ namespace stream {
       }
 
       if (session->config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2) {
-        // The tag authenticates the packet, not its freshness: refuse an old or repeated
-        // sequence number (an on-path replay of an input or termination packet).
-        auto &control = session->control;
-        if (control.incoming_seq_seen && *seq <= control.incoming_seq_high_water) {
-          BOOST_LOG(warning) << "Control: dropping replayed encrypted packet (seq " << *seq
-                             << " <= " << control.incoming_seq_high_water << ')';
+        // ENet channels are independently ordered: a newer sensor/mouse packet can
+        // overtake a reliable release on another channel. Reject sequences already
+        // seen (or outside the retained window), not every sequence below the newest.
+        if (!session->control.incoming_replay.accept(*seq)) {
+          BOOST_LOG(warning) << "Control: dropping replayed or expired encrypted packet (seq " << *seq << ')';
           return;
         }
-        control.incoming_seq_high_water = *seq;
-        control.incoming_seq_seen = true;
       }
 
       const auto plaintext_view = std::string_view {
