@@ -217,6 +217,16 @@ without changing the file. HTTP/authentication, adapter normalization, reload
 and Vulkan registration are boundary fakes, and storage is scripted. This is
 not native Windows filesystem or Vulkan validation. `--baseline` reads HEAD.
 
+`test_config_write_serialization.py` pauses a production config read while the
+Playnite metadata refresh and a Web UI save run on separate threads. It verifies
+that POST/PATCH saves and the fullscreen-entry flag update cannot overwrite a
+concurrent metadata refresh, and metadata refresh cannot restore a stale Web UI
+snapshot. It also checks the failed fullscreen-flag write and races fullscreen
+deletion with the production reload-gate/app-catalog lock order. The parser,
+handlers, refresh function and lock acquisition statements are real; HTTP/auth,
+reload bodies, platform callbacks and atomic file storage are boundary fakes.
+It runs under ASan/UBSan; `--baseline` reads HEAD.
+
 `test_webrtc_session_cap.py` is a text gate for the WebRTC session-count cap: the
 shared RTSP launch bound, checked atomically with the registration, refused with a
 distinct error that the HTTP handler maps to 503 + Retry-After (never a teardown).
