@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise production app handlers and file-write policy with failed storage.
 
-The real JSON, save/reorder/delete handlers, cache helper and file_handler_core
+The real JSON, list/save/reorder/delete handlers, cache helper and file_handler_core
 run against a scripted filesystem; HTTP, authentication and process refresh
 are boundary fakes. Windows-only artwork/live-HDR hooks are outside this fixture.
 --baseline extracts HEAD.
@@ -37,11 +37,14 @@ code = r'''
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
+#include <boost/algorithm/string.hpp>
 #include <nlohmann/json.hpp>
 #include "file_handler.h"
 using namespace std::literals;
 using json=nlohmann::json;
+namespace fs=std::filesystem;
 struct logger { template<class T> logger &operator<<(const T &) { return *this; } };
 #define BOOST_LOG(level) logger()
 namespace SimpleWeb {
@@ -64,19 +67,32 @@ void print_req(req_https_t) {}
 void add_cors_headers(SimpleWeb::CaseInsensitiveMultimap &) {}
 void send_response(resp_https_t response,const json &body) { response->code=200; response->body=body; }
 void bad_request(resp_https_t response,req_https_t,const std::string &message) { response->code=400; response->body={{"error",message}}; }
-namespace config { struct { std::string file_apps="apps.json"; } stream; }
+namespace config {
+  struct { std::string file_apps="apps.json"; } stream;
+  struct { std::string sunshine_name="Host"; } nvhttp;
+}
+namespace http { const std::string unique_id="host-id"; }
 namespace remote_session {
   enum class control_e { none,input,monitor };
   struct synthetic_t { std::string uuid,title; };
   synthetic_t synthetic(control_e) { return {}; }
+  std::optional<std::string_view> synthetic_artwork_filename(control_e) { return {}; }
 }
 namespace uuid_util {
   struct uuid_t { static uuid_t generate() { return {}; } std::string string() const { return "generated"; } };
 }
 namespace proc {
   int refreshes=0;
-  void refresh(const std::string &,bool) { ++refreshes; }
+  bool fail_refresh=false;
+  void refresh(const std::string &,bool) {
+    ++refreshes; if(fail_refresh)throw std::runtime_error("refresh failed");
+  }
   void migrate_apps(json *,json *) {}
+  struct ctx_t { std::string uuid,id; };
+  struct process_t {
+    std::string get_running_app_uuid() { return {}; }
+    std::vector<ctx_t> get_apps() { return {{"generated","100"}}; }
+  } proc;
 }
 struct storage_t: file_handler::filesystem_t {
   int fault=0, writes=0; std::string disk, staged;
@@ -84,7 +100,9 @@ struct storage_t: file_handler::filesystem_t {
   bool create_directories(const std::filesystem::path &) override { return true; }
   std::string read(const std::filesystem::path &) const override { return disk; }
   bool write(const std::filesystem::path &,std::string_view contents) override {
-    ++writes; if(fault==1)return false; staged=contents; return true;
+    ++writes; if(fault==1)return false;
+    if(fault==3)throw std::runtime_error("write failed");
+    staged=contents; return true;
   }
   file_handler::replace_result_e replace(const std::filesystem::path &,const std::filesystem::path &) override {
     if(fault==2)return file_handler::replace_result_e::error;
@@ -153,17 +171,50 @@ int main() {
   auto tree=json::parse(original);
   check(!confighttp::refresh_client_apps_cache(tree) && proc::refreshes==0,
         "catalog-sync callers also receive a false result on storage failure");
+  const std::string legacy=R"({"apps":[{"name":"Legacy","elevated":"true","exit-timeout":"5"}]})";
+  for(int fault=0;fault<4;++fault) {
+    storage.fault=fault; storage.disk=legacy; storage.writes=proc::refreshes=0;
+    auto response=std::make_shared<response_t>(); auto request=std::make_shared<request_t>();
+    confighttp::getApps(response,request);
+    check(storage.writes==1,"legacy listing attempts one normalization write");
+    if(fault) {
+      check(response->code==500 && !response->body.value("status",false) && !response->body.contains("apps"),
+            "failed normalization cannot publish an uncommitted UUID or report a successful listing");
+      check(proc::refreshes==0 && storage.disk==legacy,
+            "failed normalization retains the original catalog and skips refresh");
+    } else {
+      const auto saved=json::parse(storage.disk)["apps"][0];
+      check(response->code==200 && proc::refreshes==1 && saved["uuid"]=="generated" &&
+            saved["elevated"]==true && saved["exit-timeout"]==5,
+            "successful listing commits legacy conversion and UUID before refresh");
+      check(response->body["apps"][0]["uuid"]==saved["uuid"] && response->body["apps"][0]["id"]=="100" &&
+            !saved.contains("id") && !saved.contains("index"),
+            "returned identity agrees with persistence and computed app metadata stays transient");
+    }
+  }
+  storage.fault=0; storage.disk=legacy; proc::fail_refresh=true; proc::refreshes=0;
+  auto failed_reload=std::make_shared<response_t>();
+  confighttp::getApps(failed_reload,std::make_shared<request_t>());
+  check(failed_reload->code==500 && !failed_reload->body.contains("apps") && proc::refreshes==1,
+        "failed reload after normalization is an error rather than a successful stale listing");
+  check(json::parse(storage.disk)["apps"][0]["uuid"]=="generated",
+        "reload failure does not claim to roll back the committed normalization");
+  proc::fail_refresh=false; storage.fault=1; storage.disk=original; storage.writes=proc::refreshes=0;
+  auto read_only=std::make_shared<response_t>();
+  confighttp::getApps(read_only,std::make_shared<request_t>());
+  check(read_only->code==200 && storage.writes==0 && proc::refreshes==0,
+        "an already-normalized catalog can still be listed on read-only storage");
   std::cout<<checks<<" checks; "<<failures<<" failures\n";
   return failures!=0;
 }
 '''
 helpers = ['  static void sort_apps_by_name(', '  std::optional<size_t> find_app_index_by_uuid(',
            '  std::optional<size_t> resolve_app_index_token(', '  std::recursive_mutex &apps_file_mutex(',
-           '  bool refresh_client_apps_cache(']
+           '  bool ensure_remote_session_apps(', '  bool refresh_client_apps_cache(']
 if '  void app_persistence_error(' in source:
     helpers.append('  void app_persistence_error(')
 code = code.replace('@@HELPERS@@', '\n'.join(block(x) for x in helpers))
-code = code.replace('@@HANDLERS@@', '\n'.join(block('  void '+x+'(') for x in ['saveApp','reorderApps','deleteApp']))
+code = code.replace('@@HANDLERS@@', '\n'.join(block('  void '+x+'(') for x in ['getApps','saveApp','reorderApps','deleteApp']))
 with tempfile.TemporaryDirectory() as temp:
     work = Path(temp)
     (work / 'test.cpp').write_text(code)

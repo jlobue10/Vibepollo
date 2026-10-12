@@ -1202,15 +1202,44 @@ namespace config {
   template<class It>
   It skip_list(It skipper, It end) {
     int stack = 1;
+    bool quoted = false;
+    bool escaped = false;
+    bool line_start = false;
+    bool comment = false;
     while (skipper != end && stack) {
-      if (*skipper == '[') {
-        ++stack;
+      const char ch = *skipper++;
+      if (comment) {
+        if (endline(ch)) {
+          comment = false;
+          line_start = true;
+        }
+        continue;
       }
-      if (*skipper == ']') {
+      if (quoted) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch == '\\') {
+          escaped = true;
+        } else if (ch == '"') {
+          quoted = false;
+        }
+        continue;
+      }
+      // Match to_string(): only full-line comments are removed from list values.
+      if (line_start && ch == '#') {
+        comment = true;
+        continue;
+      }
+      line_start = endline(ch) || (line_start && space_tab(ch));
+      // Brackets inside JSON strings (commands, paths and game names) are data.
+      // An escaped quote or backslash must not terminate the string early.
+      if (ch == '"') {
+        quoted = true;
+      } else if (ch == '[') {
+        ++stack;
+      } else if (ch == ']') {
         --stack;
       }
-
-      ++skipper;
     }
 
     return skipper;

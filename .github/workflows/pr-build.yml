@@ -82,6 +82,7 @@ jobs:
         run: |
           python3 tests/input/test_env_block_nul.py
           python3 tests/input/test_config_hash_value.py
+          python3 tests/input/test_config_list_strings.py
           python3 tests/input/test_server_cmd_budget.py
           python3 tests/input/test_api_token_scopes.py
       - name: Check the Playnite media path guard and the anonymous handshake name bound

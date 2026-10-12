@@ -246,3 +246,16 @@ native process launch still needs Windows validation. `--baseline` reads HEAD.
 Windows and POSIX vectors. Windows rejects UNC, device, `\\?\` and stream forms;
 POSIX permits those literal names. Both reject embedded NULs, and the checks run
 before the app is migrated. `--baseline` reads HEAD.
+
+`test_config_list_strings.py` compiles the production config scanner and Boost
+command-list readers. Quoted brackets, escaped quotes/backslashes, nested arrays
+and comment punctuation must preserve valid JSON and all following settings.
+It covers LF/CRLF files, legacy lists and a list ending at EOF under ASan/UBSan.
+`--baseline` reads HEAD.
+
+`test_app_persistence_failure.py` also exercises the full `getApps` handler:
+failed normalization writes or reloads return an error instead of publishing
+uncommitted UUIDs. Successful legacy conversion persists identity before refresh;
+an already-normalized catalog remains readable on read-only storage. Process
+refresh, artwork/platform and HTTP boundaries are fakes; JSON and atomic-write
+policy are production code.
