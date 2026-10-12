@@ -82,6 +82,12 @@ namespace file_handler {
   std::string read_file(const char *path);
 
   /**
+   * @brief Read a required file completely, distinguishing empty contents from an I/O failure.
+   * @return The contents (possibly empty), or std::nullopt if opening or reading fails.
+   */
+  std::optional<std::string> read_file_checked(const char *path);
+
+  /**
    * @brief Writes a file.
    * @param path The path of the file.
    * @param contents The contents to write.

@@ -176,6 +176,22 @@ namespace file_handler {
     return default_handler().read_file(path);
   }
 
+  std::optional<std::string> read_file_checked(const char *path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) {
+      return std::nullopt;
+    }
+    std::string contents;
+    char buffer[4096];
+    while (input.read(buffer, sizeof(buffer)) || input.gcount() != 0) {
+      contents.append(buffer, static_cast<std::size_t>(input.gcount()));
+    }
+    if (input.bad() || !input.eof()) {
+      return std::nullopt;
+    }
+    return contents;
+  }
+
   int write_file(const char *path, const std::string_view &contents) {
     return default_handler().write_file(path, contents);
   }

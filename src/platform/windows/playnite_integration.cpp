@@ -1508,7 +1508,12 @@ namespace platf::playnite {
 
       // Load config
       std::lock_guard config_lock {config::config_file_mutex()};
-      auto current = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+      const auto contents = file_handler::read_file_checked(config::sunshine.config_file.c_str());
+      if (!contents) {
+        BOOST_LOG(warning) << "Playnite: could not read configuration for metadata refresh";
+        return;
+      }
+      auto current = config::parse_config(*contents);
       bool changed = false;
 
       auto parse_any = [](const std::string &raw) -> nlohmann::json {
