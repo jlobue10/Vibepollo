@@ -433,7 +433,11 @@ TEST(SteamLaunch, RejectsZeroAndBuildsValidatedUri) {
 #else
   EXPECT_EQ(launch_command(480), "steam -applaunch 480");
 #endif
+#ifndef _WIN32
+  // On Windows the web route launches through platf::run_command (launch_steam_app in
+  // confighttp_steam.cpp); the zero-id rejection there is launch_command(0).empty() above.
   EXPECT_FALSE(launch(0));
+#endif
 }
 
 TEST(SteamLaunch, StreamOwnedEnvironmentFeaturesRequireDirectLaunch) {
