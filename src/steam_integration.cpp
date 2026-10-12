@@ -26,8 +26,9 @@
   // clang-format off
   // windows.h must precede shellapi.h: the latter relies on its type macros.
   #include <windows.h>
-  #include <shellapi.h>
   // clang-format on
+  #include "logging.h"
+  #include "platform/common.h"
 #elif defined(__APPLE__)
   #include <fcntl.h>
   #include <sys/types.h>
@@ -1353,7 +1354,21 @@ namespace platf::steam {
       return false;
     }
 #ifdef _WIN32
-    return reinterpret_cast<std::intptr_t>(ShellExecuteW(nullptr, L"open", std::filesystem::path(uri).c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+    // Through run_command, as the app catalog launches: the opener runs as the
+    // interactive user when the host is a service (ShellExecuteW started Steam as
+    // SYSTEM in session 0 if it was not running), cmd.exe is resolved system-first
+    // and nothing is inherited (no log is attached). Success means the opener was
+    // created, as open_url reports it.
+    bp::environment env = bp::this_process::env();
+    auto working_dir = boost::filesystem::path();
+    std::error_code ec;
+    auto child = platf::run_command(false, false, launch_command(app_id), working_dir, env, nullptr, ec, nullptr);
+    if (ec) {
+      BOOST_LOG(warning) << "Steam launch failed for app " << app_id << ": " << ec.message();
+      return false;
+    }
+    child.detach();
+    return true;
 #else
     // The opener must be detached, but the caller still needs to know whether
     // it was actually executed. A close-on-exec pipe reports only pre-exec
