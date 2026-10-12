@@ -1372,6 +1372,27 @@ namespace webrtc_stream {
       return value;
     }
 
+    double json_finite_number(const nlohmann::json &message, const char *key) {
+      const auto it = message.find(key);
+      if (it == message.end()) {
+        return 0.0;
+      }
+      if (!it->is_number()) {
+        throw std::invalid_argument(std::string(key) + " must be a finite number");
+      }
+      const double value = it->get<double>();
+      if (!std::isfinite(value)) {
+        throw std::invalid_argument(std::string(key) + " must be a finite number");
+      }
+      return value;
+    }
+
+    int round_clamped_input(double value, int minimum, int maximum) {
+      // Clamp in floating point before lround or narrowing. Large finite JSON
+      // numbers can exceed both long and int, reversing or zeroing the input.
+      return static_cast<int>(std::lround(std::clamp(value, static_cast<double>(minimum), static_cast<double>(maximum))));
+    }
+
     int map_mouse_button(int button) {
       switch (button) {
         case 0:
@@ -1639,10 +1660,10 @@ namespace webrtc_stream {
         return;
       }
       if (type == "wheel") {
-        const double dx = message.value("dx", 0.0);
-        const double dy = message.value("dy", 0.0);
-        const int vscroll = static_cast<int>(std::lround(-dy * 120.0));
-        const int hscroll = static_cast<int>(std::lround(dx * 120.0));
+        const double dx = json_finite_number(message, "dx");
+        const double dy = json_finite_number(message, "dy");
+        const int vscroll = round_clamped_input(-dy * 120.0, -32768, 32767);
+        const int hscroll = round_clamped_input(dx * 120.0, -32768, 32767);
         if (vscroll != 0) {
           input::passthrough(input_ctx, make_scroll_packet(vscroll), input_permission);
         }
@@ -1693,28 +1714,22 @@ namespace webrtc_stream {
         }
         const auto active_mask = static_cast<uint16_t>(json_integer(message, "activeMask", 0, 0xFFFF).value_or(0));
         const auto buttons = static_cast<uint32_t>(json_integer(message, "buttons", 0, 0xFFFFFFFFLL).value_or(0));
-        const auto clamp_u8 = [](int value) -> uint8_t {
-          return static_cast<uint8_t>(std::clamp(value, 0, 255));
-        };
-        const auto clamp_i16 = [](int value) -> int16_t {
-          return static_cast<int16_t>(std::clamp(value, -32768, 32767));
-        };
-        const int lt = static_cast<int>(std::lround(message.value("lt", 0.0)));
-        const int rt = static_cast<int>(std::lround(message.value("rt", 0.0)));
-        const int ls_x = static_cast<int>(std::lround(message.value("lsX", 0.0)));
-        const int ls_y = static_cast<int>(std::lround(message.value("lsY", 0.0)));
-        const int rs_x = static_cast<int>(std::lround(message.value("rsX", 0.0)));
-        const int rs_y = static_cast<int>(std::lround(message.value("rsY", 0.0)));
+        const auto lt = static_cast<uint8_t>(round_clamped_input(json_finite_number(message, "lt"), 0, 255));
+        const auto rt = static_cast<uint8_t>(round_clamped_input(json_finite_number(message, "rt"), 0, 255));
+        const auto ls_x = static_cast<int16_t>(round_clamped_input(json_finite_number(message, "lsX"), -32768, 32767));
+        const auto ls_y = static_cast<int16_t>(round_clamped_input(json_finite_number(message, "lsY"), -32768, 32767));
+        const auto rs_x = static_cast<int16_t>(round_clamped_input(json_finite_number(message, "rsX"), -32768, 32767));
+        const auto rs_y = static_cast<int16_t>(round_clamped_input(json_finite_number(message, "rsY"), -32768, 32767));
         auto state = make_gamepad_state_packet(
             controller,
             active_mask,
             buttons,
-            clamp_u8(lt),
-            clamp_u8(rt),
-            clamp_i16(ls_x),
-            clamp_i16(ls_y),
-            clamp_i16(rs_x),
-            clamp_i16(rs_y)
+            lt,
+            rt,
+            ls_x,
+            ls_y,
+            rs_x,
+            rs_y
           );
         // Finish parsing the state before sending even its implicit arrival.
         // Keep arrival/state/disconnect ordering under the registration lock.
