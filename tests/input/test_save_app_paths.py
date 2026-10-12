@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile saveApp's plain_local_path lambda and check the accept/reject vectors; text-gate that
+"""Compile saveApp's plain_local_path lambda for Windows and POSIX; text-gate that
 saveApp refuses non-plain-local output/working-dir paths and embedded NULs in command strings
 before migrating the app. --baseline reads HEAD.
 """
@@ -65,10 +65,18 @@ int main() {
     check(plain_local_path(good), good[0] ? good : "(empty)");
   }
   const std::string nul("a\0b", 3);
+  check(!plain_local_path(nul), "embedded NUL is rejected on every platform");
+#ifdef _WIN32
   for (const std::string bad : {std::string("\\\\srv\\share\\a"), std::string("//srv/share"), std::string("\\\\.\\pipe\\x"), std::string("\\\\?\\C:\\a"),
                                 std::string("C:\\a.log:stream"), std::string("C:\\logs\\NUL"), std::string("C:\\logs\\com1.txt"), std::string("9:\\x"), nul}) {
     check(!plain_local_path(bad), ("rejected: " + (bad == nul ? std::string("a<NUL>b") : bad)).c_str());
   }
+#else
+  for (const char *good : {"/home/games/Title: Subtitle", "/tmp/logs/COM1.txt", "/tmp/NUL", "/tmp/CON",
+                           "logs/game:output.txt", "9:filename", "//srv/local/path"}) {
+    check(plain_local_path(good), good);
+  }
+#endif
   std::cout << failures << " failures\n";
   return failures != 0;
 }
@@ -76,7 +84,9 @@ int main() {
 with tempfile.TemporaryDirectory() as temp:
     work = Path(temp)
     (work / 'test.cpp').write_text(code, encoding='utf-8')
-    subprocess.run(['g++', '-std=c++20', '-g', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-                    str(work / 'test.cpp'), '-o', str(work / 'test')], check=True)
-    failures += subprocess.run([str(work / 'test')], env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0')).returncode != 0
+    for platform_flags in (['-D_WIN32'], []):
+        print('Windows' if platform_flags else 'POSIX', flush=True)
+        subprocess.run(['g++', '-std=c++20', '-g', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                        *platform_flags, str(work / 'test.cpp'), '-o', str(work / 'test')], check=True)
+        failures += subprocess.run([str(work / 'test')], env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0')).returncode != 0
 sys.exit(1 if failures else 0)

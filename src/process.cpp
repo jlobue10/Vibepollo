@@ -2409,11 +2409,14 @@ namespace proc {
         // Full sharing keeps the file openable again while a detached process from a
         // previous execution still holds it (what _SH_DENYNO did); OPEN_ALWAYS plus
         // FILE_APPEND_DATA is "a".
+        // create_startup_info passes this handle in PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
+        // That list restricts inheritance, but still requires an inheritable handle.
+        SECURITY_ATTRIBUTES security_attributes {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
         HANDLE h = CreateFileW(
           woutput.c_str(),
           FILE_APPEND_DATA,
           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-          nullptr,
+          &security_attributes,
           OPEN_ALWAYS,
           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS,
           nullptr

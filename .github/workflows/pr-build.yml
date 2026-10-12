@@ -99,6 +99,7 @@ jobs:
       - name: Check the per-app output log open and saved app paths
         run: |
           python3 tests/input/test_app_output_log_path.py
+          python3 tests/input/test_app_output_log_inheritance.py
           python3 tests/input/test_save_app_paths.py
       - name: Check the /launch request path (single IV derivation, no 403 fall-through)
         run: python3 tests/input/test_launch_fallthrough.py

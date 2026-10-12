@@ -202,6 +202,8 @@ handlers, cache helper and `file_handler_core.cpp` with real JSON parsing. A
 scripted filesystem fails either the temporary write or atomic replacement.
 The handlers must report HTTP 500 without refreshing the unchanged catalog,
 while successful writes still persist each requested edit and refresh once.
+The POSIX save route also preserves valid paths containing colons or Windows
+device-name components instead of applying Windows naming rules to Linux.
 HTTP/authentication, process refresh and unrelated metadata hooks are boundary
 fakes; Windows-only artwork/live-HDR hooks are outside this fixture.
 Both new tests support `--baseline` to read HEAD.
@@ -215,6 +217,13 @@ distinct error that the HTTP handler maps to 503 + Retry-After (never a teardown
 by handle (no reparse points, no impersonation grant, plain disk files only) with
 every refused handle closed. `--baseline` reads HEAD.
 
+`test_app_output_log_inheritance.py` compiles the production log opener and
+startup-info builder with Win32/CRT boundary fakes. The handle must be inheritable
+and listed for the child's stdout/stderr, with append semantics, path checks and
+single-owner cleanup preserved. This models the Windows inheritance contract;
+native process launch still needs Windows validation. `--baseline` reads HEAD.
+
 `test_save_app_paths.py` compiles `saveApp`'s `plain_local_path` lambda against
-accept/reject vectors (UNC, device, `\\?\`, stream and NUL forms) and pins that the
-checks run before the app is migrated. `--baseline` reads HEAD.
+Windows and POSIX vectors. Windows rejects UNC, device, `\\?\` and stream forms;
+POSIX permits those literal names. Both reject embedded NULs, and the checks run
+before the app is migrated. `--baseline` reads HEAD.
