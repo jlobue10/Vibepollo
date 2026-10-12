@@ -255,22 +255,23 @@ namespace rtsp_stream {
 
     /**
      * @brief Close the connection if nothing authenticates it within the idle window.
-     * Armed until the first complete message has been dispatched; every completion
-     * handler cancels it first. A connection that never sends (or never finishes its
-     * first message) used to hold the socket and its pending-session candidates forever.
+     * This is one absolute deadline for the entire first message, including its
+     * framing and payload. Partial reads must neither cancel nor renew it.
      */
     void arm_idle_timer() {
+      if (first_message_done || idle_timer_armed) {
+        return;
+      }
+      idle_timer_armed = true;
       idle_timer.expires_after(kUnboundReadTimeout);
       idle_timer.async_wait([self = shared_from_this()](const boost::system::error_code &ec) {
-        if (ec) {
-          // operation_aborted from cancel()
+        if (ec || self->first_message_done || !self->sock.is_open()) {
+          // Cancellation can race with a timer completion already queued for dispatch.
           return;
         }
         BOOST_LOG(debug) << "RTSP: closing idle unauthenticated connection"sv;
         boost::system::error_code close_ec;
-        self->sock.close(close_ec);
-        self->plaintext_candidate.reset();
-        self->encrypted_candidates.clear();
+        self->close(close_ec);
       });
     }
 
@@ -291,7 +292,7 @@ namespace rtsp_stream {
         respond(sock, *session, nullptr, 400, "BAD REQUEST", 0, {});
 
         boost::system::error_code ec;
-        sock.close(ec);
+        close(ec);
 
         return;
       }
@@ -318,7 +319,7 @@ namespace rtsp_stream {
     void read_unbound() {
       if (!plaintext_candidate && encrypted_candidates.empty()) {
         boost::system::error_code ec;
-        sock.close(ec);
+        close(ec);
         return;
       }
       arm_idle_timer();
@@ -335,10 +336,9 @@ namespace rtsp_stream {
     }
 
     static void handle_read_unbound_prefix(std::shared_ptr<socket_t> &socket, const boost::system::error_code &ec, std::size_t bytes) {
-      socket->idle_timer.cancel();
       if (ec || bytes != sizeof(std::uint32_t)) {
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       const std::array<std::uint8_t, 4> first_word {
@@ -385,14 +385,13 @@ namespace rtsp_stream {
           break;
       }
       boost::system::error_code close_ec;
-      socket->sock.close(close_ec);
+      socket->close(close_ec);
     }
 
     static void handle_read_unbound_encrypted_header_after_prefix(std::shared_ptr<socket_t> &socket, const boost::system::error_code &ec, std::size_t bytes) {
-      socket->idle_timer.cancel();
       if (ec || bytes != sizeof(encrypted_rtsp_header_t) - sizeof(std::uint32_t)) {
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       auto header = reinterpret_cast<encrypted_rtsp_header_t *>(socket->begin);
@@ -400,7 +399,7 @@ namespace rtsp_stream {
       if (!header->is_encrypted() || socket->begin + sizeof(*header) + payload_length >= std::end(socket->msg_buf)) {
         BOOST_LOG(warning) << "Rejecting unbound RTSP connection without a valid encrypted header.";
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       boost::asio::async_read(
@@ -418,7 +417,7 @@ namespace rtsp_stream {
     static void handle_read_unbound_encrypted_header(std::shared_ptr<socket_t> &socket, const boost::system::error_code &ec, std::size_t bytes) {
       if (ec || bytes < sizeof(encrypted_rtsp_header_t)) {
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       auto header = reinterpret_cast<encrypted_rtsp_header_t *>(socket->begin);
@@ -426,24 +425,23 @@ namespace rtsp_stream {
       if (!header->is_encrypted() || socket->begin + sizeof(*header) + payload_length >= std::end(socket->msg_buf)) {
         BOOST_LOG(warning) << "Rejecting unbound RTSP connection without a valid encrypted header.";
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       boost::asio::async_read(socket->sock, boost::asio::buffer(socket->begin + bytes, payload_length), boost::bind(&socket_t::handle_read_unbound_encrypted_message, socket->shared_from_this(), boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred));
     }
 
     static void handle_read_unbound_encrypted_message(std::shared_ptr<socket_t> &socket, const boost::system::error_code &ec, std::size_t bytes) {
-      socket->idle_timer.cancel();
       if (ec) {
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       auto header = reinterpret_cast<encrypted_rtsp_header_t *>(socket->begin);
       const auto payload_length = header->payload_length();
       if (bytes < payload_length) {
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       const auto sequence = util::endian::big<std::uint32_t>(header->sequenceNumber);
@@ -460,7 +458,7 @@ namespace rtsp_stream {
           if (matched) {
             BOOST_LOG(error) << "Encrypted RTSP matched more than one pending launch; rejecting ambiguous transport.";
             boost::system::error_code close_ec;
-            socket->sock.close(close_ec);
+            socket->close(close_ec);
             return;
           }
           matched = candidate;
@@ -470,20 +468,20 @@ namespace rtsp_stream {
       if (!matched) {
         BOOST_LOG(warning) << "Encrypted RTSP authentication did not match a pending launch.";
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       if (!socket->reserve_encrypted_candidate) {
         BOOST_LOG(error) << "Encrypted RTSP transport has no pending-session reservation callback.";
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       auto reserved = socket->reserve_encrypted_candidate(matched);
       if (!reserved) {
         BOOST_LOG(info) << "Encrypted RTSP launch expired or was canceled before transport authentication completed.";
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       socket->session = std::move(reserved);
@@ -493,11 +491,10 @@ namespace rtsp_stream {
       if (parseRtspMessage(req.get(), reinterpret_cast<char *>(plaintext.data()), static_cast<int>(plaintext.size()))) {
         respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         boost::system::error_code close_ec;
-        socket->sock.close(close_ec);
+        socket->close(close_ec);
         return;
       }
       print_msg(req.get());
-      socket->first_message_done = true;
       socket->handle_data(std::move(req));
     }
 
@@ -508,12 +505,11 @@ namespace rtsp_stream {
      * @param bytes The number of bytes read.
      */
     static void handle_read_encrypted_header(std::shared_ptr<socket_t> &socket, const boost::system::error_code &ec, std::size_t bytes) {
-      socket->idle_timer.cancel();
       BOOST_LOG(debug) << "handle_read_encrypted_header(): Handle read of size: "sv << bytes << " bytes"sv;
 
       auto sock_close = util::fail_guard([&socket]() {
         boost::system::error_code ec;
-        socket->sock.close(ec);
+        socket->close(ec);
 
         if (ec) {
           BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Couldn't close tcp socket: "sv << ec.message();
@@ -562,7 +558,7 @@ namespace rtsp_stream {
 
       auto sock_close = util::fail_guard([&socket]() {
         boost::system::error_code ec;
-        socket->sock.close(ec);
+        socket->close(ec);
 
         if (ec) {
           BOOST_LOG(error) << "RTSP: handle_read_encrypted_message(): Couldn't close tcp socket: "sv << ec.message();
@@ -613,7 +609,6 @@ namespace rtsp_stream {
 
       print_msg(req.get());
 
-      socket->first_message_done = true;
       socket->handle_data(std::move(req));
     }
 
@@ -627,7 +622,7 @@ namespace rtsp_stream {
         respond(sock, *session, nullptr, 400, "BAD REQUEST", 0, {});
 
         boost::system::error_code ec;
-        sock.close(ec);
+        close(ec);
 
         return;
       }
@@ -654,7 +649,7 @@ namespace rtsp_stream {
 
       auto sock_close = util::fail_guard([&socket]() {
         boost::system::error_code ec;
-        socket->sock.close(ec);
+        socket->close(ec);
 
         if (ec) {
           BOOST_LOG(error) << "RTSP: handle_plaintext_payload(): Couldn't close tcp socket: "sv << ec.message();
@@ -707,7 +702,6 @@ namespace rtsp_stream {
         fg.disable();
         print_msg(req.get());
 
-        socket->first_message_done = true;
         socket->handle_data(std::move(req));
       }
 
@@ -721,14 +715,13 @@ namespace rtsp_stream {
      * @param bytes The number of bytes read.
      */
     static void handle_read_plaintext(std::shared_ptr<socket_t> &socket, const boost::system::error_code &ec, std::size_t bytes) {
-      socket->idle_timer.cancel();
       BOOST_LOG(debug) << "handle_read_plaintext(): Handle read of size: "sv << bytes << " bytes"sv;
 
       if (ec) {
         BOOST_LOG(error) << "RTSP: handle_read_plaintext(): Couldn't read from tcp socket: "sv << ec.message();
 
         boost::system::error_code ec;
-        socket->sock.close(ec);
+        socket->close(ec);
 
         if (ec) {
           BOOST_LOG(error) << "RTSP: handle_read_plaintext(): Couldn't close tcp socket: "sv << ec.message();
@@ -763,7 +756,16 @@ namespace rtsp_stream {
       handle_plaintext_payload(socket, ec, buf_size);
     }
 
+    void close(boost::system::error_code &ec) {
+      idle_timer.cancel();
+      sock.close(ec);
+      plaintext_candidate.reset();
+      encrypted_candidates.clear();
+    }
+
     void handle_data(msg_t &&req) {
+      first_message_done = true;
+      idle_timer.cancel();
       handle_data_fn(shared_from_this(), std::move(req));
     }
 
@@ -773,6 +775,7 @@ namespace rtsp_stream {
     // Declared after sock: the constructor initialises them in this order.
     boost::asio::steady_timer idle_timer;
     bool first_message_done = false;
+    bool idle_timer_armed = false;
     static constexpr auto kUnboundReadTimeout = std::chrono::seconds(10);
 
     std::array<char, 2048> msg_buf;

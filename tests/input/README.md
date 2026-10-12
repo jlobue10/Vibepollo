@@ -164,13 +164,20 @@ parse failure mid-message resets the message instead of returning a partial
 catalogue snapshot with its type set, and the named pipe is created as the first
 instance only and rejects remote clients. `--baseline` reads HEAD.
 
-`test_launch_privilege_boundaries.py` is a text gate for three boundaries: the
+`test_launch_privilege_boundaries.py` is a text gate for two boundaries: the
 Playnite plugin deploy runs every filesystem write under the interactive user's
 token inside one lambda with its own catch; the per-app output log is opened once
-in `launch_app_commands()` under the user token and never by `execute()`; and an
-unauthenticated RTSP socket arms an idle timer that every completion handler
-cancels first, with the pending-session candidates released at both binding
-points. `--baseline` reads HEAD.
+in `launch_app_commands()` under the user token and never by `execute()`.
+`--baseline` reads HEAD.
+
+`test_rtsp_first_message_deadline.py` runs the production RTSP socket class over
+real Boost.Asio loopback TCP sockets with the deadline shortened to 100 ms. It
+checks stalled encrypted headers and bodies, partial plaintext bodies, drip-fed
+headers, candidate release, successful dispatch and malformed messages. Partial
+reads must neither cancel nor renew the deadline. RTSP parsing and framing are
+real; crypto results, launch reservation, logging and dispatch are boundary
+fakes. Requires Boost headers and the common-C submodule. `--baseline` extracts
+the socket class from HEAD.
 
 `test_run_command_path.py` compiles the production program resolver and
 child-PATH helper from `run_command()` against a scripted `SearchPathW`: the
