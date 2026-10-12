@@ -163,3 +163,18 @@ every encoder. `--baseline` reads HEAD.
 parse failure mid-message resets the message instead of returning a partial
 catalogue snapshot with its type set, and the named pipe is created as the first
 instance only and rejects remote clients. `--baseline` reads HEAD.
+
+`test_launch_privilege_boundaries.py` is a text gate for three boundaries: the
+Playnite plugin deploy runs every filesystem write under the interactive user's
+token inside one lambda with its own catch; the per-app output log is opened once
+in `launch_app_commands()` under the user token and never by `execute()`; and an
+unauthenticated RTSP socket arms an idle timer that every completion handler
+cancels first, with the pending-session candidates released at both binding
+points. `--baseline` reads HEAD.
+
+`test_run_command_path.py` compiles the production program resolver and
+child-PATH helper from `run_command()` against a scripted `SearchPathW`: the
+working directory is searched first, then the host order; qualified paths and
+unknown programs fall back to CreateProcess's own lookup; only the child's PATH
+gets the working-directory prefix. It also pins that `run_command()` no longer
+edits the host PATH. `--baseline` reads HEAD.

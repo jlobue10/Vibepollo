@@ -2019,12 +2019,6 @@ namespace platf::playnite {
         destDir = std::filesystem::path(resolved);
         BOOST_LOG(debug) << "Playnite installer: using resolved target dir from API=" << destDir.string();
       }
-      std::error_code ec;
-      if (!std::filesystem::create_directories(destDir, ec) && ec) {
-        error_out = std::string("Failed to create destination directory: ") + destDir.string() + " (" + ec.message() + ")";
-        return false;
-      }
-
       std::wstring playniteExe;
       if (restart && !resolve_playnite_launch_exe(playniteExe)) {
         error_out = "Could not resolve the Playnite executable before installation.";
@@ -2043,85 +2037,128 @@ namespace platf::playnite {
         }
       });
 
-      const auto destManifest = destDir / L"extension.yaml";
-      const auto destDll = destDir / L"VibepolloPlaynite.dll";
-      const auto destIcon = destDir / L"icon.png";
-      const auto tempManifest = destDir / L"extension.yaml.vibepollo-new";
-      const auto tempDll = destDir / L"VibepolloPlaynite.dll.vibepollo-new";
-      const auto tempIcon = destDir / L"icon.png.vibepollo-new";
-      auto cleanup_temps = [&]() {
-        std::error_code cleanup_ec;
-        std::filesystem::remove(tempManifest, cleanup_ec);
-        cleanup_ec.clear();
-        std::filesystem::remove(tempDll, cleanup_ec);
-        cleanup_ec.clear();
-        std::filesystem::remove(tempIcon, cleanup_ec);
-      };
-      cleanup_temps();
-      auto cleanup_guard = util::fail_guard([&]() {
-        cleanup_temps();
+      // The destination is inside the interactive user's profile. Every write there
+      // (directory, staged copies, replaces, legacy removes, temp cleanup) runs under
+      // that user's token when the host is SYSTEM, so the user's own ACLs apply and no
+      // SYSTEM-owned files are left in the profile.
+      HANDLE deploy_token = nullptr;
+      if (platf::is_running_as_system()) {
+        deploy_token = acquire_preferred_user_token_for_playnite();
+        if (!deploy_token) {
+          error_out = "No interactive user session is available to deploy the plugin into.";
+          return false;
+        }
+      }
+      auto close_deploy_token = util::fail_guard([deploy_token]() {
+        if (deploy_token) {
+          CloseHandle(deploy_token);
+        }
       });
 
-      auto copy_to_temp = [&](const std::filesystem::path &src, const std::filesystem::path &dst) {
-        ec.clear();
-        BOOST_LOG(debug) << "Playnite installer: staging " << src.string() << " to " << dst.string();
-        std::filesystem::copy_file(src, dst, std::filesystem::copy_options::overwrite_existing, ec);
-        return !ec;
-      };
-      auto same_size = [](const std::filesystem::path &src, const std::filesystem::path &dst) {
-        std::error_code src_ec;
-        std::error_code dst_ec;
-        auto src_size = std::filesystem::file_size(src, src_ec);
-        auto dst_size = std::filesystem::file_size(dst, dst_ec);
-        return !src_ec && !dst_ec && src_size > 0 && src_size == dst_size;
-      };
-      auto replace_file = [&](const std::filesystem::path &src, const std::filesystem::path &dst) {
-        if (MoveFileExW(src.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-          return true;
-        }
-        ec = std::error_code(static_cast<int>(GetLastError()), std::system_category());
-        return false;
-      };
+      bool deployed = false;
+      const auto deploy = [&]() {
+        try {
+          std::error_code ec;
+          if (!std::filesystem::create_directories(destDir, ec) && ec) {
+            error_out = std::string("Failed to create destination directory: ") + destDir.string() + " (" + ec.message() + ")";
+            return;
+          }
 
-      bool deployed = copy_to_temp(srcDll, tempDll) &&
-                      copy_to_temp(srcIcon, tempIcon) &&
-                      copy_to_temp(srcManifest, tempManifest);
-      if (deployed) {
-        deployed = same_size(srcDll, tempDll) &&
-                   same_size(srcIcon, tempIcon) &&
-                   same_size(srcManifest, tempManifest);
-      }
-      if (deployed) {
-        deployed = replace_file(tempDll, destDll) &&
-                   replace_file(tempIcon, destIcon) &&
-                   replace_file(tempManifest, destManifest);
-      }
-      if (deployed) {
-        deployed = same_size(srcDll, destDll) &&
-                   same_size(srcIcon, destIcon) &&
-                   same_size(srcManifest, destManifest);
-      }
-      cleanup_temps();
-      cleanup_guard.disable();
-      if (deployed) {
-        ec.clear();
-        std::filesystem::remove(destDir / L"SunshinePlaynite.dll", ec);
-        deployed = !ec;
-      }
-      if (deployed) {
-        ec.clear();
-        std::filesystem::remove(destDir / L"VibeshinePlaynite.dll", ec);
-        deployed = !ec;
-      }
-      if (deployed) {
-        ec.clear();
-        std::filesystem::remove(destDir / L"SunshinePlaynite.psm1", ec);
-        deployed = !ec;
-      }
-      if (!deployed) {
-        error_out = "Failed to deploy and verify plugin files in " + destDir.string();
+          const auto destManifest = destDir / L"extension.yaml";
+          const auto destDll = destDir / L"VibepolloPlaynite.dll";
+          const auto destIcon = destDir / L"icon.png";
+          const auto tempManifest = destDir / L"extension.yaml.vibepollo-new";
+          const auto tempDll = destDir / L"VibepolloPlaynite.dll.vibepollo-new";
+          const auto tempIcon = destDir / L"icon.png.vibepollo-new";
+          auto cleanup_temps = [&]() {
+            std::error_code cleanup_ec;
+            std::filesystem::remove(tempManifest, cleanup_ec);
+            cleanup_ec.clear();
+            std::filesystem::remove(tempDll, cleanup_ec);
+            cleanup_ec.clear();
+            std::filesystem::remove(tempIcon, cleanup_ec);
+          };
+          cleanup_temps();
+          // Declared inside the impersonated scope so it runs before RevertToSelf.
+          auto cleanup_guard = util::fail_guard([&]() {
+            cleanup_temps();
+          });
+
+          auto copy_to_temp = [&](const std::filesystem::path &src, const std::filesystem::path &dst) {
+            ec.clear();
+            BOOST_LOG(debug) << "Playnite installer: staging " << src.string() << " to " << dst.string();
+            std::filesystem::copy_file(src, dst, std::filesystem::copy_options::overwrite_existing, ec);
+            return !ec;
+          };
+          auto same_size = [](const std::filesystem::path &src, const std::filesystem::path &dst) {
+            std::error_code src_ec;
+            std::error_code dst_ec;
+            auto src_size = std::filesystem::file_size(src, src_ec);
+            auto dst_size = std::filesystem::file_size(dst, dst_ec);
+            return !src_ec && !dst_ec && src_size > 0 && src_size == dst_size;
+          };
+          auto replace_file = [&](const std::filesystem::path &src, const std::filesystem::path &dst) {
+            if (MoveFileExW(src.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+              return true;
+            }
+            ec = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+            return false;
+          };
+
+          deployed = copy_to_temp(srcDll, tempDll) &&
+                     copy_to_temp(srcIcon, tempIcon) &&
+                     copy_to_temp(srcManifest, tempManifest);
+          if (deployed) {
+            deployed = same_size(srcDll, tempDll) &&
+                       same_size(srcIcon, tempIcon) &&
+                       same_size(srcManifest, tempManifest);
+          }
+          if (deployed) {
+            deployed = replace_file(tempDll, destDll) &&
+                       replace_file(tempIcon, destIcon) &&
+                       replace_file(tempManifest, destManifest);
+          }
+          if (deployed) {
+            deployed = same_size(srcDll, destDll) &&
+                       same_size(srcIcon, destIcon) &&
+                       same_size(srcManifest, destManifest);
+          }
+          cleanup_temps();
+          cleanup_guard.disable();
+          if (deployed) {
+            ec.clear();
+            std::filesystem::remove(destDir / L"SunshinePlaynite.dll", ec);
+            deployed = !ec;
+          }
+          if (deployed) {
+            ec.clear();
+            std::filesystem::remove(destDir / L"VibeshinePlaynite.dll", ec);
+            deployed = !ec;
+          }
+          if (deployed) {
+            ec.clear();
+            std::filesystem::remove(destDir / L"SunshinePlaynite.psm1", ec);
+            deployed = !ec;
+          }
+          if (!deployed) {
+            error_out = "Failed to deploy and verify plugin files in " + destDir.string();
+          } else {
+            BOOST_LOG(info) << "Playnite installer: deployed plugin to " << destDir.string();
+          }
+        } catch (...) {
+          // impersonate_current_user() has no handler of its own: an exception here
+          // would skip RevertToSelf.
+          deployed = false;
+          error_out = "Plugin deployment threw while impersonating the user.";
+        }
+      };
+      if (deploy_token) {
+        if (const auto imp_ec = platf::impersonate_current_user(deploy_token, deploy); imp_ec) {
+          deployed = false;
+          error_out = "Could not impersonate the interactive user for plugin deployment (" + imp_ec.message() + ").";
+        }
       } else {
-        BOOST_LOG(info) << "Playnite installer: deployed plugin to " << destDir.string();
+        deploy();
       }
 
       launch_attempted = restart;
