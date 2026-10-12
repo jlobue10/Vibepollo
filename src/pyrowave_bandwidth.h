@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cmath>
 
+#include "video_fec.h"
+
 // Keep identical in Vibeshine and Moonlight. Wire budgets include Ethernet
 // preamble/gap/FCS, IPv6, UDP, RTP and encrypted-video headers.
 namespace pyrowave::bandwidth {
@@ -23,7 +25,8 @@ inline std::size_t max_critical_parity(const transport_t& t, std::size_t packets
     std::size_t result = 0;
     if (t.critical_fec_percentage <= 0) return result;
     for (std::size_t critical = 1; critical <= (std::min)(packets, std::size_t(255)); ++critical) {
-        const auto parity = (std::max)((critical * std::size_t(t.critical_fec_percentage) + 99) / 100, t.min_parity_shards);
+        const auto percentage = video_fec::percentage_for_minimum(critical, std::size_t(t.critical_fec_percentage), t.min_parity_shards);
+        const auto parity = video_fec::parity_shards(critical, percentage);
         if (critical + parity <= 255) result = (std::max)(result, parity);
     }
     return result;

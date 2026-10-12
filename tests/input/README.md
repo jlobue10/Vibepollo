@@ -1,5 +1,13 @@
 # Input disconnect regression tests
 
+`python3 tests/input/test_video_fec_wire.py` compiles the production video FEC
+encoder and header writer with real Reed-Solomon under ASan/UBSan. It checks
+8-bit percentage and 10-bit shard-index boundaries, declared versus actual
+parity counts, padded/aligned payload reconstruction, and PyroWave's wire-budget
+estimate. Initialize `third-party/nanors` and `third-party/moonlight-common-c`;
+JSON headers are also required (`AUDIT_JSON_INCLUDE` may override their path).
+`--baseline` reads production files from `HEAD`. No GPU or network is used.
+
 `python3 tests/input/test_control_replay_window.py` executes the production v2
 encrypted-control replay gate with authenticated packets delivered out of order
 across independent ENet channels. It covers delayed keyboard/controller releases,

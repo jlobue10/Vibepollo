@@ -68,6 +68,7 @@ extern "C" {
 #include "update.h"
 #include "utility.h"
 #include "uuid.h"
+#include "video_fec.h"
 #include "video_send.h"
 #include "webrtc_stream.h"
 #ifdef _WIN32
@@ -1223,22 +1224,17 @@ namespace stream {
 
       auto aligned_data_shards = payload_size / blocksize;
       auto data_shards = aligned_data_shards + (pad ? 1 : 0);
-      auto parity_shards = (data_shards * fecpercentage + 99) / 100;
+      fecpercentage = video_fec::percentage_for_minimum(data_shards, fecpercentage, minparityshards);
 
-      // increase the FEC percentage for this frame if the parity shard minimum is not met
-      if (parity_shards < minparityshards && fecpercentage != 0) {
-        parity_shards = minparityshards;
-        fecpercentage = (100 * parity_shards) / data_shards;
-
-        BOOST_LOG(verbose) << "Increasing FEC percentage to "sv << fecpercentage << " to meet parity shard minimum"sv << std::endl;
-      }
-
-      // Reed-Solomon is defined for at most DATA_SHARDS_MAX shards in total; the
-      // client-chosen minimum must not push past it.
-      if (data_shards + parity_shards > DATA_SHARDS_MAX) {
-        parity_shards = data_shards < DATA_SHARDS_MAX ? DATA_SHARDS_MAX - data_shards : 0;
-        fecpercentage = data_shards ? (100 * parity_shards) / data_shards : 0;
-      }
+      // Bound the percentage itself, then derive the actual shard count exactly
+      // as the receiver does. Clamping the count and rounding its percentage
+      // separately can advertise fewer shards than we encode. The minimum is
+      // best effort when the 8-bit percentage or Reed-Solomon capacity limits it.
+      const auto max_percentage = data_shards && data_shards < DATA_SHARDS_MAX ?
+                                   (100 * (DATA_SHARDS_MAX - data_shards)) / data_shards :
+                                   0;
+      fecpercentage = std::min(fecpercentage, max_percentage);
+      auto parity_shards = video_fec::parity_shards(data_shards, fecpercentage);
 
       auto nr_shards = data_shards + parity_shards;
 

@@ -6,6 +6,7 @@
 #include "pyrowave_bandwidth.h"
 
 #include "pyrowave_protocol.h"
+#include "video_fec.h"
 
 #include <algorithm>
 #include <cstring>
@@ -495,7 +496,11 @@ namespace pyrowave::policy {
     if (fec_percentage <= 0) {
       return 0;
     }
-    return std::max((data_shards * std::size_t(fec_percentage) + 99) / 100, min_parity_shards);
+    // Count the same representable percentage the encoder puts on the wire.
+    // Leave the total unclamped here so the block planner can reject blocks
+    // exceeding Reed-Solomon capacity instead of budgeting nonexistent parity.
+    return video_fec::parity_shards(data_shards,
+                                   video_fec::percentage_for_minimum(data_shards, std::size_t(fec_percentage), min_parity_shards));
   }
 
   std::vector<fec_block_t> plan_fec_blocks(std::size_t total_shards, std::size_t critical_shards, int critical_fec_percentage, std::size_t min_parity_shards, int detail_fec_percentage, std::size_t extra_parity_budget) {
