@@ -1496,8 +1496,7 @@ namespace confighttp {
     send_response(response, output_tree);
   }
 
-  void service_unavailable(resp_https_t response, const std::string &error_message) {
-    SimpleWeb::CaseInsensitiveMultimap headers;
+  void service_unavailable(resp_https_t response, const std::string &error_message, SimpleWeb::CaseInsensitiveMultimap headers = {}) {
     headers.emplace("Content-Type", "application/json; charset=utf-8");
     headers.emplace("X-Frame-Options", "DENY");
     headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
@@ -2081,6 +2080,73 @@ namespace confighttp {
       // Read the input JSON from the request body.
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       int index = input_tree.value("index", -1);
+
+      // Belt and braces for the launch side: output/working-dir must be plain local paths
+      // (no NUL, UNC, device, \\?\ or alternate-stream forms); command strings may be
+      // anything but must not carry an embedded NUL (CreateProcess would truncate them).
+      const auto plain_local_path = [](const std::string &v) {
+        if (v.empty() || v == "null") {
+          return true;  // unset
+        }
+        if (v.find('\0') != std::string::npos) {
+          return false;
+        }
+        if (v.rfind("\\\\", 0) == 0 || v.rfind("//", 0) == 0) {
+          return false;  // a UNC or device prefix (two leading separators)
+        }
+        if (const auto last_colon = v.rfind(':'); last_colon != std::string::npos && last_colon != 1) {
+          return false;  // alternate data stream or a non-drive colon (only a drive letter may carry one)
+        }
+        if (v.size() >= 2 && v[1] == ':' && !std::isalpha(static_cast<unsigned char>(v[0]))) {
+          return false;
+        }
+        static constexpr std::string_view devices[] = {"CON", "PRN", "AUX", "NUL", "COM", "LPT"};
+        const auto leaf_start = v.find_last_of("\\/");
+        std::string leaf = v.substr(leaf_start == std::string::npos ? 0 : leaf_start + 1);
+        if (const auto dot = leaf.find('.'); dot != std::string::npos) {
+          leaf.resize(dot);
+        }
+        std::transform(leaf.begin(), leaf.end(), leaf.begin(), [](unsigned char c) {
+          return (char) std::toupper(c);
+        });
+        for (const auto d : devices) {
+          if (leaf == d) {
+            return false;
+          }
+          if ((d == "COM" || d == "LPT") && leaf.size() == d.size() + 1 && leaf.compare(0, d.size(), d) == 0 && std::isdigit((unsigned char) leaf.back())) {
+            return false;
+          }
+        }
+        return true;
+      };
+      const auto string_or_empty = [](const nlohmann::json &node, const char *key) {
+        return node.contains(key) && node[key].is_string() ? node[key].get<std::string>() : std::string {};
+      };
+      for (const char *key : {"output", "working-dir"}) {
+        if (!plain_local_path(string_or_empty(input_tree, key))) {
+          bad_request(response, request, std::string(key) + " must be a plain local path (no UNC, device, \\\\?\\ or stream forms)");
+          return;
+        }
+      }
+      const auto has_nul = [](const std::string &s) {
+        return s.find('\0') != std::string::npos;
+      };
+      if (has_nul(string_or_empty(input_tree, "cmd"))) {
+        bad_request(response, request, "cmd contains an embedded NUL");
+        return;
+      }
+      for (const char *list : {"detached", "prep-cmd", "state-cmd"}) {
+        if (input_tree.contains(list) && input_tree[list].is_array()) {
+          for (const auto &item : input_tree[list]) {
+            const bool bad = item.is_string() ? has_nul(item.get<std::string>()) :
+                                                item.is_object() && (has_nul(string_or_empty(item, "do")) || has_nul(string_or_empty(item, "undo")) || has_nul(string_or_empty(item, "cmd")));
+            if (bad) {
+              bad_request(response, request, std::string(list) + " contains an embedded NUL");
+              return;
+            }
+          }
+        }
+      }
 
       // Read the existing apps file.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
@@ -2681,19 +2747,10 @@ namespace confighttp {
         removed = true;
 
 #ifdef _WIN32
-        try {
-          if (is_playnite_fullscreen(app_entry)) {
-            auto current_cfg = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
-            current_cfg["playnite_fullscreen_entry_enabled"] = "false";
-            std::stringstream config_stream;
-            for (const auto &kv : current_cfg) {
-              (void) append_config_line(config_stream, kv.first, kv.second);
-            }
-            file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
-            config::apply_config_now();
-            disabled_fullscreen_flag = true;
-          }
-        } catch (...) {
+        if (is_playnite_fullscreen(app_entry)) {
+          // The config flag follows the catalogue write below: a failed apps.json write
+          // must not leave the flag flipped while the entry stays in the catalogue.
+          disabled_fullscreen_flag = true;
         }
 #endif
       }
@@ -2709,6 +2766,24 @@ namespace confighttp {
         return;
       }
       proc::refresh(config::stream.file_apps, false);
+
+#ifdef _WIN32
+      if (disabled_fullscreen_flag) {
+        try {
+          auto current_cfg = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+          current_cfg["playnite_fullscreen_entry_enabled"] = "false";
+          std::stringstream config_stream;
+          for (const auto &kv : current_cfg) {
+            (void) append_config_line(config_stream, kv.first, kv.second);
+          }
+          if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
+            BOOST_LOG(warning) << "deleteApp: could not persist playnite_fullscreen_entry_enabled=false"sv;
+          }
+          config::apply_config_now();
+        } catch (...) {
+        }
+      }
+#endif
 
       nlohmann::json output_tree;
       output_tree["status"] = true;
@@ -3796,6 +3871,15 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  // The WebRTC stream limits, advertised by /api/webrtc/capabilities and enforced by the
+  // session parser with the same values (the advertisement used to promise 64..16384 and
+  // fps 1 while the parser allowed 16..8192 and fps 10). Dimensions must also be even.
+  constexpr int kMinWebRtcDimension = 64;
+  constexpr int kMaxWebRtcDimension = 8192;
+  constexpr int kMinWebRtcFps = 10;
+  constexpr int kMaxWebRtcFps = 1000;
+  constexpr int kAbsoluteMaxWebRtcBitrateKbps = 500000;
+
   void getWebRTCCapabilities(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) {
       return;
@@ -3812,9 +3896,6 @@ namespace confighttp {
     return;
 #else
     const auto capabilities = nvhttp::get_web_stream_capabilities();
-    constexpr int kMaxWebRtcDimension = 16384;
-    constexpr int kMaxWebRtcFps = 1000;
-    constexpr int kAbsoluteMaxWebRtcBitrateKbps = 500000;
     const int max_bitrate_kbps = config::video.max_bitrate > 0 ?
                                       std::min(config::video.max_bitrate, kAbsoluteMaxWebRtcBitrateKbps) :
                                       kAbsoluteMaxWebRtcBitrateKbps;
@@ -3849,9 +3930,9 @@ namespace confighttp {
     output["hdr_policy_allows"] = hdr_policy_allows;
     output["hdr_policy"] = std::string {hdr_policy};
     output["limits"] = {
-      {"min_dimension", 64},
+      {"min_dimension", kMinWebRtcDimension},
       {"max_dimension", kMaxWebRtcDimension},
-      {"min_fps", 1},
+      {"min_fps", kMinWebRtcFps},
       {"max_fps", kMaxWebRtcFps},
       {"min_bitrate_kbps", 0},
       {"max_bitrate_kbps", max_bitrate_kbps},
@@ -3908,16 +3989,16 @@ namespace confighttp {
           return static_cast<int>(value);
         };
         if (input.contains("width")) {
-          options.width = bounded("width", 16, 8192);
+          options.width = bounded("width", kMinWebRtcDimension, kMaxWebRtcDimension);
         }
         if (input.contains("height")) {
-          options.height = bounded("height", 16, 8192);
+          options.height = bounded("height", kMinWebRtcDimension, kMaxWebRtcDimension);
         }
         if (input.contains("fps")) {
-          options.fps = bounded("fps", 10, 1000);
+          options.fps = bounded("fps", kMinWebRtcFps, kMaxWebRtcFps);
         }
         if (input.contains("bitrate_kbps")) {
-          options.bitrate_kbps = bounded("bitrate_kbps", 0, 500000);  // 0 keeps the configured maximum
+          options.bitrate_kbps = bounded("bitrate_kbps", 0, kAbsoluteMaxWebRtcBitrateKbps);  // 0 keeps the configured maximum
         }
         if (input.contains("codec")) {
           options.codec = input.at("codec").get<std::string>();
@@ -4046,25 +4127,16 @@ namespace confighttp {
         }
 #endif
 
-        constexpr int kMinWebRtcDimension = 64;
-        constexpr int kMaxWebRtcDimension = 16384;
-        constexpr int kMaxWebRtcFps = 1000;
-        constexpr int kAbsoluteMaxWebRtcBitrateKbps = 500000;
         const int max_bitrate_kbps = config::video.max_bitrate > 0 ?
                                           std::min(config::video.max_bitrate, kAbsoluteMaxWebRtcBitrateKbps) :
                                           kAbsoluteMaxWebRtcBitrateKbps;
-        const auto valid_dimension = [=](const std::optional<int> &dimension) {
-          return !dimension ||
-                 (*dimension >= kMinWebRtcDimension &&
-                  *dimension <= kMaxWebRtcDimension &&
-                  *dimension % 2 == 0);
+        // Range is enforced by bounded() above with the advertised constants; only the
+        // even-dimension rule remains here.
+        const auto valid_dimension = [](const std::optional<int> &dimension) {
+          return !dimension || *dimension % 2 == 0;
         };
         if (!valid_dimension(options.width) || !valid_dimension(options.height)) {
-          bad_request(response, request, "WebRTC width and height must be even values between 64 and 16384");
-          return;
-        }
-        if (options.fps && (*options.fps < 1 || *options.fps > kMaxWebRtcFps)) {
-          bad_request(response, request, "WebRTC fps must be between 1 and 1000");
+          bad_request(response, request, "WebRTC width and height must be even values between " + std::to_string(kMinWebRtcDimension) + " and " + std::to_string(kMaxWebRtcDimension));
           return;
         }
         if (options.bitrate_kbps && (*options.bitrate_kbps < 0 || *options.bitrate_kbps > max_bitrate_kbps)) {
@@ -4103,8 +4175,17 @@ namespace confighttp {
       bad_request(response, request, capture_start_error->c_str());
       return;
     }
-    auto session = webrtc_stream::create_session(options);
+    webrtc_stream::create_error_e create_error = webrtc_stream::create_error_e::none;
+    auto session = webrtc_stream::create_session(options, &create_error);
     if (!session) {
+      if (create_error == webrtc_stream::create_error_e::limit) {
+        // Refused, never evicted: an authenticated web session must not be able to kick
+        // an established one. Nothing to tear down.
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        headers.emplace("Retry-After", "5");
+        service_unavailable(response, "Too many WebRTC sessions; close one and retry", headers);
+        return;
+      }
       webrtc_stream::shutdown_all_sessions();
       service_unavailable(response, "Shutdown in progress");
       return;
@@ -4698,7 +4779,10 @@ namespace confighttp {
       }
 
       file_tree["apps"] = new_apps;
-      confighttp::refresh_client_apps_cache(file_tree);
+      if (!confighttp::refresh_client_apps_cache(file_tree)) {
+        app_persistence_error(response);
+        return;
+      }
 
       output_tree["status"] = true;
       output_tree["removed"] = removed;

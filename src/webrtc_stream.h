@@ -100,7 +100,14 @@ namespace webrtc_stream {
   bool has_teardown_in_progress();
   unsigned int teardown_session_count();
 
-  std::optional<SessionState> create_session(const SessionOptions &options);
+  // Why create_session() returned nothing: a host shutting its capture down, or the
+  // session-count cap (refused, nothing to tear down).
+  enum class create_error_e {
+    none,
+    shutdown,
+    limit,
+  };
+  std::optional<SessionState> create_session(const SessionOptions &options, create_error_e *error = nullptr);
   std::optional<std::string> ensure_capture_started(const SessionOptions &options);
   bool close_session(std::string_view id);
   std::optional<SessionState> get_session(std::string_view id);

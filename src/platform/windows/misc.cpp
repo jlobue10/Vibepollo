@@ -1431,9 +1431,12 @@ namespace platf {
   // CreateProcess' own order for an unqualified name is application dir, cwd, System32,
   // System, Windows, then PATH; the working directory used to sit at the head of PATH, i.e.
   // AFTER the Windows directories. Keep that precedence: the first pass searches
-  // "System32;Windows;working dir" (a same-named file in a writable game folder must not
-  // shadow cmd.exe, powershell.exe or reg.exe for launch, prep, state or undo commands),
-  // the second pass the host order. Empty when the first token is already qualified (a
+  // "System32;System32\\WindowsPowerShell\\v1.0;System32\\wbem;Windows;working dir" (a
+  // same-named file in a writable game folder must not shadow cmd.exe, powershell.exe,
+  // wmic.exe or reg.exe for launch, prep, state or undo commands; programs that live only
+  // elsewhere on PATH keep the pre-existing precedence), the second pass the host order.
+  // If a Windows directory lookup fails the working directory is not placed in the first
+  // pass at all (it is searched last instead). Empty when the first token is already qualified (a
   // path separator or drive spec: association output and the cmd.exe trampoline pass
   // through untouched) or when nothing is found, so the caller keeps
   // lpApplicationName = nullptr and the old lookup (incl. unquoted paths with spaces).
@@ -1447,24 +1450,38 @@ namespace platf {
     const std::wstring name(token);
     // No empty list element: an empty component means "current directory" to the loader.
     std::wstring first_pass;
+    bool system_dirs_known = true;
     std::array<wchar_t, MAX_PATH> dir {};
     if (const UINT n = GetSystemDirectoryW(dir.data(), (UINT) dir.size()); n && n < dir.size()) {
-      first_pass.assign(dir.data(), n);
+      const std::wstring system32(dir.data(), n);
+      first_pass = system32 + L";" + system32 + L"\\WindowsPowerShell\\v1.0;" + system32 + L"\\wbem";
+    } else {
+      system_dirs_known = false;
     }
     if (const UINT n = GetWindowsDirectoryW(dir.data(), (UINT) dir.size()); n && n < dir.size()) {
       first_pass += (first_pass.empty() ? L"" : L";") + std::wstring(dir.data(), n);
+    } else {
+      system_dirs_known = false;
     }
+    // Fail closed: the working directory joins the first pass only behind known system
+    // directories; otherwise it is searched on its own after the host order.
+    std::wstring last_pass;
     if (!start_dir.empty()) {
-      first_pass += (first_pass.empty() ? L"" : L";") + start_dir;
+      if (system_dirs_known) {
+        first_pass += L";" + start_dir;
+      } else {
+        last_pass = start_dir;
+      }
     }
     std::array<wchar_t, 32768> buffer {};
-    for (const wchar_t *path : {first_pass.empty() ? nullptr : first_pass.c_str(), (const wchar_t *) nullptr}) {
-      const DWORD len = SearchPathW(path, name.c_str(), L".exe", (DWORD) buffer.size(), buffer.data(), nullptr);
+    const wchar_t *passes[] = {first_pass.empty() ? nullptr : first_pass.c_str(), nullptr, last_pass.empty() ? nullptr : last_pass.c_str()};
+    for (std::size_t i = 0; i < 3; i++) {
+      if (i != 1 && !passes[i]) {
+        continue;
+      }
+      const DWORD len = SearchPathW(passes[i], name.c_str(), L".exe", (DWORD) buffer.size(), buffer.data(), nullptr);
       if (len > 0 && len < buffer.size()) {
         return std::wstring(buffer.data(), len);
-      }
-      if (!path) {
-        break;
       }
     }
     return {};
