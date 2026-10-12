@@ -114,6 +114,8 @@ jobs:
           python3 tests/input/test_impersonation_cleanup.py
       - name: Check app mutation errors on failed storage
         run: python3 tests/input/test_app_persistence_failure.py
+      - name: Check configuration validation and failed-storage side effects
+        run: python3 tests/input/test_config_persistence_failure.py
       - name: Check RTSP first-message deadlines across partial reads
         run: python3 tests/input/test_rtsp_first_message_deadline.py
       - name: Fetch the libwebrtc C header the browser/peer-state harnesses read

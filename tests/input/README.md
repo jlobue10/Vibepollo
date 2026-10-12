@@ -208,6 +208,15 @@ HTTP/authentication, process refresh and unrelated metadata hooks are boundary
 fakes; Windows-only artwork/live-HDR hooks are outside this fixture.
 Both new tests support `--baseline` to read HEAD.
 
+`test_config_persistence_failure.py` executes the production POST/PATCH handlers,
+config parser and `file_handler_core.cpp` with real JSON parsing. Temporary-write
+and atomic-replace failures must return HTTP 500 before reload, deferred reload
+or Vulkan registration; successful immediate, deferred and restart-required
+saves retain their policies. Non-object bodies and invalid keys must return 400
+without changing the file. HTTP/authentication, adapter normalization, reload
+and Vulkan registration are boundary fakes, and storage is scripted. This is
+not native Windows filesystem or Vulkan validation. `--baseline` reads HEAD.
+
 `test_webrtc_session_cap.py` is a text gate for the WebRTC session-count cap: the
 shared RTSP launch bound, checked atomically with the registration, refused with a
 distinct error that the HTTP handler maps to 503 + Retry-After (never a teardown).

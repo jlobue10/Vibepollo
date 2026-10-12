@@ -1418,6 +1418,19 @@ namespace confighttp {
     response->write(SimpleWeb::StatusCode::server_error_internal_server_error, error.dump(), headers);
   }
 
+  void config_persistence_error(resp_https_t response) {
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json; charset=utf-8");
+    headers.emplace("X-Frame-Options", "DENY");
+    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_cors_headers(headers);
+    nlohmann::json error = {
+      {"status", false},
+      {"error", "Could not save the configuration. Check the host logs and storage permissions."},
+    };
+    response->write(SimpleWeb::StatusCode::server_error_internal_server_error, error.dump(), headers);
+  }
+
   constexpr auto CSRF_TOKEN_SIZE = 32;
   constexpr auto CSRF_TOKEN_LIFETIME = std::chrono::hours(1);
   constexpr std::size_t CSRF_TOKEN_CAPACITY = 4096;
@@ -3533,6 +3546,10 @@ namespace confighttp {
       std::stringstream config_stream;
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(ss);
+      if (!input_tree.is_object()) {
+        bad_request(response, request, "POST body must be a JSON object");
+        return;
+      }
       normalize_adapter_config_pair(input_tree);
       std::set<std::string> changed_keys;
       for (const auto &[k, v] : input_tree.items()) {
@@ -3548,7 +3565,10 @@ namespace confighttp {
           return;
         }
       }
-      file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
+      if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
+        config_persistence_error(response);
+        return;
+      }
 
 #ifdef _WIN32
       reconcile_vulkan_hdr_layer_from_body(input_tree);
@@ -3655,9 +3675,15 @@ namespace confighttp {
       // Write back full merged config file
       std::stringstream config_stream;
       for (const auto &kv : current) {
-        (void) append_config_line(config_stream, kv.first, kv.second);
+        if (!append_config_line(config_stream, kv.first, kv.second)) {
+          bad_request(response, request, "Invalid configuration key");
+          return;
+        }
       }
-      file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
+      if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
+        config_persistence_error(response);
+        return;
+      }
 
 #ifdef _WIN32
       reconcile_vulkan_hdr_layer_from_body(patch_tree);
