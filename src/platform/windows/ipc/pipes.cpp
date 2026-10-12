@@ -232,8 +232,10 @@ namespace platf::dxgi {
     winrt::file_handle hPipe {
       CreateNamedPipeW(
         fullPipeName.c_str(),
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+        // First instance only: a pre-planted pipe of the same name fails the create
+        // instead of silently taking the next instance, and never a remote client.
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
         1,
         65536,
         65536,

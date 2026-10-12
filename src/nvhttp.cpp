@@ -4456,6 +4456,14 @@ namespace nvhttp {
 
       auto appid_str = get_arg(args, "appid", "0");
       auto appuuid_str = get_arg(args, "appuuid", "");
+      if (appuuid_str.empty() && util::from_view(appid_str) <= 0) {
+        // Names no catalog app (and no synthetic control, those ids are positive): refuse
+        // at the boundary instead of running overrides and display preparation first.
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 400);
+        tree.put("root.<xmlattr>.status_message", "Missing a required launch parameter");
+        return;
+      }
       // Synthetic controls are host actions, never configured applications.
       // Identify them before resolve_app() so they cannot collide with an
       // apps.json id and accidentally launch a real process.
@@ -5256,6 +5264,10 @@ namespace nvhttp {
       });
 #endif
 
+      // Only what this request launched may be torn down when admission is refused
+      // below: a refused join of a running session must not terminate another
+      // client's game.
+      bool launched_here = false;
       if (is_input_only) {
         BOOST_LOG(info) << "Launching input only session..."sv;
 
@@ -5278,6 +5290,7 @@ namespace nvhttp {
           // alone stopped input-only sessions from launching after the first app exit.
           if (current_appid <= 0) {
             proc::proc.launch_input_only();
+            launched_here = true;
           }
         }
       } else if (appid > 0 || !appuuid_str.empty()) {
@@ -5326,6 +5339,7 @@ namespace nvhttp {
 
             return;
           }
+          launched_here = true;
         }
       } else {
         // appid <= 0 without an appuuid names no catalog app. Without this return the 403
@@ -5363,7 +5377,7 @@ namespace nvhttp {
         launch_session->virtual_display_guid_bytes
       );
       if (!paired_client_uuid_enabled(launch_session->client_uuid, verified_client->perm)) {
-        if (appid > 0) proc::proc.terminate(false, true, false, true, true);
+        if (launched_here) proc::proc.terminate(false, true, false, true, true);
         tree.put("root.resume", 0);
         tree.put("root.gamesession", 0);
         tree.put("root.<xmlattr>.status_code", 403);
@@ -5371,7 +5385,7 @@ namespace nvhttp {
         return;
       }
       if (!rtsp_stream::launch_session_raise(launch_session)) {
-        if (appid > 0) proc::proc.terminate(false, true, false, true, true);
+        if (launched_here) proc::proc.terminate(false, true, false, true, true);
         tree.put("root.<xmlattr>.status_code", 409);
         tree.put("root.<xmlattr>.status_message", "RTSP pending session admission was rejected");
         tree.put("root.gamesession", 0);

@@ -153,7 +153,9 @@ namespace platf::playnite {
 #ifndef SUNSHINE_TESTS
       BOOST_LOG(warning) << "Playnite protocol: failed to parse message";
 #endif
-      // fallthrough unknown
+      // A failure mid-array must not leave a partial snapshot with its type already set:
+      // autosync would treat the truncated catalogue as authoritative.
+      m = Message {};
     }
     return m;
   }

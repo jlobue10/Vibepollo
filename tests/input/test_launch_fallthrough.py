@@ -44,6 +44,10 @@ for ok, name in (
     (snapshot.count('launch_session->iv.resize(16)') == 1, 'the launch IV block is not duplicated'),
     ('return;' in after_forbidden, 'a launch that names no app returns its 403 instead of streaming the desktop'),
     ('runtime_failed' in dummy, 'a first-frame convert failure is a runtime failure (no counter-reset hot loop)'),
+    (nvhttp.count('if (launched_here) proc::proc.terminate(') == 2 and nvhttp.count('if (appid > 0) proc::proc.terminate(') == 0,
+     'a refused admission terminates only an app this request launched'),
+    ('util::from_view(appid_str) <= 0' in nvhttp and nvhttp.index('util::from_view(appid_str) <= 0') < nvhttp.index('remote_session::identify(util::from_view(appid_str)'),
+     'a launch naming no app is refused at the request boundary (400 before any host work)'),
 ):
     print(('PASS: ' if ok else 'FAIL: ') + name)
     failures += not ok
