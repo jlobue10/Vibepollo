@@ -68,7 +68,7 @@ int main() {
   check(!plain_local_path(nul), "embedded NUL is rejected on every platform");
 #ifdef _WIN32
   for (const std::string bad : {std::string("\\\\srv\\share\\a"), std::string("//srv/share"), std::string("\\\\.\\pipe\\x"), std::string("\\\\?\\C:\\a"),
-                                std::string("C:\\a.log:stream"), std::string("C:\\logs\\NUL"), std::string("C:\\logs\\com1.txt"), std::string("9:\\x"), nul}) {
+                                std::string("C:\\a.log:stream"), std::string("C:\\logs\\NUL"), std::string("C:\\Games\\Foo;..\\Windows"), std::string("C:\\logs\\com1.txt"), std::string("9:\\x"), nul}) {
     check(!plain_local_path(bad), ("rejected: " + (bad == nul ? std::string("a<NUL>b") : bad)).c_str());
   }
 #else

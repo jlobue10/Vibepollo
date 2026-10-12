@@ -23,11 +23,7 @@
 #include <unordered_set>
 
 #ifdef _WIN32
-  // clang-format off
-  // windows.h must precede shellapi.h: the latter relies on its type macros.
   #include <windows.h>
-  #include <shellapi.h>
-  // clang-format on
 #elif defined(__APPLE__)
   #include <fcntl.h>
   #include <sys/types.h>
@@ -1347,14 +1343,15 @@ namespace platf::steam {
 #endif
   }
 
+#ifndef _WIN32
+  // Windows launches through platf::run_command next to the web route
+  // (confighttp_steam.cpp, launch_steam_app): this translation unit is also built
+  // standalone by the component tests and stays free of the process layer.
   bool launch(std::uint32_t app_id) {
     const auto uri = launch_uri(app_id);
     if (uri.empty()) {
       return false;
     }
-#ifdef _WIN32
-    return reinterpret_cast<std::intptr_t>(ShellExecuteW(nullptr, L"open", std::filesystem::path(uri).c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
-#else
     // The opener must be detached, but the caller still needs to know whether
     // it was actually executed. A close-on-exec pipe reports only pre-exec
     // failures: successful exec closes the write end and produces EOF.
@@ -1419,6 +1416,6 @@ namespace platf::steam {
     } while (received < 0 && errno == EINTR);
     close(exec_error_pipe[0]);
     return received == 0 && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0;
-#endif
   }
+#endif
 }  // namespace platf::steam

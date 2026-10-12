@@ -173,11 +173,30 @@ int main() {
             "invalid request has no side effects "+std::to_string(method)+" "+body.dump());
     }
   }
+  // A pre-existing non-identifier key on disk must not block a save (H30-01): it is dropped
+  // with a warning, while a non-identifier key in the request is refused by name.
+  for(int method=0;method<2;++method) {
+    reset(0); storage.disk="min_log_level = 1\nbad key = 1\n";
+    auto response=invoke(method,json({{"min_log_level",2}}));
+    auto saved=config::parse_config(storage.disk);
+    check(response->code==200 && storage.writes==1 && saved["min_log_level"]=="2" && !saved.count("bad key"),
+          "a non-identifier key already on disk is dropped, not fatal "+std::to_string(method));
+    reset(0); storage.disk="min_log_level = 1\nbad key = 1\n";
+    response=invoke(method,json({{"bad key",1}}));
+    check(response->code==400 && storage.writes==0 && response->body.value("error","").find("bad key")!=std::string::npos,
+          "a non-identifier key in the request is refused by name "+std::to_string(method));
+  }
   std::cout<<checks<<" checks; "<<failures<<" failures\n";
   return failures!=0;
 }
 '''
+patch = block('  void patchConfig(')
+if not ('valid_config_key(key)' in patch and patch.index('valid_config_key(key)') < patch.index('current[key] =')):
+    print('FAIL patchConfig validates the request key before merging it')
+    raise SystemExit(1)
 helpers = ['  static bool append_config_line(']
+if '  static bool valid_config_key(' in source:
+    helpers.insert(0, '  static bool valid_config_key(')
 if '  void config_persistence_error(' in source:
     helpers.append('  void config_persistence_error(')
 code = code.replace('@@HELPERS@@', '\n'.join(block(x) for x in helpers))

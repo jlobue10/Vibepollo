@@ -134,8 +134,12 @@ namespace confighttp {
   // One `key = value` line of sunshine.conf. A key is an identifier; a value is one line (a
   // CR/LF inside it would plant another option on reload, and the parser treats a
   // blank-preceded '#' as a comment). Returns false for a key that is not an identifier.
+  static bool valid_config_key(const std::string &key) {
+    return !key.empty() && std::all_of(key.begin(), key.end(), [](unsigned char c) { return std::isalnum(c) || c == '_' || c == '-' || c == '.'; });
+  }
+
   static bool append_config_line(std::stringstream &out, const std::string &key, std::string value) {
-    if (key.empty() || !std::all_of(key.begin(), key.end(), [](unsigned char c) { return std::isalnum(c) || c == '_' || c == '-' || c == '.'; })) {
+    if (!valid_config_key(key)) {
       return false;
     }
     std::erase_if(value, [](char c) { return c == '\r' || c == '\n'; });
@@ -2107,6 +2111,9 @@ namespace confighttp {
         if (v.rfind("\\\\", 0) == 0 || v.rfind("//", 0) == 0) {
           return false;  // a UNC or device prefix (two leading separators)
         }
+        if (v.find(';') != std::string::npos) {
+          return false;  // SearchPathW's list separator: can never be one directory
+        }
         if (const auto last_colon = v.rfind(':'); last_colon != std::string::npos && last_colon != 1) {
           return false;  // alternate data stream or a non-drive colon (only a drive letter may carry one)
         }
@@ -3553,6 +3560,10 @@ namespace confighttp {
       normalize_adapter_config_pair(input_tree);
       std::set<std::string> changed_keys;
       for (const auto &[k, v] : input_tree.items()) {
+        if (!valid_config_key(k)) {
+          bad_request(response, request, "Invalid configuration key: " + k);
+          return;
+        }
         changed_keys.insert(k);
         if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
           continue;
@@ -3653,6 +3664,12 @@ namespace confighttp {
       for (auto it = patch_tree.begin(); it != patch_tree.end(); ++it) {
         const std::string key = it.key();
         const nlohmann::json &val = it.value();
+        // The request's keys are validated; keys already on disk are not (a hand-edited
+        // line with a space or colon in its key must not block every later save).
+        if (!valid_config_key(key)) {
+          bad_request(response, request, "Invalid configuration key: " + key);
+          return;
+        }
         changed_keys.insert(key);
 
         // Remove key when explicitly null or empty string
@@ -3676,8 +3693,8 @@ namespace confighttp {
       std::stringstream config_stream;
       for (const auto &kv : current) {
         if (!append_config_line(config_stream, kv.first, kv.second)) {
-          bad_request(response, request, "Invalid configuration key");
-          return;
+          // Dropped with a warning, as deleteApp's rewrite and a POST replace already do.
+          BOOST_LOG(warning) << "PATCH /api/config: dropping unserialisable key ["sv << kv.first << "] from the saved configuration"sv;
         }
       }
       if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {

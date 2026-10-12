@@ -126,6 +126,11 @@ namespace platf::steam {
   // while placing Vibepollo's game-process wrapper at %command%. Falls back
   // to the Steam broker when local metadata is incomplete.
   std::string launch_command(const game_t &game);
+#ifndef _WIN32
+  // Open the Steam URI directly (POSIX). On Windows the web route launches through
+  // platf::run_command so the opener runs as the interactive user when the host is a
+  // service; see launch_steam_app() in confighttp_steam.cpp.
   bool launch(std::uint32_t app_id);
+#endif
 
 }  // namespace platf::steam
