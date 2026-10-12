@@ -38,6 +38,10 @@ jobs:
         run: |
           git submodule update --init --depth 1 third-party/moonlight-common-c third-party/libvirtualgamepad
           python3 tests/input/test_sc26_buttons.py
+      - name: Check video FEC wire counts and parity recovery
+        run: |
+          git submodule update --init --depth 1 third-party/nanors
+          python3 tests/input/test_video_fec_wire.py
       - name: Check queued and in-flight stream packet lifetimes
         run: |
           python3 tests/input/test_stream_packet_lifetime.py
