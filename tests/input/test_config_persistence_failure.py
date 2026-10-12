@@ -195,6 +195,8 @@ if not ('valid_config_key(key)' in patch and patch.index('valid_config_key(key)'
     print('FAIL patchConfig validates the request key before merging it')
     raise SystemExit(1)
 helpers = ['  static bool append_config_line(']
+if '  static bool valid_config_key(' in source:
+    helpers.insert(0, '  static bool valid_config_key(')
 if '  void config_persistence_error(' in source:
     helpers.append('  void config_persistence_error(')
 code = code.replace('@@HELPERS@@', '\n'.join(block(x) for x in helpers))
