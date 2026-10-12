@@ -5142,7 +5142,12 @@ namespace video {
       // in a separate scope.
       auto dummy_img = disp->alloc_img();
       if (!dummy_img || disp->dummy_img(dummy_img.get()) || session->convert(*dummy_img)) {
-        return native_amf_failure();
+        // A convert that fails on the very first frame is a runtime failure for every
+        // encoder: `completed` reset the retry counter and spun the restart loop hot.
+        if (native_amf_session) {
+          return native_amf_failure();
+        }
+        return encode_run_result_e::runtime_failed;
       }
     }
 

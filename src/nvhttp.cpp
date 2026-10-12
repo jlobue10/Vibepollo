@@ -3198,16 +3198,13 @@ namespace nvhttp {
         }
       }
 
-      // Encrypted RTSP is enabled with client reported corever >= 1.
-      const auto corever = util::from_view(get_arg(args, "corever", "0"));
-      if (corever >= 1) {
-        launch_session->rtsp_cipher = crypto::cipher::gcm_t {
-          launch_session->gcm_key,
-          false
-        };
-        launch_session->rtsp_iv_counter = 0;
+      // The cipher, IV and ping payload were derived above for a paired client; a web-UI
+      // launch (the host's own uniqueid, no rikey/rikeyid in its query) only needs the
+      // plain scheme. A second, unconditional derivation here threw on the missing rikeyid
+      // and turned every web-UI launch into a 400.
+      if (launch_session->rtsp_url_scheme.empty()) {
+        launch_session->rtsp_url_scheme = launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
       }
-      launch_session->rtsp_url_scheme = launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
       if (request) {
         launch_session->rtsp_source_address = request->remote_endpoint().address().to_string();
       }
@@ -3216,12 +3213,6 @@ namespace nvhttp {
       launch_session->client_undo_cmds = verified_client->undo_cmds;
 
       launch_session->input_only = input_only;
-
-      launch_session->iv.resize(16);
-      uint32_t prepend_iv = util::endian::big<uint32_t>(util::from_view(get_arg(args, "rikeyid")));
-      auto prepend_iv_p = (uint8_t *) &prepend_iv;
-      std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
-
 
       return launch_session;
     }
@@ -5337,9 +5328,12 @@ namespace nvhttp {
           }
         }
       } else {
+        // appid <= 0 without an appuuid names no catalog app. Without this return the 403
+        // was overwritten by the 200 below and the raw desktop streamed with no app.
         tree.put("root.<xmlattr>.status_code", 403);
         tree.put("root.<xmlattr>.status_message", "How did you get here?");
         tree.put("root.gamesession", 0);
+        return;
       }
 
       tree.put("root.<xmlattr>.status_code", 200);

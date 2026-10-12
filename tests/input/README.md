@@ -145,3 +145,10 @@ values as well as malformed arrivals, states and disconnects (35 checks).
 `test_encoder_retry.py` reads the production result enum and executes the retry
 policy for Linux, Linux/CUDA and Windows selectors. It covers initialization and
 runtime failures, mixed failures, and resets after a completed run (18 checks).
+
+`test_launch_fallthrough.py` is a text gate for the `/launch` path: the client
+cipher/IV is derived once inside the paired-client block (a second unconditional
+`rikeyid` read made every web-UI launch a 400), the "How did you get here?" 403 for
+a launch naming no app returns instead of being overwritten by the 200 that starts
+a raw desktop stream, and a first-frame convert failure is a runtime failure for
+every encoder. `--baseline` reads HEAD.

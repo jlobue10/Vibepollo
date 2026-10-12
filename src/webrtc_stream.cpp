@@ -1624,13 +1624,15 @@ namespace webrtc_stream {
         return;
       }
       if (type == "mouse_down" || type == "mouse_up") {
+        // Parse before any dispatch: a malformed button rejects the whole message rather
+        // than leaving its absolute move applied.
+        int mapped_button = map_mouse_button(static_cast<int>(json_integer(message, "button", 0, 255).value_or(-1)));
         if (message.contains("x") && message.contains("y")) {
           const double x = message.value("x", 0.0);
           const double y = message.value("y", 0.0);
           input::passthrough(input_ctx, make_abs_mouse_move_packet(x, y), input_permission);
         }
 
-        int mapped_button = map_mouse_button(static_cast<int>(json_integer(message, "button", 0, 255).value_or(-1)));
         if (mapped_button > 0) {
           input::passthrough(input_ctx, make_mouse_button_packet(mapped_button, type == "mouse_up"), input_permission);
         }
