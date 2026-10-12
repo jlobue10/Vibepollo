@@ -14,6 +14,8 @@ declarations = source[source.index('\n', start):source.index('    // Encoding ta
 start = source.index('      if (encode_result == encode_run_result_e::initialization_failed)', start)
 end = source.index('\n    }\n  }', start)
 policy = source[start:end].replace('std::this_thread::sleep_for', 'record_delay')
+enum_start = source.index('  enum class encode_run_result_e {')
+enum_definition = source[enum_start:source.index('};', enum_start) + 2]
 prefix = r'''
 #include <chrono>
 #include <iostream>
@@ -21,7 +23,7 @@ prefix = r'''
 #include <vector>
 using namespace std::literals;
 #define BOOST_LOG(level) std::clog
-enum class encode_run_result_e { initialization_failed, temporarily_busy, runtime_failed, ok };
+ENUM_DEFINITION
 int amdvce_experimental = 1, amdvce_ffmpeg = 2, nvenc = 3, software = 4;
 struct { bool is_quarantined() { return false; } } native_amf_lifecycle_gate;
 std::vector<int> delays;
@@ -49,20 +51,20 @@ int main() {
               "persistent initialization failure backs off and ends after three attempts");
     }
     attempts = 0; delays.clear();
-    run(software, {R::initialization_failed, R::ok, R::initialization_failed,
-                   R::initialization_failed, R::ok});
+    run(software, {R::initialization_failed, R::completed, R::initialization_failed,
+                   R::initialization_failed, R::completed});
     check(attempts == 5 && delays == std::vector<int>({100, 100, 200}),
           "a successful encode resets the failure budget");
-    // A mid-stream convert/encode failure shares the budget: it backs off and ends after
-    // three attempts instead of rebuilding the encoder in a tight loop.
+    for (int *encoder : {&software, &nvenc}) {
+        attempts = 0; delays.clear();
+        run(*encoder, {R::runtime_failed, R::runtime_failed, R::runtime_failed, R::runtime_failed});
+        check(attempts == 3 && delays == std::vector<int>({100, 200}),
+              "persistent runtime failure backs off and ends after three attempts");
+    }
     attempts = 0; delays.clear();
-    run(software, {R::runtime_failed, R::runtime_failed, R::runtime_failed, R::runtime_failed});
-    check(attempts == 3 && delays == std::vector<int>({100, 200}),
-          "persistent mid-stream failure backs off and ends after three attempts");
-    attempts = 0; delays.clear();
-    run(software, {R::runtime_failed, R::ok, R::initialization_failed, R::runtime_failed, R::ok});
+    run(software, {R::runtime_failed, R::completed, R::runtime_failed, R::initialization_failed, R::runtime_failed});
     check(attempts == 5 && delays == std::vector<int>({100, 100, 200}),
-          "mid-stream and initialization failures share one budget that a good run resets");
+          "success resets runtime failures and mixed failures share the retry budget");
     return failures != 0;
 }
 '''
@@ -73,7 +75,7 @@ with tempfile.TemporaryDirectory() as temp:
                           ('windows', '#define _WIN32 1\n')]:
         # Set the platform selector after standard headers; this is a policy
         # fixture on the current host, not a cross build of standard libraries.
-        code = prefix.replace('enum class encode_run_result_e', defines + 'enum class encode_run_result_e')
+        code = prefix.replace('ENUM_DEFINITION', defines + enum_definition)
         code = code.replace('DECLARATIONS', declarations).replace('POLICY', policy)
         (work / 'test.cpp').write_text(code)
         subprocess.run(['g++', '-std=c++20', '-g', '-fsanitize=address,undefined',
