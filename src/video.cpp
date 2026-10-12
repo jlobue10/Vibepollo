@@ -4874,6 +4874,9 @@ namespace video {
     native_amf_failed,
     temporarily_busy,
     initialization_failed,
+    // A convert/encode failure after the encoder ran: retried with the same
+    // strike counter and backoff as a failed initialization.
+    runtime_failed,
   };
 
   encode_run_result_e encode_run(
@@ -4927,6 +4930,7 @@ namespace video {
     const bool legacy_amf_session = false;
 #endif
     bool native_amf_runtime_failed = false;
+    bool runtime_failed = false;
     const auto session_encoder_flags = session_encoder->flags;
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
@@ -5394,6 +5398,7 @@ namespace video {
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             native_amf_runtime_failed = native_amf_session;
+            runtime_failed = !native_amf_session;
             break;
           }
           ++loop_stats.converted;
@@ -5449,6 +5454,7 @@ namespace video {
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp, capture_timestamp, host_processing_timestamp)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         native_amf_runtime_failed = native_amf_session;
+        runtime_failed = !native_amf_session;
         break;
       }
       ++loop_stats.encoded;
@@ -5479,9 +5485,10 @@ namespace video {
     if (native_amf_runtime_failed) {
       force_sync_teardown = true;
     }
-    return native_amf_runtime_failed ?
-             encode_run_result_e::native_amf_failed :
-             encode_run_result_e::completed;
+    if (native_amf_runtime_failed) {
+      return encode_run_result_e::native_amf_failed;
+    }
+    return runtime_failed ? encode_run_result_e::runtime_failed : encode_run_result_e::completed;
   }
 
   input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
@@ -6449,6 +6456,19 @@ namespace video {
         }
         const auto retry_delay = std::chrono::milliseconds(100 * (1 << (consecutive_encoder_initialization_failures - 1)));
         BOOST_LOG(warning) << "Encoder initialization failed; retrying in " << retry_delay.count() << "ms";
+        std::this_thread::sleep_for(retry_delay);
+        continue;
+      }
+      if (encode_result == encode_run_result_e::runtime_failed) {
+        // A persistent mid-stream convert/encode failure used to rebuild the encoder
+        // in a tight loop; it gets the same bounded retry as a failed initialization.
+        ++consecutive_encoder_initialization_failures;
+        if (consecutive_encoder_initialization_failures >= 3) {
+          BOOST_LOG(error) << "Encoder failed mid-stream 3 times in a row; ending the stream instead of busy-looping"sv;
+          return;
+        }
+        const auto retry_delay = std::chrono::milliseconds(100 * (1 << (consecutive_encoder_initialization_failures - 1)));
+        BOOST_LOG(warning) << "Encoder failed mid-stream; rebuilding in " << retry_delay.count() << "ms";
         std::this_thread::sleep_for(retry_delay);
         continue;
       }

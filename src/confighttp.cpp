@@ -21,6 +21,7 @@
 #include <mutex>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -3864,26 +3865,30 @@ namespace confighttp {
         if (input.contains("encoded")) {
           options.encoded = input.at("encoded").get<bool>();
         }
-        if (input.contains("width")) {
-          const int width = input.at("width").get<int>();
-          if (width > 0) {
-            options.width = width;
+        // The same bounds the RTSP ANNOUNCE enforces: these reach the encoder, the virtual
+        // display and framerate * 100 arithmetic unchanged.
+        auto bounded = [&](const char *key, int minimum, int maximum) -> std::optional<int> {
+          const auto &field = input.at(key);
+          if (!field.is_number_integer()) {
+            throw std::invalid_argument(std::string(key) + " must be an integer");
           }
+          const auto value = field.get<std::int64_t>();
+          if (value < minimum || value > maximum) {
+            throw std::invalid_argument(std::string(key) + " must be between " + std::to_string(minimum) + " and " + std::to_string(maximum));
+          }
+          return static_cast<int>(value);
+        };
+        if (input.contains("width")) {
+          options.width = bounded("width", 16, 8192);
         }
         if (input.contains("height")) {
-          const int height = input.at("height").get<int>();
-          if (height > 0) {
-            options.height = height;
-          }
+          options.height = bounded("height", 16, 8192);
         }
         if (input.contains("fps")) {
-          const int fps = input.at("fps").get<int>();
-          if (fps > 0) {
-            options.fps = fps;
-          }
+          options.fps = bounded("fps", 10, 1000);
         }
         if (input.contains("bitrate_kbps")) {
-          options.bitrate_kbps = input.at("bitrate_kbps").get<int>();
+          options.bitrate_kbps = bounded("bitrate_kbps", 0, 500000);  // 0 keeps the configured maximum
         }
         if (input.contains("codec")) {
           options.codec = input.at("codec").get<std::string>();
@@ -3892,7 +3897,11 @@ namespace confighttp {
           options.hdr = input.at("hdr").get<bool>();
         }
         if (input.contains("audio_channels")) {
-          options.audio_channels = input.at("audio_channels").get<int>();
+          const int channels = *bounded("audio_channels", 2, 8);
+          if (channels != 2 && channels != 6 && channels != 8) {
+            throw std::invalid_argument("audio_channels must be 2, 6 or 8");
+          }
+          options.audio_channels = channels;
         }
         if (input.contains("audio_codec")) {
           options.audio_codec = input.at("audio_codec").get<std::string>();

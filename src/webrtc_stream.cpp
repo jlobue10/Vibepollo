@@ -1349,6 +1349,21 @@ namespace webrtc_stream {
       return std::nullopt;
     }
 
+    // Browser-supplied JSON integers: the value must be an integer (a double such as
+    // 1e300 converted to int is undefined behaviour, not a type_error the caller's
+    // catch would see) and inside the range the consumer can hold.
+    std::optional<std::int64_t> json_integer(const nlohmann::json &message, const char *key, std::int64_t minimum, std::int64_t maximum) {
+      const auto it = message.find(key);
+      if (it == message.end() || !it->is_number_integer()) {
+        return std::nullopt;
+      }
+      const auto value = it->get<std::int64_t>();
+      if (value < minimum || value > maximum) {
+        return std::nullopt;
+      }
+      return value;
+    }
+
     int map_mouse_button(int button) {
       switch (button) {
         case 0:
@@ -1607,7 +1622,7 @@ namespace webrtc_stream {
           input::passthrough(input_ctx, make_abs_mouse_move_packet(x, y), input_permission);
         }
 
-        int mapped_button = map_mouse_button(message.value("button", -1));
+        int mapped_button = map_mouse_button(static_cast<int>(json_integer(message, "button", 0, 255).value_or(-1)));
         if (mapped_button > 0) {
           input::passthrough(input_ctx, make_mouse_button_packet(mapped_button, type == "mouse_up"), input_permission);
         }
@@ -1641,7 +1656,7 @@ namespace webrtc_stream {
         return;
       }
       if (type == "gamepad_connect") {
-        const int controller = message.value("id", -1);
+        const int controller = static_cast<int>(json_integer(message, "id", 0, 0xFFFF).value_or(-1));
         if (controller < 0 || controller >= 16) {
           return;
         }
@@ -1649,8 +1664,8 @@ namespace webrtc_stream {
         // catches malformed JSON, so a failed message must leave no state that
         // suppresses the next valid arrival.
         const uint8_t controller_type = parse_gamepad_type(message);
-        const auto capabilities = static_cast<uint16_t>(message.value("capabilities", 0));
-        const auto supported_buttons = static_cast<uint32_t>(message.value("supportedButtons", 0));
+        const auto capabilities = static_cast<uint16_t>(json_integer(message, "capabilities", 0, 0xFFFF).value_or(0));
+        const auto supported_buttons = static_cast<uint32_t>(json_integer(message, "supportedButtons", 0, 0xFFFFFFFFLL).value_or(0));
         auto arrival = make_gamepad_arrival_packet(controller, controller_type, capabilities, supported_buttons);
         {
           std::lock_guard lg {gamepad_mutex};
@@ -1662,12 +1677,12 @@ namespace webrtc_stream {
         return;
       }
       if (type == "gamepad_state") {
-        const int controller = message.value("id", -1);
+        const int controller = static_cast<int>(json_integer(message, "id", 0, 0xFFFF).value_or(-1));
         if (controller < 0 || controller >= 16) {
           return;
         }
-        const auto active_mask = static_cast<uint16_t>(message.value("activeMask", 0));
-        const auto buttons = static_cast<uint32_t>(message.value("buttons", 0));
+        const auto active_mask = static_cast<uint16_t>(json_integer(message, "activeMask", 0, 0xFFFF).value_or(0));
+        const auto buttons = static_cast<uint32_t>(json_integer(message, "buttons", 0, 0xFFFFFFFFLL).value_or(0));
         const auto clamp_u8 = [](int value) -> uint8_t {
           return static_cast<uint8_t>(std::clamp(value, 0, 255));
         };
@@ -1697,8 +1712,8 @@ namespace webrtc_stream {
           std::lock_guard lg {gamepad_mutex};
           if (!webrtc_gamepads.test(controller)) {
             const uint8_t controller_type = parse_gamepad_type(message);
-            const auto capabilities = static_cast<uint16_t>(message.value("capabilities", 0));
-            const auto supported_buttons = static_cast<uint32_t>(message.value("supportedButtons", 0));
+            const auto capabilities = static_cast<uint16_t>(json_integer(message, "capabilities", 0, 0xFFFF).value_or(0));
+            const auto supported_buttons = static_cast<uint32_t>(json_integer(message, "supportedButtons", 0, 0xFFFFFFFFLL).value_or(0));
             auto arrival = make_gamepad_arrival_packet(controller, controller_type, capabilities, supported_buttons);
             input::passthrough(input_ctx, std::move(arrival), input_permission);
             webrtc_gamepads.set(controller);
@@ -1708,11 +1723,11 @@ namespace webrtc_stream {
         return;
       }
       if (type == "gamepad_disconnect") {
-        const int controller = message.value("id", -1);
+        const int controller = static_cast<int>(json_integer(message, "id", 0, 0xFFFF).value_or(-1));
         if (controller < 0 || controller >= 16) {
           return;
         }
-        const auto active_mask = static_cast<uint16_t>(message.value("activeMask", 0));
+        const auto active_mask = static_cast<uint16_t>(json_integer(message, "activeMask", 0, 0xFFFF).value_or(0));
         auto state = make_gamepad_state_packet(controller, active_mask, 0, 0, 0, 0, 0, 0, 0);
         {
           std::lock_guard lg {gamepad_mutex};
@@ -1722,7 +1737,7 @@ namespace webrtc_stream {
         return;
       }
       if (type == "gamepad_motion") {
-        const int controller = message.value("id", -1);
+        const int controller = static_cast<int>(json_integer(message, "id", 0, 0xFFFF).value_or(-1));
         if (controller < 0 || controller >= 16) {
           return;
         }
@@ -6340,6 +6355,13 @@ namespace webrtc_stream {
         return false;
       }
 
+      // Per-session storage is driven by the browser across requests: bound it.
+      constexpr std::size_t kMaxStoredCandidates = 1024;
+      constexpr std::size_t kMaxCandidateLength = 2048;
+      if (it->second.candidates.size() >= kMaxStoredCandidates || candidate.size() > kMaxCandidateLength || mid.size() > 256) {
+        BOOST_LOG(warning) << "WebRTC: ignoring ICE candidate for session " << id << " (storage bound reached or candidate too long)";
+        return false;
+      }
       Session::IceCandidate entry;
       entry.mid = std::move(mid);
       entry.mline_index = mline_index;

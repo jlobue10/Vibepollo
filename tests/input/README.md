@@ -129,3 +129,9 @@ code runs.
 `$(...)` scanner behind `parse_env_val`) and runs it under ASan on an exact-size heap buffer
 holding an unbalanced group: the previous loop read one element past the end before throwing.
 `--baseline` reads HEAD.
+
+`python3 tests/input/test_webrtc_option_bounds.py` is a text gate for the browser-facing WebRTC
+inputs: session options bounded like the RTSP ANNOUNCE (width/height 16..8192, fps 10..1000,
+bitrate 0..500000, audio channels 2/6/8), stored ICE candidates capped per session, and input
+message integers read through `json_integer()` rather than float-to-int conversions.
+`--baseline` reads HEAD.
