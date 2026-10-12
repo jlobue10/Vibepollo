@@ -1414,7 +1414,9 @@ namespace platf {
     std::wstring start_dir = utf_utils::from_utf8(working_dir.string());
     HANDLE job = group ? group->native_handle() : nullptr;
     STARTUPINFOEXW startup_info = create_startup_info(file, job ? &job : nullptr, ec);
-    PROCESS_INFORMATION process_info;
+    // Zeroed: the impersonation-failure path below never fills it, and the handle
+    // fail-guards in create_boost_child_from_results() read it.
+    PROCESS_INFORMATION process_info {};
 
     // Clone the environment to create a local copy. Boost.Process (bp) shares the environment with all spawned processes.
     // Since we're going to modify the 'env' variable by merging user-specific environment variables into it,
@@ -1436,6 +1438,14 @@ namespace platf {
     // Create a new console for interactive processes and use no console for non-interactive processes
     creation_flags |= interactive ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW;
 
+    // The host's own PATH is process-wide: concurrent launches (pause/resume, undo
+    // commands, helpers) used to restore each other's snapshot. One at a time, the
+    // snapshot below is taken under the lock (a snapshot taken before it could capture
+    // a sibling's temporary prefix and restore it permanently), and the lock outlives
+    // the restore guard.
+    static std::mutex host_path_mutex;
+    std::lock_guard<std::mutex> host_path_lock(host_path_mutex);
+
     // Find the PATH variable in our environment block using a case-insensitive search
     auto sunshine_wenv = bp::this_process::wenv();
     std::wstring path_var_name {L"PATH"};
@@ -1451,11 +1461,6 @@ namespace platf {
 
     // Temporarily prepend the specified working directory to PATH to ensure CreateProcess()
     // will (preferentially) find binaries that reside in the working directory.
-    // The host's own PATH is process-wide: concurrent launches (pause/resume, undo
-    // commands, helpers) used to restore each other's snapshot. One at a time, and the
-    // lock outlives the restore guard below.
-    static std::mutex host_path_mutex;
-    std::lock_guard<std::mutex> host_path_lock(host_path_mutex);
     sunshine_wenv[path_var_name].assign(start_dir + L";" + old_path_val);
 
     // Restore the old PATH value for our process when we're done here
@@ -1467,7 +1472,7 @@ namespace platf {
       }
     });
 
-    BOOL ret;
+    BOOL ret = FALSE;
     if (is_running_as_system()) {
       // Duplicate the current user's token
       HANDLE user_token = retrieve_users_token(elevated);

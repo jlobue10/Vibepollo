@@ -30,6 +30,11 @@ for ok, name in (
     ('kMaxStoredCandidates' in webrtc and 'kMaxCandidateLength' in webrtc, 'stored ICE candidates are capped per session'),
     (re.search(r'message\.value\("[A-Za-z]+", -?\d+\)', webrtc) is None, 'no browser integer is read through a float-to-int message.value()'),
     (webrtc.count('json_integer(message,') >= 8, 'input message integers go through json_integer()'),
+    ('bounded("app_id", 0,' in confighttp and 'bounded("video_pacing_slack_ms"' in confighttp and 'bounded("video_max_frame_age_ms"' in confighttp,
+     'WebRTC app_id and pacing options are integer-checked through bounded()'),
+    ('profile.size() > 64' in confighttp, 'the WebRTC profile string is capped'),
+    (webrtc.index('json_integer(message, "button"') < webrtc.index('make_abs_mouse_move_packet(x, y)', webrtc.index('if (type == "mouse_down" || type == "mouse_up")')),
+     'mouse_down/mouse_up parses the button before dispatching the absolute move'),
 ):
     print(('PASS: ' if ok else 'FAIL: ') + name)
     failures += not ok

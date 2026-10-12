@@ -18,6 +18,7 @@
 #include <format>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -3907,10 +3908,14 @@ namespace confighttp {
           options.audio_codec = input.at("audio_codec").get<std::string>();
         }
         if (input.contains("profile")) {
-          options.profile = input.at("profile").get<std::string>();
+          auto profile = input.at("profile").get<std::string>();
+          if (profile.size() > 64) {
+            throw std::invalid_argument("profile must be at most 64 bytes");
+          }
+          options.profile = std::move(profile);
         }
         if (input.contains("app_id")) {
-          options.app_id = input.at("app_id").get<int>();
+          options.app_id = *bounded("app_id", 0, std::numeric_limits<int>::max());
         }
         if (input.contains("client_uuid")) {
           if (!input.at("client_uuid").is_string()) {
@@ -3930,11 +3935,12 @@ namespace confighttp {
         if (input.contains("video_pacing_mode")) {
           options.video_pacing_mode = input.at("video_pacing_mode").get<std::string>();
         }
+        // Integer type only; the pacing builder clamps both to its own window.
         if (input.contains("video_pacing_slack_ms")) {
-          options.video_pacing_slack_ms = input.at("video_pacing_slack_ms").get<int>();
+          options.video_pacing_slack_ms = bounded("video_pacing_slack_ms", 0, 100000);
         }
         if (input.contains("video_max_frame_age_ms")) {
-          options.video_max_frame_age_ms = input.at("video_max_frame_age_ms").get<int>();
+          options.video_max_frame_age_ms = bounded("video_max_frame_age_ms", 0, 100000);
         }
 
         if (options.codec) {

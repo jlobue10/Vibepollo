@@ -94,6 +94,8 @@ jobs:
         run: python3 tests/input/test_find_match_bounds.py
       - name: Check the WebRTC option bounds and integer parsing
         run: python3 tests/input/test_webrtc_option_bounds.py
+      - name: Check the /launch request path (single IV derivation, no 403 fall-through)
+        run: python3 tests/input/test_launch_fallthrough.py
       - name: Fetch the libwebrtc C header the browser/peer-state harnesses read
         run: git submodule update --init --depth 1 third-party/libwebrtc
       - name: Check browser input context and peer-state bridge lifetimes
