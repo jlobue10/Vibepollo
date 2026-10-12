@@ -116,8 +116,9 @@
   #include "platform/windows/utils.h"
   #include "platform/windows/utf_utils.h"
 
-  // _SH constants for _wfsopen()
-  #include <share.h>
+  // CreateFileW -> CRT FILE* bridge for the per-app output log
+  #include <fcntl.h>
+  #include <io.h>
 #endif
 
 namespace proc {
@@ -2403,10 +2404,40 @@ namespace proc {
       // to UTF-16 and use the wchar_t variants for proper Unicode log file path support.
       const auto woutput = utf_utils::from_utf8(_app.output);
       const auto open_log = [&]() {
-        // Use _SH_DENYNO to allow us to open this log file again for writing even if it is
-        // still open from a previous execution. This is required to handle the case of a
-        // detached process executing again while the previous process is still running.
-        _pipe.reset(_wfsopen(woutput.c_str(), L"a", _SH_DENYNO));
+        // Open by handle so a reparse point, a device or a non-disk object cannot be
+        // substituted for the log, and never grant a pipe server impersonation rights.
+        // Full sharing keeps the file openable again while a detached process from a
+        // previous execution still holds it (what _SH_DENYNO did); OPEN_ALWAYS plus
+        // FILE_APPEND_DATA is "a".
+        HANDLE h = CreateFileW(
+          woutput.c_str(),
+          FILE_APPEND_DATA,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+          nullptr,
+          OPEN_ALWAYS,
+          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS,
+          nullptr
+        );
+        if (h == INVALID_HANDLE_VALUE) {
+          BOOST_LOG(warning) << "Could not open the app output log ["sv << _app.output << "]: "sv << GetLastError();
+          return;  // the launch continues without redirection, as before
+        }
+        BY_HANDLE_FILE_INFORMATION info {};
+        if (GetFileType(h) != FILE_TYPE_DISK || !GetFileInformationByHandle(h, &info) ||
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))) {
+          BOOST_LOG(warning) << "Refusing app output log ["sv << _app.output << "]: not a plain local file"sv;
+          CloseHandle(h);
+          return;
+        }
+        const int fd = _open_osfhandle((intptr_t) h, _O_APPEND | _O_WRONLY);
+        if (fd < 0) {
+          CloseHandle(h);
+          return;
+        }
+        _pipe.reset(_wfdopen(fd, L"a"));  // owns fd (and h) from here
+        if (!_pipe) {
+          _close(fd);
+        }
       };
       if (platf::is_running_as_system()) {
         // The same token the app itself launches with: an elevated app may log into a

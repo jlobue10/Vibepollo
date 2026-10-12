@@ -205,3 +205,16 @@ while successful writes still persist each requested edit and refresh once.
 HTTP/authentication, process refresh and unrelated metadata hooks are boundary
 fakes; Windows-only artwork/live-HDR hooks are outside this fixture.
 Both new tests support `--baseline` to read HEAD.
+
+`test_webrtc_session_cap.py` is a text gate for the WebRTC session-count cap: the
+shared RTSP launch bound, checked atomically with the registration, refused with a
+distinct error that the HTTP handler maps to 503 + Retry-After (never a teardown).
+`--baseline` reads HEAD.
+
+`test_app_output_log_path.py` is a text gate that the per-app output log is opened
+by handle (no reparse points, no impersonation grant, plain disk files only) with
+every refused handle closed. `--baseline` reads HEAD.
+
+`test_save_app_paths.py` compiles `saveApp`'s `plain_local_path` lambda against
+accept/reject vectors (UNC, device, `\\?\`, stream and NUL forms) and pins that the
+checks run before the app is migrated. `--baseline` reads HEAD.

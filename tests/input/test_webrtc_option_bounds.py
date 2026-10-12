@@ -23,9 +23,14 @@ confighttp = read('src/confighttp.cpp')
 webrtc = read('src/webrtc_stream.cpp')
 failures = 0
 for ok, name in (
-    ('bounded("width", 16, 8192)' in confighttp and 'bounded("height", 16, 8192)' in confighttp, 'WebRTC width/height are bounded 16..8192'),
-    ('bounded("fps", 10, 1000)' in confighttp, 'WebRTC fps is bounded 10..1000'),
-    ('bounded("bitrate_kbps", 0, 500000)' in confighttp, 'WebRTC bitrate is bounded 0..500000 kbps'),
+    ('bounded("width", kMinWebRtcDimension, kMaxWebRtcDimension)' in confighttp and 'bounded("height", kMinWebRtcDimension, kMaxWebRtcDimension)' in confighttp,
+     'WebRTC width/height are bounded by the advertised constants'),
+    ('bounded("fps", kMinWebRtcFps, kMaxWebRtcFps)' in confighttp, 'WebRTC fps is bounded by the advertised constants'),
+    ('bounded("bitrate_kbps", 0, kAbsoluteMaxWebRtcBitrateKbps)' in confighttp, 'WebRTC bitrate is bounded by the absolute maximum'),
+    (confighttp.count('constexpr int kMaxWebRtcDimension') == 1 and 'constexpr int kMaxWebRtcDimension = 8192;' in confighttp and 'constexpr int kMinWebRtcFps = 10;' in confighttp,
+     'one constant set, advertising what the parser enforces (64..8192 even, fps 10..1000)'),
+    ('{"min_dimension", kMinWebRtcDimension}' in confighttp and '{"min_fps", kMinWebRtcFps}' in confighttp, 'the capabilities endpoint advertises the enforced limits'),
+    (webrtc.count('json_finite_number(message, "x")') >= 1 and webrtc.count('json_finite_number(message, "y")') >= 1, 'mouse_move coordinates are finite numbers'),
     ('channels != 2 && channels != 6 && channels != 8' in confighttp, 'WebRTC audio channels are 2, 6 or 8'),
     ('kMaxStoredCandidates' in webrtc and 'kMaxCandidateLength' in webrtc, 'stored ICE candidates are capped per session'),
     (re.search(r'message\.value\("[A-Za-z]+", -?\d+\)', webrtc) is None, 'no browser integer is read through a float-to-int message.value()'),

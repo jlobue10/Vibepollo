@@ -37,4 +37,13 @@ for handler in ('void reorderApps(', 'void saveApp(', 'void deleteApp('):
     ok = writes == 0 or ('apps_file_mutex()' in body and body.index('apps_file_mutex()') < body.index('read_file(config::stream.file_apps'))
     print(('PASS: ' if ok else 'FAIL: ') + handler + ' holds apps_file_mutex() across its read-modify-write of apps.json')
     failures += not ok
+
+delete = block(confighttp, 'void deleteApp(')
+ok = delete.index('playnite_fullscreen_entry_enabled') > delete.index('write_file(config::stream.file_apps')
+print(('PASS: ' if ok else 'FAIL: ') + 'deleteApp changes the Playnite fullscreen flag only after the catalogue write succeeded')
+failures += not ok
+purge = block(confighttp, 'void purgeAutoSyncedApps(')
+ok = 'if (!confighttp::refresh_client_apps_cache(file_tree))' in purge and purge.index('app_persistence_error(') > purge.index('refresh_client_apps_cache(')
+print(('PASS: ' if ok else 'FAIL: ') + 'purgeAutoSyncedApps reports a failed catalogue write instead of success')
+failures += not ok
 sys.exit(1 if failures else 0)

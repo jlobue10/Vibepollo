@@ -1639,8 +1639,8 @@ namespace webrtc_stream {
       auto &webrtc_gamepads = input_state->gamepads;
 
       if (type == "mouse_move") {
-        const double x = message.value("x", 0.0);
-        const double y = message.value("y", 0.0);
+        const double x = json_finite_number(message, "x");
+        const double y = json_finite_number(message, "y");
         input::passthrough(input_ctx, make_abs_mouse_move_packet(x, y), input_permission);
         return;
       }
@@ -5674,8 +5674,16 @@ namespace webrtc_stream {
     return start_webrtc_capture(options);
   }
 
-  std::optional<SessionState> create_session(const SessionOptions &options) {
+  // At most this many registered web sessions: one shared capture, at most
+  // max_clients identities, times two for a reconnect window (the same bound the RTSP
+  // launch registry and the pending queue apply). Refused, never evicted.
+  constexpr std::size_t kMaxWebRtcSessions = remote_session::max_client_vdds * 2;
+
+  std::optional<SessionState> create_session(const SessionOptions &options, create_error_e *create_error) {
     BOOST_LOG(debug) << "WebRTC: create_session enter";
+    if (create_error) {
+      *create_error = create_error_e::shutdown;
+    }
     auto reservation_guard = util::fail_guard([]() {
       cancel_pending_webrtc_session_creation();
     });
@@ -5740,6 +5748,13 @@ namespace webrtc_stream {
       }
       {
         std::lock_guard lg {session_mutex};
+        if (sessions.size() >= kMaxWebRtcSessions) {
+          BOOST_LOG(warning) << "WebRTC: refusing session, " << sessions.size() << " already registered (limit " << kMaxWebRtcSessions << ')';
+          if (create_error) {
+            *create_error = create_error_e::limit;
+          }
+          return std::nullopt;  // reservation_guard releases the capture reservation
+        }
         {
           std::lock_guard input_lock {input_mutex};
           browser_inputs.emplace(snapshot.id, nullptr);

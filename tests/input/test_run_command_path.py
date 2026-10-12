@@ -50,6 +50,8 @@ check(run_command.count('program.empty() ? nullptr : program.c_str()') == 2,
 resolver = function(misc, '  static std::wstring resolve_program_path(')
 check('GetSystemDirectoryW(' in resolver and 'GetWindowsDirectoryW(' in resolver and resolver.index('GetSystemDirectoryW(') < resolver.index('SearchPathW('),
       'the resolver composes the Windows directories ahead of the working directory before searching')
+check('WindowsPowerShell' in resolver and 'wbem' in resolver and 'system_dirs_known' in resolver,
+      'the first pass covers the PowerShell and WMI directories and fails closed when a lookup fails')
 check(run_command.count('prepend_child_path(cloned_env, start_dir)') == 2 and
       run_command.index('prepend_child_path(cloned_env, start_dir)') > run_command.index('merge_user_environment_block(cloned_env, user_token)'),
       'the working directory is prepended to the child PATH after the user block is merged')
@@ -70,7 +72,8 @@ static std::vector<std::wstring> lookups;
 #include <cwchar>
 typedef unsigned int UINT;
 #define MAX_PATH 260
-static UINT GetSystemDirectoryW(wchar_t *buf, UINT n) { const wchar_t *d = L"C:\\Windows\\System32"; std::wcsncpy(buf, d, n); return (UINT) std::wcslen(d); }
+static bool system_dir_fails = false;
+static UINT GetSystemDirectoryW(wchar_t *buf, UINT n) { if (system_dir_fails) return 0; const wchar_t *d = L"C:\\Windows\\System32"; std::wcsncpy(buf, d, n); return (UINT) std::wcslen(d); }
 static UINT GetWindowsDirectoryW(wchar_t *buf, UINT n) { const wchar_t *d = L"C:\\Windows"; std::wcsncpy(buf, d, n); return (UINT) std::wcslen(d); }
 static DWORD SearchPathW(const wchar_t *path, const wchar_t *name, const wchar_t *ext, DWORD n, wchar_t *buf, wchar_t **part) {
   (void)ext; (void)part;
@@ -110,7 +113,7 @@ int main() {
   int failures = 0;
   auto check = [&](bool ok, const char *name) { std::cout << (ok ? "PASS: " : "FAIL: ") << name << '\n'; failures += !ok; };
   const std::wstring dir = L"C:\\Games\\Foo";
-  const std::wstring first = L"C:\\Windows\\System32;C:\\Windows;C:\\Games\\Foo";
+  const std::wstring first = L"C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0;C:\\Windows\\System32\\wbem;C:\\Windows;C:\\Games\\Foo";
   // The scripted SearchPathW answers the composed first pass the way the loader would: the
   // first directory of the list that holds the name wins.
   hits[first + L"|game.exe"] = L"C:\\Games\\Foo\\game.exe";
@@ -119,8 +122,11 @@ int main() {
   check(resolve_program_path(L"game.exe --fullscreen", dir) == L"C:\\Games\\Foo\\game.exe", "a bare program beside the launch target is found");
   check(resolve_program_path(L"\"game.exe\" --fullscreen", dir) == L"C:\\Games\\Foo\\game.exe", "a quoted bare program resolves the same way");
   lookups.clear();
-  check(resolve_program_path(L"cmd.exe /c start \"\" \"C:\\x\\y.lnk\"", dir) == L"C:\\Windows\\System32\\cmd.exe" && lookups.size() == 1 && lookups[0].rfind(L"C:\\Windows\\System32;C:\\Windows;", 0) == 0,
+  check(resolve_program_path(L"cmd.exe /c start \"\" \"C:\\x\\y.lnk\"", dir) == L"C:\\Windows\\System32\\cmd.exe" && lookups.size() == 1 && lookups[0].rfind(L"C:\\Windows\\System32;", 0) == 0,
         "the Windows directories are searched before the working directory (a game-folder cmd.exe cannot shadow the system one)");
+  hits[first + L"|powershell.exe"] = L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+  check(resolve_program_path(L"powershell.exe -File x.ps1", dir) == L"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "powershell.exe resolves from its System32 subdirectory ahead of the working directory");
   lookups.clear();
   check(resolve_program_path(L"tool arg", dir) == L"C:\\Tools\\tool.exe" && lookups.size() == 2 && lookups[0] == first + L"|tool" && lookups[1] == L"<null>|tool",
         "a program missing from the first pass falls back to the host search order");
@@ -131,9 +137,17 @@ int main() {
   check(resolve_program_path(L"", dir).empty(), "an empty command line resolves nothing");
   lookups.clear();
   hits[L"<null>|game.exe"] = L"C:\\Elsewhere\\game.exe";
-  hits[L"C:\\Windows\\System32;C:\\Windows|game.exe"] = L"";
-  check(resolve_program_path(L"game.exe", L"") == L"C:\\Elsewhere\\game.exe" && lookups.size() == 2 && lookups[0] == L"C:\\Windows\\System32;C:\\Windows|game.exe",
+  check(resolve_program_path(L"game.exe", L"") == L"C:\\Elsewhere\\game.exe" && lookups.size() == 2 && lookups[0] == L"C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0;C:\\Windows\\System32\\wbem;C:\\Windows|game.exe",
         "without a working directory the first pass is the Windows directories alone (no empty list element)");
+  // A failed system-directory lookup must not put the working directory ahead of the host order.
+  system_dir_fails = true; lookups.clear();
+  hits[L"C:\\Games\\Foo|game.exe"] = L"C:\\Games\\Foo\\game.exe";
+  check(resolve_program_path(L"game.exe", dir) == L"C:\\Elsewhere\\game.exe" && lookups.size() >= 2 && lookups[0].find(L"Games") == std::wstring::npos && lookups[1] == L"<null>|game.exe",
+        "when the system directories are unknown the host order is searched before the working directory");
+  hits.erase(L"<null>|game.exe"); lookups.clear();
+  check(resolve_program_path(L"game.exe", dir) == L"C:\\Games\\Foo\\game.exe" && lookups.back() == L"C:\\Games\\Foo|game.exe",
+        "when the system directories are unknown the working directory is searched last, on its own");
+  system_dir_fails = false;
   bp::environment env; env.items = {{"Path", "C:\\Windows"}, {"OTHER", "1"}};
   prepend_child_path(env, dir);
   check(env.items.size() == 2 && env.items[0].name == "Path" && env.items[0].value == "C:\\Windows;C:\\Games\\Foo", "the child PATH ends with the working directory (existing key kept, system entries stay ahead)");

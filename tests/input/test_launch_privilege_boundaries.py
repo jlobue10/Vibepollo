@@ -57,10 +57,10 @@ process = read('src/process.cpp')
 execute = block(process, 'int proc_t::execute(')
 launch = block(process, 'int proc_t::launch_app_commands(')
 check('_wfsopen(' not in execute and 'fopen(' not in execute, 'execute() no longer opens the output log as SYSTEM before the user-session gate')
-check(launch.count('_wfsopen(') == 1 and launch.index('_wfsopen(') < launch.index('auto fg = util::fail_guard'),
+check(launch.count('CreateFileW(') == 1 and launch.index('CreateFileW(') < launch.index('auto fg = util::fail_guard'),
       'launch_app_commands() opens the output log once at its top')
 open_log = block(launch, 'const auto open_log = [&]()')
-check('_wfsopen(' in open_log and 'platf::impersonate_current_user(log_token, open_log)' in launch and 'retrieve_users_token(_app.elevated)' in launch,
+check('CreateFileW(' in open_log and 'platf::impersonate_current_user(log_token, open_log)' in launch and 'retrieve_users_token(_app.elevated)' in launch,
       'the output log is opened under the token the app launches with (elevated for elevated apps)')
 check('if (!_pipe && !_app.output.empty()' in launch, 'a re-entered launch keeps the open handle')
 
