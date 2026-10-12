@@ -21,7 +21,7 @@ prefix = r'''
 #include <vector>
 using namespace std::literals;
 #define BOOST_LOG(level) std::clog
-enum class encode_run_result_e { initialization_failed, temporarily_busy, ok };
+enum class encode_run_result_e { initialization_failed, temporarily_busy, runtime_failed, ok };
 int amdvce_experimental = 1, amdvce_ffmpeg = 2, nvenc = 3, software = 4;
 struct { bool is_quarantined() { return false; } } native_amf_lifecycle_gate;
 std::vector<int> delays;
@@ -53,6 +53,16 @@ int main() {
                    R::initialization_failed, R::ok});
     check(attempts == 5 && delays == std::vector<int>({100, 100, 200}),
           "a successful encode resets the failure budget");
+    // A mid-stream convert/encode failure shares the budget: it backs off and ends after
+    // three attempts instead of rebuilding the encoder in a tight loop.
+    attempts = 0; delays.clear();
+    run(software, {R::runtime_failed, R::runtime_failed, R::runtime_failed, R::runtime_failed});
+    check(attempts == 3 && delays == std::vector<int>({100, 200}),
+          "persistent mid-stream failure backs off and ends after three attempts");
+    attempts = 0; delays.clear();
+    run(software, {R::runtime_failed, R::ok, R::initialization_failed, R::runtime_failed, R::ok});
+    check(attempts == 5 && delays == std::vector<int>({100, 100, 200}),
+          "mid-stream and initialization failures share one budget that a good run resets");
     return failures != 0;
 }
 '''
