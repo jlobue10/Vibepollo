@@ -31,11 +31,11 @@ $manifestPayload = @(
 )
 $localTestCertificate = 'driver/VibeshineVhfGamepad.cer'
 $expectedProducerRepository = 'jlobue10/libvirtualgamepad'
-$expectedProducerTag = 'v0.1.0-beta.144'
-$expectedProducerAsset = 'libvirtualgamepad-0.1.0-beta.144-windows-x64.zip'
-$expectedProducerArchiveSha256 = '27b34a9b5001d3997b2d5d6d40d6d1932962ed80ae14dbb1f4d574a53b3a7381'
-$expectedProducerSourceRevision = 'ad01241abee94e84074e7763c6b46ba23b13ff2f'
-$expectedDriverVer = '10/12/2026,0.1.0.192'
+$expectedProducerTag = 'v0.1.0-beta.145'
+$expectedProducerAsset = 'libvirtualgamepad-0.1.0-beta.145-windows-x64.zip'
+$expectedProducerArchiveSha256 = 'db9fc542078a4bcae446ae33a114c64ebda8283f2544a232dbedbd113de5561a'
+$expectedProducerSourceRevision = 'e789c6df59e6ea5ca940ce4b419130d3a1c9b3a1'
+$expectedDriverVer = '10/12/2026,0.1.0.194'
 $expectedProtocolVersion = 2
 $expectedSignPathFoundationSignerSubject = 'CN=SignPath Foundation, O=SignPath Foundation, L=Lewes, S=Delaware, C=US'
 
