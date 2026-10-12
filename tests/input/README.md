@@ -158,3 +158,8 @@ cipher/IV is derived once inside the paired-client block (a second unconditional
 a launch naming no app returns instead of being overwritten by the 200 that starts
 a raw desktop stream, and a first-frame convert failure is a runtime failure for
 every encoder. `--baseline` reads HEAD.
+
+`test_playnite_ipc_hardening.py` is a text gate for the Playnite IPC boundary: a
+parse failure mid-message resets the message instead of returning a partial
+catalogue snapshot with its type set, and the named pipe is created as the first
+instance only and rejects remote clients. `--baseline` reads HEAD.
