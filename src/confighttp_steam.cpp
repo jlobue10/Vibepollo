@@ -49,6 +49,32 @@ namespace confighttp {
       out["launch_uri"] = platf::steam::launch_uri(game.app_id);
       return out;
     }
+
+    bool launch_steam_app(std::uint32_t app_id) {
+#ifdef _WIN32
+      // Through run_command, as the app catalog launches: the opener runs as the
+      // interactive user when the host is a service (ShellExecuteW used to start
+      // Steam as SYSTEM in session 0 when it was not running), cmd.exe is resolved
+      // system-first and nothing is inherited (no log is attached). Success means
+      // the opener was created, as open_url reports it.
+      const auto command = platf::steam::launch_command(app_id);
+      if (command.empty()) {
+        return false;
+      }
+      platf::bp::environment env = platf::bp::this_process::env();
+      auto working_dir = boost::filesystem::path();
+      std::error_code ec;
+      auto child = platf::run_command(false, false, command, working_dir, env, nullptr, ec, nullptr);
+      if (ec) {
+        BOOST_LOG(warning) << "Steam launch failed for app "sv << app_id << ": "sv << ec.message();
+        return false;
+      }
+      child.detach();
+      return true;
+#else
+      return platf::steam::launch(app_id);
+#endif
+    }
   }  // namespace
 
   void getSteamStatus(resp_https_t response, req_https_t request) {
@@ -200,7 +226,7 @@ namespace confighttp {
       const auto installed = std::find_if(launchable.begin(), launchable.end(), [requested_id](const auto &game) {
         return game.app_id == requested_id;
       });
-      if (installed == launchable.end() || !platf::steam::launch(requested_id)) {
+      if (installed == launchable.end() || !launch_steam_app(requested_id)) {
         bad_request(response, request, "Steam app ID is not installed, is excluded, or Steam launch failed");
         return;
       }
