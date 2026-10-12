@@ -38,6 +38,11 @@ for handler in ('void reorderApps(', 'void saveApp(', 'void deleteApp('):
     print(('PASS: ' if ok else 'FAIL: ') + handler + ' holds apps_file_mutex() across its read-modify-write of apps.json')
     failures += not ok
 
+save = block(confighttp, 'void saveApp(')
+ok = ('std::unique_lock apps_lock {apps_file_mutex()}' in save and 'apps_lock.unlock()' in save and
+      save.index('refresh_client_apps_cache(') < save.index('apps_lock.unlock()') < save.index('update_active_app_live_rtx_hdr_overrides('))
+print(('PASS: ' if ok else 'FAIL: ') + 'saveApp releases apps_file_mutex before the live RTX HDR hook can reload the configuration')
+failures += not ok
 delete = block(confighttp, 'void deleteApp(')
 ok = delete.index('playnite_fullscreen_entry_enabled') > delete.index('write_file(config::stream.file_apps')
 print(('PASS: ' if ok else 'FAIL: ') + 'deleteApp changes the Playnite fullscreen flag only after the catalogue write succeeded')

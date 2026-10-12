@@ -97,13 +97,38 @@ int main() {
     const auto vars=config::parse_config(std::string("option = ")+value);
     check(vars.at("option")==value,"legacy and EOF list boundary remains valid");
   }
+  // H31-02: an unterminated list or an unmatched quote inside one keeps its first line and
+  // never swallows the options written after it.
+  for(const auto &bad:{"[\"PC", "[Jon's \"rig", "[", "[{\"do\":\"x\"}"}) {
+    const auto vars=config::parse_config(std::string("sunshine_name = ")+bad+"\nport = 47989\nencoder = software\n");
+    check(vars.count("port") && vars.at("port")=="47989" && vars.count("encoder") && vars.at("sunshine_name")==bad,
+          std::string("an unterminated list value is truncated to its first line: ")+bad);
+  }
+  {
+    const auto vars=config::parse_config("option = [\n  {\"do\":\"x\"} # a \"quote\n]\nport = 47989\n");
+    check(vars.count("port"),"an inline comment with an odd quote inside a list does not swallow later options");
+  }
+  // H31-04: list_string_f splits nested lists at their separators and survives an unterminated inner list.
+  {
+    std::unordered_map<std::string,std::string> vars{{"nested","[[1,2],[3,4]]"},{"flat","[a, b]"},{"open","[[1,2"}};
+    std::vector<std::string> items;
+    config::list_string_f(vars,"nested",items);
+    check(items.size()==2 && items[0]=="[1,2]" && items[1]=="[3,4]","a nested list splits into its elements");
+    config::list_string_f(vars,"flat",items);
+    check(items.size()==2 && items[0]=="a" && items[1]=="b","a flat list splits into its elements");
+    config::list_string_f(vars,"open",items);
+    check(items.size()==1 && items[0]=="[1,2","an unterminated inner list ends at the end of the string");
+  }
   std::cout<<checks<<" checks; "<<failures<<" failures\n";
   return failures!=0;
 }
 '''
 code = code.replace('@@PARSER@@', source[source.index('  bool endline(char ch)'):source.index('  void string_f(')])
 code = code.replace('@@READERS@@', '\n'.join(block(marker) for marker in [
-    '  void string_f(', '  void list_prep_cmd_f(', '  void list_server_cmd_f(']))
+    '  void string_f(', '  void list_string_f(', '  void list_prep_cmd_f(', '  void list_server_cmd_f(']))
+if 'std::pair<It, bool> skip_list(' not in source:
+    print('FAIL the list scanner must report whether the list closed (H31-02)')
+    raise SystemExit(1)
 with tempfile.TemporaryDirectory() as temp:
     work = Path(temp)
     (work / 'test.cpp').write_text(code)
