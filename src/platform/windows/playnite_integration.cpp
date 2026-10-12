@@ -2155,8 +2155,8 @@ namespace platf::playnite {
             BOOST_LOG(info) << "Playnite installer: deployed plugin to " << destDir.string();
           }
         } catch (...) {
-          // impersonate_current_user() has no handler of its own: an exception here
-          // would skip RevertToSelf.
+          // Translate deployment exceptions into the installer result. The
+          // impersonation helper restores the thread token on every exit.
           deployed = false;
           error_out = "Plugin deployment threw while impersonating the user.";
         }

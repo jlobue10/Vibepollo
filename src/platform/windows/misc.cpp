@@ -940,18 +940,20 @@ namespace platf {
       return ec;
     }
 
-    // Execute the callback function while impersonating the user
-    callback();
-
     // End impersonation of the logged on user. If this fails (which is extremely unlikely),
     // we will be running with an unknown user token. The only safe thing to do in that case
-    // is terminate ourselves.
-    if (!RevertToSelf()) {
-      auto winerror = GetLastError();
-      // Log the failure of reverting to self and its error code
-      BOOST_LOG(fatal) << "Failed to revert to self after impersonation: "sv << winerror;
-      DebugBreak();
-    }
+    // is terminate ourselves. Restore on exception exits too: callers may catch and reuse
+    // this worker thread after a launch or display callback throws.
+    auto revert_guard = util::fail_guard([]() {
+      if (!RevertToSelf()) {
+        auto winerror = GetLastError();
+        BOOST_LOG(fatal) << "Failed to revert to self after impersonation: "sv << winerror;
+        DebugBreak();
+      }
+    });
+
+    // Execute the callback function while impersonating the user
+    callback();
 
     return ec;
   }

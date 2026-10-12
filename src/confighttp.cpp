@@ -272,7 +272,10 @@ namespace confighttp {
       if (sort_by_name) {
         sort_apps_by_name(file_tree);
       }
-      file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
+      if (file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4)) != 0) {
+        BOOST_LOG(warning) << "refresh_client_apps_cache: failed to persist the apps file";
+        return false;
+      }
       proc::refresh(config::stream.file_apps, false);
       return true;
     } catch (const std::exception &e) {
@@ -1402,6 +1405,19 @@ namespace confighttp {
     response->write(client_error_bad_request, error.dump(), headers);
   }
 
+  void app_persistence_error(resp_https_t response) {
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json; charset=utf-8");
+    headers.emplace("X-Frame-Options", "DENY");
+    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_cors_headers(headers);
+    nlohmann::json error = {
+      {"status", false},
+      {"error", "Could not save or reload the application catalog. Check the host logs and storage permissions."},
+    };
+    response->write(SimpleWeb::StatusCode::server_error_internal_server_error, error.dump(), headers);
+  }
+
   constexpr auto CSRF_TOKEN_SIZE = 32;
   constexpr auto CSRF_TOKEN_LIFETIME = std::chrono::hours(1);
   constexpr std::size_t CSRF_TOKEN_CAPACITY = 4096;
@@ -2170,7 +2186,10 @@ namespace confighttp {
       }
 
       // Update apps file and refresh client cache
-      confighttp::refresh_client_apps_cache(file_tree);
+      if (!confighttp::refresh_client_apps_cache(file_tree)) {
+        app_persistence_error(response);
+        return;
+      }
 #ifdef _WIN32
       const auto edited_uuid = input_tree.value("uuid", ""s);
       if (!edited_uuid.empty()) {
@@ -2504,7 +2523,10 @@ namespace confighttp {
       fileTree["apps"] = reordered_apps_list;
 
       // Write the modified fileTree back to the apps configuration file.
-      file_handler::write_file(config::stream.file_apps.c_str(), fileTree.dump(4));
+      if (file_handler::write_file(config::stream.file_apps.c_str(), fileTree.dump(4)) != 0) {
+        app_persistence_error(response);
+        return;
+      }
 
       // Notify relevant parts of the system that the apps configuration has changed.
       proc::refresh(config::stream.file_apps, false);
@@ -2682,7 +2704,10 @@ namespace confighttp {
       }
 
       file_tree["apps"] = new_apps;
-      file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
+      if (file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4)) != 0) {
+        app_persistence_error(response);
+        return;
+      }
       proc::refresh(config::stream.file_apps, false);
 
       nlohmann::json output_tree;

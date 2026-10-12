@@ -181,12 +181,27 @@ the socket class from HEAD.
 
 `test_run_command_path.py` compiles the production program resolver and
 child-PATH helper from `run_command()` against a scripted `SearchPathW`: the
-working directory is searched first, then the host order; qualified paths and
+Windows directories precede the working directory, then the host order is tried;
+qualified paths and
 unknown programs fall back to CreateProcess's own lookup; only the child's PATH
-gets the working-directory prefix. It also pins that `run_command()` no longer
+gets the working-directory suffix. It also pins that `run_command()` no longer
 edits the host PATH. `--baseline` reads HEAD.
 
 `test_apps_file_mutex.py` is a text gate that every web handler rewriting
 `apps.json` (reorder, save, delete) holds `apps_file_mutex()` across its whole
 read-modify-write, so a concurrent save or catalogue sync is never lost.
 `--baseline` reads HEAD.
+
+`test_impersonation_cleanup.py` compiles the production impersonation helper and
+`FailGuard` with scripted Win32 token calls. Normal completion and every C++
+exception exit restore the token; failed impersonation does not invoke the
+callback. The original exception and existing fatal revert path are preserved.
+
+`test_app_persistence_failure.py` compiles the production save/reorder/delete
+handlers, cache helper and `file_handler_core.cpp` with real JSON parsing. A
+scripted filesystem fails either the temporary write or atomic replacement.
+The handlers must report HTTP 500 without refreshing the unchanged catalog,
+while successful writes still persist each requested edit and refresh once.
+HTTP/authentication, process refresh and unrelated metadata hooks are boundary
+fakes; Windows-only artwork/live-HDR hooks are outside this fixture.
+Both new tests support `--baseline` to read HEAD.
