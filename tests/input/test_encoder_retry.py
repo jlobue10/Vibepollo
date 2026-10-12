@@ -26,6 +26,8 @@ using namespace std::literals;
 ENUM_DEFINITION
 int amdvce_experimental = 1, amdvce_ffmpeg = 2, nvenc = 3, software = 4;
 struct { bool is_quarantined() { return false; } } native_amf_lifecycle_gate;
+// Upstream's per-stream AMD initialization fallback is declared next to the retry counters.
+namespace amf::lifecycle { struct initialization_fallback_t {}; }
 std::vector<int> delays;
 void record_delay(std::chrono::milliseconds d) { delays.push_back(d.count()); }
 int attempts;

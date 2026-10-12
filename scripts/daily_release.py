@@ -8,9 +8,10 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import shutil
 
 
-def identity(commit, day, base):
+def identity(commit, day, base, revision=None):
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("Expected an exact source commit SHA")
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", base):
@@ -20,10 +21,13 @@ def identity(commit, day, base):
         raise ValueError("Source version base exceeds MSI limits or is zero")
     if not 2000 <= day.year <= 2099:
         raise ValueError("Daily version year must fit the installer version scheme")
+    if revision is not None and (not isinstance(revision, int) or not 1 <= revision <= 999):
+        raise ValueError("Nightly revision must be in 1..999")
+    suffix = "" if revision is None else f".{revision}"
     return {
         "commit": commit,
-        "tag": f"daily-{day.isoformat()}",
-        "version": f"{base}-daily.d{day:%Y%m%d}+{commit[:12]}",
+        "tag": f"{base}-daily.d{day:%Y%m%d}{suffix}",
+        "version": f"{base}-daily.d{day:%Y%m%d}{suffix}+{commit[:12]}",
     }
 
 
@@ -101,25 +105,42 @@ def resolve():
     # with a different workflow tree and then discover that during publication.
     run("git", "diff", "--exit-code", os.environ["GITHUB_SHA"], commit, "--", ".github/workflows")
     tags = run("git", "tag", "--merged", commit, "--sort=-version:refname", "--list", "[0-9]*.[0-9]*.[0-9]*").splitlines()
-    source_tags = [tag for tag in tags if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.-][0-9A-Za-z.-]+)?", tag)]
-    if not source_tags:
-        raise ValueError("Source has no merged v-less version tag; choose its release version scheme before activation")
-    base = re.match(r"[0-9]+\.[0-9]+\.[0-9]+", source_tags[0])[0]
-    info = identity(commit, dt.datetime.now(dt.timezone.utc).date(), base)
-    existing = run("git", "ls-remote", "--tags", "origin", f"refs/tags/{info['tag']}")
-    if existing or any(r["tag_name"] == info["tag"] for page in releases for r in page):
-        raise ValueError("Today's daily identity already exists; never overwrite or move it")
+    stable_tags = [tag for tag in tags if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-stable\.[0-9]+)?", tag)]
+    if not stable_tags:
+        raise ValueError("Source has no merged stable release anchor")
+    stable = max((tuple(map(int, re.match(r"[0-9]+\.[0-9]+\.[0-9]+", tag)[0].split("."))) for tag in stable_tags))
+    major, minor, patch = stable
+    # A nightly is development AFTER the released patch and BEFORE its successor.
+    # Do not change SemVer precedence to place an old nightly above its final stable.
+    base = f"{major}.{minor}.{patch + 1}"
+    day = dt.datetime.now(dt.timezone.utc).date()
+    prefix = f"daily-{day.isoformat()}"
+    reserved = run("git", "ls-remote", "--tags", "origin", f"refs/tags/{prefix}*", f"refs/tags/*-daily.d{day:%Y%m%d}*")
+    names = [line.split()[-1].removeprefix("refs/tags/") for line in reserved.splitlines()]
+    names += [r["tag_name"] for page in releases for r in page]
+    revisions = []
+    for name in names:
+        legacy = re.fullmatch(re.escape(prefix) + r"(?:\.([1-9][0-9]{0,2}))?", name)
+        semver = re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-daily\.d" + f"{day:%Y%m%d}" + r"(?:\.([1-9][0-9]{0,2}))?", name)
+        match = legacy or semver
+        if match:
+            revisions.append(int(match[1]) if match[1] else 1)
+    info = identity(commit, day, base, max(revisions, default=0) + 1)
     info["should_build"] = "true"
     emit_outputs(info)
 
 
 def verify_assets(root, product, commit, tag, version):
     root = Path(root)
-    expected = {f"{product}.msi", f"{product}Setup.exe", "release-provenance.json"}
+    expected = {f"{product}Setup.exe", "release-provenance.json"}
     actual = {p.name for p in root.iterdir()}
     if actual != expected or any(not p.is_file() or p.is_symlink() or p.stat().st_size == 0 for p in root.iterdir()):
         raise ValueError(f"Expected exactly the finalized nonempty assets {sorted(expected)}; got {sorted(actual)}")
-    info = identity(commit, dt.date.fromisoformat(tag.removeprefix("daily-")), version.split("-")[0])
+    match = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)-daily\.d([0-9]{8})(?:\.([1-9][0-9]{0,2}))?", tag)
+    if not match:
+        raise ValueError("New releases require a SemVer nightly tag")
+    info = identity(commit, dt.datetime.strptime(match[2], "%Y%m%d").date(), match[1],
+                    int(match[3]) if match[3] else None)
     if info["tag"] != tag or info["version"] != version:
         raise ValueError("Release tag/version/source identity is incoherent")
     provenance = json.loads((root / "release-provenance.json").read_text(encoding="utf-8-sig"))
@@ -129,6 +150,10 @@ def verify_assets(root, product, commit, tag, version):
         raise ValueError("Artifacts must come from this successful daily build")
     if set(provenance.get("assets", {})) != {f"{product}Setup.exe"}:
         raise ValueError("Unexpected finalized artifact provenance assets")
+    embedded = provenance.get("embedded_msi", {})
+    if (embedded.get("verified") is not True or
+            not re.fullmatch(r"[0-9a-f]{64}", embedded.get("sha256", ""))):
+        raise ValueError("Finalized setup must contain the exact qualified internal MSI")
     hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.iterdir()}
     if hashes[f"{product}Setup.exe"] != provenance["assets"][f"{product}Setup.exe"]:
         raise ValueError("Finalized installer checksum mismatch")
@@ -142,13 +167,39 @@ def verify_assets(root, product, commit, tag, version):
     (root / "SHA256SUMS").write_text("".join(f"{digest}  {name}\n" for name, digest in sorted(hashes.items())), encoding="utf-8")
 
 
+def include_linux(root, linux_root, product, commit, version):
+    root, linux_root = Path(root), Path(linux_root)
+    packages = list(linux_root.glob(product.lower() + '-*.pkg.tar.zst'))
+    if len(packages) != 1 or any(not p.is_file() or p.is_symlink() or p.stat().st_size == 0 for p in packages):
+        raise ValueError('Expected one nonempty installable Linux package')
+    provenance = json.loads((linux_root / 'linux-provenance.json').read_text(encoding='utf-8'))
+    if (provenance.get('source_commit') != commit or provenance.get('version') != version
+            or str(provenance.get('workflow_run_id')) != os.environ['GITHUB_RUN_ID']):
+        raise ValueError('Linux provenance must match the qualified daily source/version/run')
+    package = packages[0]
+    digest = hashlib.sha256(package.read_bytes()).hexdigest()
+    if provenance.get('assets') != {package.name: digest}:
+        raise ValueError('Linux package checksum mismatch')
+    shutil.copyfile(package, root / package.name)
+    # Consolidate Linux evidence into the existing manifest instead of exposing
+    # an extra internal build recipe or another provenance download.
+    manifest_path = root / 'daily-manifest.json'
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    manifest['assets'][package.name] = digest
+    manifest['linux'] = provenance
+    manifest_path.write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["resolve", "verify"])
+    parser.add_argument("command", choices=["resolve", "verify", "linux"])
     parser.add_argument("--assets")
+    parser.add_argument("--linux-assets")
     parser.add_argument("--product", choices=["Vibeshine", "Vibepollo"])
     args = parser.parse_args()
     if args.command == "resolve":
         resolve()
-    else:
+    elif args.command == 'verify':
         verify_assets(args.assets, args.product, os.environ["DAILY_COMMIT"], os.environ["DAILY_TAG"], os.environ["DAILY_VERSION"])
+    else:
+        include_linux(args.assets, args.linux_assets, args.product, os.environ['DAILY_COMMIT'], os.environ['DAILY_VERSION'])
