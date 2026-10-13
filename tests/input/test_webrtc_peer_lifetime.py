@@ -65,6 +65,7 @@ std::atomic_int remote_descriptions=0,ice_before_remote=0;
 std::vector<std::function<void()>> pending;
 bool synchronous=false,cross_thread=false,create_fails=false,attach_fails=false,constraints_fail=false;
 std::string fail_stage;
+std::string answer_sdp="sdp";
 std::string pause_at;
 std::promise<void> native_entered,native_release,teardown_entered;
 bool signal_teardown=false;
@@ -90,7 +91,8 @@ void lwrtc_peer_set_remote_description(lwrtc_peer_t *peer,const char *,const cha
   native_entry("offer",peer);dispatch([=]{if(fail_stage=="offer")err(user,"offer failure");else{++remote_descriptions;ok(user);}});
 }
 void lwrtc_peer_create_answer(lwrtc_peer_t *peer,lwrtc_sdp_cb ok,lwrtc_err_cb err,lwrtc_constraints_t *,void *user) {
-  native_entry("answer",peer);++answer_calls;dispatch([=]{if(fail_stage=="answer")err(user,"answer failure");else ok(user,"sdp","answer");});
+  native_entry("answer",peer);++answer_calls;auto sdp=answer_sdp;
+  dispatch([=]{if(fail_stage=="answer")err(user,"answer failure");else ok(user,sdp.c_str(),"answer");});
 }
 void lwrtc_peer_set_local_description(lwrtc_peer_t *peer,const char *,const char *,lwrtc_ok_cb ok,lwrtc_err_cb err,void *user) {
   native_entry("local",peer);++local_calls;dispatch([=]{if(fail_stage=="local")err(user,"local failure");else ok(user);});
@@ -190,6 +192,23 @@ int main(int argc,char **argv) {
     check(close_session("session"),"session closes");
     check(!candidate() && !offer(),"deleted session rejects signaling");
     check(!close_session("session"),"duplicate close harmless");
+  } else if(mode=="repeat-offer" || mode.rfind("repeat-error-",0)==0) {
+    check(offer(),"first offer accepted");drain();
+    std::string sdp,type;
+    check(get_local_answer("session",sdp,type)&&sdp=="sdp","first answer can be polled");
+    answer_sdp="replacement-sdp";
+    if(mode.rfind("repeat-error-",0)==0)fail_stage=mode.substr(13);
+    check(offer(),"replacement offer accepted");
+    check(!get_local_answer("session",sdp,type),"polling cannot return the previous offer's answer while renegotiating");
+    check(!wait_for_local_answer("session",sdp,type,0ms),"the offer route waits for this negotiation instead of returning cached SDP");
+    drain();
+    if(fail_stage.empty()) {
+      check(wait_for_local_answer("session",sdp,type,0ms)&&sdp=="replacement-sdp","completed renegotiation returns the replacement answer");
+    } else {
+      check(!wait_for_local_answer("session",sdp,type,0ms),"a failed replacement cannot appear successful using the old answer");
+      check(!get_local_answer("session",sdp,type)&&!sessions.at("session").negotiation_error.empty(),"polling reports no answer after a negotiation failure");
+    }
+    close_session("session");
   } else if(mode=="create-failure" || mode=="attach-failure" || mode=="constraints-failure") {
     create_fails=mode=="create-failure";attach_fails=mode=="attach-failure";constraints_fail=mode=="constraints-failure";
     check(offer()==constraints_fail,"construction failure returned");drain();
@@ -227,7 +246,7 @@ int main(int argc,char **argv) {
 }
 '''
 functions = '\n'.join(block(marker) for marker in (
-    '  bool set_local_answer(',
+    '  bool set_local_answer(', '  bool get_local_answer(', '  bool wait_for_local_answer(',
     '    void on_set_local_success(', '    void store_negotiation_error(',
     '    void on_set_local_failure(', '    void on_create_answer_success(',
     '    void on_create_answer_failure(', '    void on_set_remote_success(',
@@ -245,14 +264,16 @@ with tempfile.TemporaryDirectory(prefix='webrtc-peer-') as directory:
                     '-I' + str(ROOT / 'src'), '-I' + str(ROOT / 'third-party/libwebrtc/include'),
                     str(cpp), '-o', str(binary)], check=True)
     failed = []
-    for mode in ['normal', 'sync', 'cross-thread', 'error-offer', 'error-answer', 'error-local',
+    modes = ['normal', 'sync', 'cross-thread', 'error-offer', 'error-answer', 'error-local',
                  'create-failure', 'attach-failure', 'constraints-failure',
-                 'remote-callback', 'answer-callback', 'local-callback', 'ice', 'offer', 'queued-ice']:
+                 'remote-callback', 'answer-callback', 'local-callback', 'ice', 'offer', 'queued-ice',
+                 'repeat-offer', 'repeat-error-offer', 'repeat-error-answer', 'repeat-error-local']
+    for mode in modes:
         run = subprocess.run([str(binary), mode], timeout=15, capture_output=True, text=True,
                              env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))
         print(run.stdout, end='')
         if run.returncode:
             failed.append(mode)
             print(run.stderr[:4500])
-    print(f'{15 - len(failed)}/15 peer-lifetime scenarios passed; failed: {failed}')
+    print(f'{len(modes) - len(failed)}/{len(modes)} peer-lifetime scenarios passed; failed: {failed}')
     sys.exit(bool(failed))
