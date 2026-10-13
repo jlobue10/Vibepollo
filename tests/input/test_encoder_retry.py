@@ -70,9 +70,16 @@ int main() {
     return failures != 0;
 }
 '''
+# H32-02: the AMD session branch shares the strike budget instead of ending the stream on the
+# first non-terminal initialization failure.
+amd_start = source.index('if (&encoder == &amdvce_experimental || &encoder == &amdvce_ffmpeg)')
+amd_block = source[amd_start:source.index('} else', source.index('ending stream without changing negotiated format', amd_start))]
+amd_ok = ('consecutive_encoder_initialization_failures >= 3' in amd_block and 'retrying in' in amd_block and
+          amd_block.index('++consecutive_encoder_initialization_failures') < amd_block.index('ending stream without changing negotiated format'))
+print(('PASS ' if amd_ok else 'FAIL ') + 'the AMD initialization branch retries non-terminal failures under the shared strike budget')
 with tempfile.TemporaryDirectory() as temp:
     work = Path(temp)
-    failures = 0
+    failures = int(not amd_ok)
     for name, defines in [('linux', ''), ('linux-cuda', '#define SUNSHINE_BUILD_CUDA 1\n'),
                           ('windows', '#define _WIN32 1\n')]:
         # Set the platform selector after standard headers; this is a policy

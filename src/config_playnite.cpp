@@ -15,6 +15,8 @@
 #endif
 
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <filesystem>
@@ -38,14 +40,29 @@ namespace config {
       std::lock_guard apps_lock {confighttp::apps_file_mutex()};
       const bool want = playnite.enabled && playnite.fullscreen_entry_enabled;
       // Read current apps list
+      // Never synthesise a catalogue from a failed read: an unreadable or malformed
+      // apps.json used to come back as an empty list and be written over the real
+      // one on the next apply. Only a genuinely absent file may start empty.
+      std::error_code exists_ec;
+      const bool file_present = std::filesystem::exists(config::stream.file_apps, exists_ec);
       nlohmann::json file_tree = nlohmann::json::object();
-      try {
-        std::string content = file_handler::read_file(config::stream.file_apps.c_str());
-        file_tree = nlohmann::json::parse(content);
-      } catch (...) {
-        file_tree["apps"] = nlohmann::json::array();
-      }
-      if (!file_tree.contains("apps") || !file_tree["apps"].is_array()) {
+      if (file_present) {
+        const auto content = file_handler::read_file_checked(config::stream.file_apps.c_str());
+        if (!content) {
+          BOOST_LOG(warning) << "Playnite: apps.json could not be read; leaving the catalogue untouched"sv;
+          return;
+        }
+        try {
+          file_tree = nlohmann::json::parse(*content);
+        } catch (const std::exception &e) {
+          BOOST_LOG(warning) << "Playnite: apps.json is not valid JSON ("sv << e.what() << "); leaving the catalogue untouched"sv;
+          return;
+        }
+        if (!file_tree.is_object() || !file_tree.contains("apps") || !file_tree["apps"].is_array()) {
+          BOOST_LOG(warning) << "Playnite: apps.json has no 'apps' array; leaving the catalogue untouched"sv;
+          return;
+        }
+      } else {
         file_tree["apps"] = nlohmann::json::array();
       }
       auto &apps = file_tree["apps"];

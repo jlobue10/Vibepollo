@@ -1319,7 +1319,16 @@ namespace config {
 
       pos = endl;
       if (pos != end) {
-        pos += (*pos == '\r') ? 2 : 1;
+        // CR or CRLF: never step past a lone trailing CR, never skip the first byte of
+        // the next line in a CR-only file.
+        if (*pos == '\r') {
+          ++pos;
+          if (pos != end && *pos == '\n') {
+            ++pos;
+          }
+        } else {
+          ++pos;
+        }
       }
 
       if (!var) {

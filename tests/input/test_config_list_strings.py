@@ -119,6 +119,15 @@ int main() {
     config::list_string_f(vars,"open",items);
     check(items.size()==1 && items[0]=="[1,2","an unterminated inner list ends at the end of the string");
   }
+  // Spec D: CR-only and trailing-CR files advance exactly one line terminator.
+  {
+    const auto cr=config::parse_config("a = 1\rb = 2\r");
+    check(cr.size()==2 && cr.at("a")=="1" && cr.at("b")=="2","a CR-only file keeps every option");
+    const auto tail=config::parse_config("a = 1\r");
+    check(tail.size()==1 && tail.at("a")=="1","a lone trailing CR ends the file cleanly");
+    const auto crlf=config::parse_config("a = 1\r\nb = 2\r\n");
+    check(crlf.size()==2 && crlf.at("b")=="2","CRLF files are unchanged");
+  }
   std::cout<<checks<<" checks; "<<failures<<" failures\n";
   return failures!=0;
 }
