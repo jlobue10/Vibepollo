@@ -5443,16 +5443,18 @@ namespace webrtc_stream {
 
       if (session.state.audio && !session.audio_track) {
         const std::string track_id = "audio-" + session.state.id;
-        session.audio_track =
+        auto *audio_track =
           lwrtc_audio_track_create(factory, session.audio_source.get(), track_id.c_str());
-        if (!session.audio_track) {
+        if (!audio_track) {
           BOOST_LOG(error) << "WebRTC: failed to create audio track for " << session.state.id;
           return false;
         }
-        if (!lwrtc_peer_add_audio_track(peer_call.get(), session.audio_track, audio_stream_id.c_str())) {
+        if (!lwrtc_peer_add_audio_track(peer_call.get(), audio_track, audio_stream_id.c_str())) {
+          lwrtc_audio_track_release(audio_track);
           BOOST_LOG(error) << "WebRTC: failed to add audio track for " << session.state.id;
           return false;
         }
+        session.audio_track = audio_track;
       }
 
       if (session.state.video && !session.encoded_video_source) {
@@ -5523,19 +5525,21 @@ namespace webrtc_stream {
 
       if (session.state.video && !session.video_track) {
         const std::string track_id = "video-" + session.state.id;
-        session.video_track = lwrtc_encoded_video_track_create(
+        auto *video_track = lwrtc_encoded_video_track_create(
           factory,
           session.encoded_video_source.get(),
           track_id.c_str()
         );
-        if (!session.video_track) {
+        if (!video_track) {
           BOOST_LOG(error) << "WebRTC: failed to create video track for " << session.state.id;
           return false;
         }
-        if (!lwrtc_peer_add_video_track(peer_call.get(), session.video_track, video_stream_id.c_str())) {
+        if (!lwrtc_peer_add_video_track(peer_call.get(), video_track, video_stream_id.c_str())) {
+          lwrtc_video_track_release(video_track);
           BOOST_LOG(error) << "WebRTC: failed to add video track for " << session.state.id;
           return false;
         }
+        session.video_track = video_track;
 
         // Avoid starting playback from frames that were queued before the video track existed
         // (e.g. during ICE/SDP negotiation). Sending those frames paced in real time can create
@@ -6349,6 +6353,16 @@ namespace webrtc_stream {
         if (created_peer && it->second.peer) {
           it->second.peer->close();
           it->second.peer = nullptr;
+          // These tracks belonged to the discarded peer. A retry must attach
+          // fresh tracks instead of treating retained pointers as attachments.
+          if (it->second.audio_track) {
+            lwrtc_audio_track_release(it->second.audio_track);
+            it->second.audio_track = nullptr;
+          }
+          if (it->second.video_track) {
+            lwrtc_video_track_release(it->second.video_track);
+            it->second.video_track = nullptr;
+          }
         }
         return false;
       }
