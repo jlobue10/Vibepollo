@@ -6298,6 +6298,13 @@ namespace webrtc_stream {
   }
 
   bool set_remote_offer(std::string_view id, const std::string &sdp, const std::string &type) {
+    // This flow is an answerer: every accepted remote description is followed
+    // by CreateAnswer. Reject other SDP types before touching session state or
+    // the native peer (the pinned wrapper cannot safely inspect a rollback's
+    // absent media description).
+    if (type != "offer") {
+      return false;
+    }
     std::string session_id {id};
 #ifdef SUNSHINE_ENABLE_WEBRTC
     BOOST_LOG(debug) << "WebRTC: set_remote_offer enter id=" << session_id;

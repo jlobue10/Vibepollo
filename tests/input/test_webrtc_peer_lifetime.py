@@ -58,7 +58,7 @@ int checks=0,failures=0;
 void check(bool ok,const char *name) { ++checks;if(!ok){++failures;std::cerr<<"FAIL "<<name<<'\n';} }
 struct lwrtc_peer { int live=1234; };
 struct lwrtc_constraints {};
-std::atomic_int closes=0,releases=0,ice_calls=0,answer_calls=0,local_calls=0;
+std::atomic_int closes=0,releases=0,ice_calls=0,answer_calls=0,local_calls=0,offer_calls=0;
 // libwebrtc refuses AddIceCandidate until a remote description is set: count the
 // candidates handed over before any set-remote-description completion.
 std::atomic_int remote_descriptions=0,ice_before_remote=0;
@@ -88,7 +88,7 @@ void lwrtc_peer_add_candidate(lwrtc_peer_t *peer,const char *,int,const char *) 
   native_entry("ice",peer);if(remote_descriptions==0)++ice_before_remote;++ice_calls;
 }
 void lwrtc_peer_set_remote_description(lwrtc_peer_t *peer,const char *,const char *,lwrtc_ok_cb ok,lwrtc_err_cb err,void *user) {
-  native_entry("offer",peer);dispatch([=]{if(fail_stage=="offer")err(user,"offer failure");else{++remote_descriptions;ok(user);}});
+  native_entry("offer",peer);++offer_calls;dispatch([=]{if(fail_stage=="offer")err(user,"offer failure");else{++remote_descriptions;ok(user);}});
 }
 void lwrtc_peer_create_answer(lwrtc_peer_t *peer,lwrtc_sdp_cb ok,lwrtc_err_cb err,lwrtc_constraints_t *,void *user) {
   native_entry("answer",peer);++answer_calls;auto sdp=answer_sdp;
@@ -215,6 +215,24 @@ int main(int argc,char **argv) {
       check(!get_local_answer("session",sdp,type)&&!sessions.at("session").negotiation_error.empty(),"polling reports no answer after a negotiation failure");
     }
     close_session("session");
+  } else if(mode=="invalid-types-new" || mode=="invalid-types-active") {
+    const bool active=mode=="invalid-types-active";
+    if(active) { check(offer(),"initial offer accepted");drain(); }
+    const auto old_offer=sessions.at("session").remote_offer_sdp;
+    const auto old_answer=sessions.at("session").local_answer_sdp;
+    const int calls_before=offer_calls;
+    for(const std::string &type : {std::string("rollback"),std::string("answer"),std::string("pranswer"),
+                                 std::string("bogus"),std::string(),std::string("offer\0junk",10)}) {
+      check(!set_remote_offer("session","invalid-type-sdp",type),"only an offer can enter the answerer signaling flow");
+      check(offer_calls==calls_before&&pending.empty(),"unsupported SDP types never reach the native peer");
+      const auto &session=sessions.at("session");
+      check(session.remote_offer_sdp==old_offer&&session.local_answer_sdp==old_answer&&
+            session.state.has_remote_offer==active&&session.state.has_local_answer==active,
+            "rejected SDP types preserve the current negotiation and cached answer");
+      drain();
+    }
+    if(!active) { check(offer(),"a valid offer after rejected types still works");drain(); }
+    close_session("session");
   } else if(mode=="create-failure" || mode=="attach-failure" || mode=="constraints-failure") {
     create_fails=mode=="create-failure";attach_fails=mode=="attach-failure";constraints_fail=mode=="constraints-failure";
     check(offer()==constraints_fail,"construction failure returned");drain();
@@ -273,7 +291,8 @@ with tempfile.TemporaryDirectory(prefix='webrtc-peer-') as directory:
     modes = ['normal', 'sync', 'cross-thread', 'error-offer', 'error-answer', 'error-local',
                  'create-failure', 'attach-failure', 'constraints-failure',
                  'remote-callback', 'answer-callback', 'local-callback', 'ice', 'offer', 'queued-ice',
-                 'repeat-offer', 'repeat-error-offer', 'repeat-error-answer', 'repeat-error-local']
+                 'repeat-offer', 'repeat-error-offer', 'repeat-error-answer', 'repeat-error-local',
+                 'invalid-types-new', 'invalid-types-active']
     for mode in modes:
         run = subprocess.run([str(binary), mode], timeout=15, capture_output=True, text=True,
                              env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))
