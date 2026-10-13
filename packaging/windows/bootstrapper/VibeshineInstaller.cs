@@ -2500,7 +2500,6 @@ namespace VibepolloInstaller {
       "/f",
       "/update"
     };
-    private static readonly Version UpgradeSourcePreUninstallVersion = new Version(1, 14, 8);
     private static readonly string[] UninstallRegistryRoots = {
       @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
       @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -2908,11 +2907,96 @@ namespace VibepolloInstaller {
         }
       }
 
-      return installedProducts
+      return ResolveInstalledProductFacades(installedProducts,
+        code => MsiQueryProductState(NormalizeProductCode(code)) == MsiInstallStateDefault)
         .GroupBy(BuildProductRegistrationIdentity, StringComparer.OrdinalIgnoreCase)
         .Select(MergeInstalledProductGroup)
         .ToList();
     }
+
+    // The released 2.0.0 custom uninstall.exe entry is a facade for a hidden
+    // MSI, not a separate legacy installation. Match branded entries only to
+    // one live machine MSI of the same kind and verified executable root.
+    internal static List<InstalledProductInfo> ResolveInstalledProductFacades(
+      IEnumerable<InstalledProductInfo> registrations,
+      Func<string, bool> isLiveMsi) {
+      var products = registrations.ToList();
+      var resolved = new List<InstalledProductInfo>();
+      foreach (var product in products) {
+        if (product.IsWindowsInstaller
+            || (product.Kind != InstalledProductKind.Vibeshine && product.Kind != InstalledProductKind.Vibepollo)) {
+          resolved.Add(product);
+          continue;
+        }
+        var root = TryGetFullPathOrNull(product.InstallLocation);
+        var matches = products.Where(candidate => candidate.IsWindowsInstaller
+          && !candidate.IsPerUser && !product.IsPerUser
+          && candidate.Kind == product.Kind && root != null
+          && string.Equals(root, TryGetFullPathOrNull(candidate.InstallLocation), StringComparison.OrdinalIgnoreCase)
+          && isLiveMsi(candidate.ProductCode)).ToList();
+        if (matches.Select(candidate => NormalizeProductCode(candidate.ProductCode))
+            .Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1) {
+          throw new InvalidOperationException("Multiple live MSI products claim the installation at " + root + ". No changes were made.");
+        }
+        resolved.Add(matches.Count == 0 ? product : matches[0]);
+      }
+      return resolved.GroupBy(product => product.IsWindowsInstaller
+        ? "msi|" + NormalizeProductCode(product.ProductCode)
+        : BuildProductRegistrationIdentity(product), StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.First()).ToList();
+    }
+
+    private static string ReadMsiRecordString(IntPtr record, uint field) {
+      uint length = 1024;
+      var value = new StringBuilder((int)length);
+      var result = MsiRecordGetString(record, field, value, ref length);
+      if (result == MsiErrorMoreData) {
+        value = new StringBuilder((int)++length);
+        result = MsiRecordGetString(record, field, value, ref length);
+      }
+      return result == 0 ? value.ToString() : string.Empty;
+    }
+
+    private static string ReadInstalledMsiRoot(string productCode) {
+      return ReadCachedMsiInstallRoot(TryGetProductLocalPackagePath(productCode), productCode, ReadRegisteredMsiComponentPath);
+    }
+
+    private static string ReadRegisteredMsiComponentPath(string productCode, string component) {
+      uint length = 32768;
+      var path = new StringBuilder((int)length);
+      // Component LOCAL is 3; product DEFAULT is 5. These are distinct
+      // Windows Installer states even for a healthy installed product.
+      return MsiGetComponentPath(productCode, component, path, ref length) == 3 ? path.ToString() : null;
+    }
+
+    internal static string ReadCachedMsiInstallRoot(string cache, string productCode, Func<string, string, string> componentPath) {
+      IntPtr database = IntPtr.Zero, view = IntPtr.Zero;
+      try {
+        if (string.IsNullOrWhiteSpace(cache) || MsiOpenDatabase(cache, IntPtr.Zero, out database) != 0) return null;
+        const string query = "SELECT `Component`.`ComponentId`, `File`.`FileName` FROM `Component`, `File` WHERE `Component`.`Component` = `File`.`Component_` AND `Component`.`KeyPath` = `File`.`File`";
+        if (MsiDatabaseOpenView(database, query, out view) != 0 || MsiViewExecute(view, IntPtr.Zero) != 0) return null;
+        IntPtr record;
+        while (MsiViewFetch(view, out record) == 0 && record != IntPtr.Zero) {
+          try {
+            var name = ReadMsiRecordString(record, 2).Split('|').Last();
+            if (!string.Equals(name, "sunshine.exe", StringComparison.OrdinalIgnoreCase)) continue;
+            var component = ReadMsiRecordString(record, 1);
+            var path = componentPath(productCode, component);
+            if (!string.IsNullOrWhiteSpace(path) && string.Equals(Path.GetFileName(path), "sunshine.exe", StringComparison.OrdinalIgnoreCase)) return Path.GetDirectoryName(path);
+          } finally { MsiCloseHandle(record); }
+        }
+      } catch { return null; }
+      finally {
+        if (view != IntPtr.Zero) { MsiViewClose(view); MsiCloseHandle(view); }
+        if (database != IntPtr.Zero) MsiCloseHandle(database);
+      }
+      return null;
+    }
+
+    [DllImport("msi.dll", CharSet = CharSet.Unicode)]
+    private static extern int MsiGetComponentPath(string productCode, string componentCode, StringBuilder path, ref uint length);
+    [DllImport("msi.dll", CharSet = CharSet.Unicode)]
+    private static extern uint MsiRecordGetString(IntPtr record, uint field, StringBuilder value, ref uint length);
 
     private static string BuildRegistryPath(RegistryKey hive, string rootPath, string subKeyName) {
       var hivePrefix = hive == Registry.LocalMachine ? "HKLM" : "HKCU";
@@ -2958,7 +3042,10 @@ namespace VibepolloInstaller {
             Kind = kind,
             IsWindowsInstaller = true,
             IsPerUser = hive == Registry.CurrentUser,
-            InstallLocation = ResolveInstallLocation(productKey, uninstallString, quietUninstallString),
+            InstallLocation = IsWindowsInstallerProduct(productKey) && hive == Registry.LocalMachine
+              && (kind == InstalledProductKind.Vibeshine || kind == InstalledProductKind.Vibepollo)
+              ? (ReadInstalledMsiRoot(subKeyName) ?? string.Empty)
+              : ResolveInstallLocation(productKey, uninstallString, quietUninstallString),
             UninstallString = uninstallString,
             QuietUninstallString = quietUninstallString,
             RegistryPath = BuildRegistryPath(hive, rootPath, subKeyName)
@@ -2999,7 +3086,10 @@ namespace VibepolloInstaller {
             Kind = kind,
             IsWindowsInstaller = IsWindowsInstallerProduct(productKey) && LooksLikeProductCode(subKeyName),
             IsPerUser = hive == Registry.CurrentUser,
-            InstallLocation = ResolveInstallLocation(productKey, uninstallString, quietUninstallString),
+            InstallLocation = IsWindowsInstallerProduct(productKey) && hive == Registry.LocalMachine
+              && (kind == InstalledProductKind.Vibeshine || kind == InstalledProductKind.Vibepollo)
+              ? (ReadInstalledMsiRoot(subKeyName) ?? string.Empty)
+              : ResolveInstallLocation(productKey, uninstallString, quietUninstallString),
             UninstallString = uninstallString,
             QuietUninstallString = quietUninstallString,
             RegistryPath = BuildRegistryPath(hive, rootPath, subKeyName)
@@ -3633,34 +3723,6 @@ namespace VibepolloInstaller {
               ExitCode = uninstallDowngradeSourceResult.ExitCode,
               Message = BuildDowngradeSourcePreUninstallFailureMessage(uninstallDowngradeSourceResult.Message),
               LogPath = uninstallDowngradeSourceResult.LogPath
-            }, stashedPreviousPayload, "install_restore_previous");
-          }
-        }
-      }
-
-      StashedVibeshinePayload upgradeSourceStash;
-      var uninstallUpgradeSourceResult = TryPreUninstallProblematicUpgradeSourceVersion(
-        "install_remove_vibepollo_1148",
-        true,
-        false,
-        out upgradeSourceStash);
-      AdoptStashedPayload(ref stashedPreviousPayload, upgradeSourceStash);
-      if (uninstallUpgradeSourceResult != null) {
-        restartRequired |= uninstallUpgradeSourceResult.ExitCode == 3010;
-        if (!uninstallUpgradeSourceResult.Succeeded) {
-          string recoveryDetail;
-          if (TryRepairBustedMsiRegistration(
-            uninstallUpgradeSourceResult,
-            new[] { InstalledProductKind.Vibepollo },
-            "upgrade source pre-uninstall",
-            out recoveryDetail)) {
-            recoveryDetails.Add(recoveryDetail);
-          } else {
-            return ApplyStashedPayloadRecovery(new InstallerResult {
-              Operation = InstallerOperation.Install,
-              ExitCode = uninstallUpgradeSourceResult.ExitCode,
-              Message = BuildUpgradeSourcePreUninstallFailureMessage(uninstallUpgradeSourceResult.Message),
-              LogPath = uninstallUpgradeSourceResult.LogPath
             }, stashedPreviousPayload, "install_restore_previous");
           }
         }
@@ -5796,6 +5858,7 @@ namespace VibepolloInstaller {
       if (!HasProperty(cliArgs, "SUPPRESSMSGBOXES")) {
         cliArgs.Add("SUPPRESSMSGBOXES=1");
       }
+      PreserveCliInstallDirectory(cliArgs);
       PreserveCliVirtualDisplayDriverSelection(cliArgs);
 
       var logPath = TryGetMsiLogPath(cliArgs);
@@ -5836,41 +5899,6 @@ namespace VibepolloInstaller {
         competingProductsRequireRestart = uninstallCompetingProductsResult.ExitCode == 3010;
       }
 
-      if (ShouldPreUninstallProblematicUpgradeSource(cliArgs)) {
-        StashedVibeshinePayload upgradeSourceStash;
-        var uninstallUpgradeSourceResult = TryPreUninstallProblematicUpgradeSourceVersion(
-          "cli_remove_vibepollo_1148",
-          arguments.IsCliQuietMode(),
-          true,
-          out upgradeSourceStash);
-        AdoptStashedPayload(ref stashedPreviousPayload, upgradeSourceStash);
-        if (uninstallUpgradeSourceResult != null) {
-          if (!uninstallUpgradeSourceResult.Succeeded) {
-            if (ShouldRerunCliElevatedForMsiRecovery(uninstallUpgradeSourceResult, new[] { InstalledProductKind.Vibepollo })) {
-              return ApplyStashedPayloadRecovery(
-                RunElevatedBootstrapperCli(arguments),
-                stashedPreviousPayload,
-                "cli_restore_previous");
-            }
-            string recoveryDetail;
-            if (TryRepairBustedMsiRegistration(
-              uninstallUpgradeSourceResult,
-              new[] { InstalledProductKind.Vibepollo },
-              "CLI upgrade source pre-uninstall",
-              out recoveryDetail)) {
-              recoveryDetails.Add(recoveryDetail);
-            } else {
-              return ApplyStashedPayloadRecovery(new InstallerResult {
-                Operation = InstallerOperation.Install,
-                ExitCode = uninstallUpgradeSourceResult.ExitCode,
-                Message = BuildUpgradeSourcePreUninstallFailureMessage(uninstallUpgradeSourceResult.Message),
-                LogPath = uninstallUpgradeSourceResult.LogPath
-              }, stashedPreviousPayload, "cli_restore_previous");
-            }
-          }
-          vibeshineSourceRequiresRestart |= uninstallUpgradeSourceResult.ExitCode == 3010;
-        }
-      }
       if (uninstallCompetingProducts && !HasProperty(cliArgs, "SKIP_REMOVE_CONFLICTING_PRODUCTS")) {
         cliArgs.Add("SKIP_REMOVE_CONFLICTING_PRODUCTS=1");
       }
@@ -6437,6 +6465,13 @@ namespace VibepolloInstaller {
       }
     }
 
+    private static void PreserveCliInstallDirectory(List<string> cliArgs) {
+      if (!IsMsiInstallOperation(cliArgs) || HasProperty(cliArgs, "INSTALL_ROOT")) return;
+      var installed = GetInstalledVibepolloProduct();
+      if (installed != null && !string.IsNullOrWhiteSpace(installed.InstallLocation))
+        cliArgs.Add(CreatePropertyArgument("INSTALL_ROOT", installed.InstallLocation));
+    }
+
     private static void PreserveCliVirtualDisplayDriverSelection(List<string> cliArgs) {
       if (!IsMsiInstallOperation(cliArgs) || HasProperty(cliArgs, "INSTALL_VIRTUAL_DISPLAY_DRIVER")) {
         return;
@@ -6609,15 +6644,6 @@ namespace VibepolloInstaller {
 
     private static string BuildCompetingProductUninstallFailureMessage(string uninstallMessage) {
       var prefix = "Failed to uninstall Apollo, Vibepollo, or Sunshine before starting Vibepollo installation.";
-      if (string.IsNullOrWhiteSpace(uninstallMessage)) {
-        return prefix;
-      }
-      return prefix + " " + uninstallMessage;
-    }
-
-    private static string BuildUpgradeSourcePreUninstallFailureMessage(string uninstallMessage) {
-      var prefix = "Failed to uninstall Vibepollo 1.14.8 before starting installation."
-        + " This version requires uninstall/reinstall to avoid web UI files being removed during upgrade.";
       if (string.IsNullOrWhiteSpace(uninstallMessage)) {
         return prefix;
       }
@@ -6872,31 +6898,6 @@ namespace VibepolloInstaller {
         new[] { InstalledProductKind.Vibeshine });
     }
 
-    private static InstallerResult TryPreUninstallProblematicUpgradeSourceVersion(
-      string logPhase,
-      bool hiddenWindow,
-      bool requestElevationIfNeeded,
-      out StashedVibeshinePayload stashedPayload) {
-      stashedPayload = null;
-      var installedVibepollo = GetInstalledVibepolloProduct();
-      if (!RequiresPreUninstallUpgradeWorkaround(installedVibepollo)) {
-        return null;
-      }
-
-      stashedPayload = TryStashInstalledProductPayload(installedVibepollo, logPhase + "_stash");
-      if (stashedPayload == null) {
-        return BuildRollbackPreservationFailure(installedVibepollo);
-      }
-      return UninstallInstalledProducts(
-        logPhase,
-        hiddenWindow,
-        requestElevationIfNeeded,
-        false,
-        false,
-        false,
-        new[] { InstalledProductKind.Vibepollo });
-    }
-
     private static bool RequiresPreUninstallDowngradeWorkaround(InstalledProductInfo installedProduct, string msiPath) {
       if (installedProduct == null || installedProduct.Kind != InstalledProductKind.Vibeshine || installedProduct.Version == null) {
         return false;
@@ -6938,24 +6939,6 @@ namespace VibepolloInstaller {
       return LooksLikeProductCode(installed)
         && LooksLikeProductCode(payload)
         && !string.Equals(installed, payload, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool RequiresPreUninstallUpgradeWorkaround(InstalledProductInfo installedProduct) {
-      if (installedProduct == null || installedProduct.Kind != InstalledProductKind.Vibepollo || installedProduct.Version == null) {
-        return false;
-      }
-
-      if (installedProduct.Version.Major != UpgradeSourcePreUninstallVersion.Major
-          || installedProduct.Version.Minor != UpgradeSourcePreUninstallVersion.Minor) {
-        return false;
-      }
-
-      // The 1.14.8 registration may surface either as a raw build (8, from a
-      // four-part ProductVersion string) or ordinal-encoded (600..699, when
-      // ParseVersion mapped a three-part DisplayVersion).
-      return installedProduct.Version.Build == UpgradeSourcePreUninstallVersion.Build
-        || (installedProduct.Version.Build >= UpgradeSourcePreUninstallVersion.Build * 100
-          && installedProduct.Version.Build <= UpgradeSourcePreUninstallVersion.Build * 100 + 99);
     }
 
     private static InstallerResult UninstallCompetingProducts(
@@ -7037,12 +7020,6 @@ namespace VibepolloInstaller {
             ScheduleSelfDeleteAndEmptyInstallRootCleanup(product.InstallLocation, logPath);
           }
         } else {
-          // A legacy uninstaller has no MSI upgrade property to preserve shared drivers.
-          // Fail before invoking it during application replacement.
-          if (logPhase.StartsWith("install_", StringComparison.OrdinalIgnoreCase) || logPhase.StartsWith("cli_remove_", StringComparison.OrdinalIgnoreCase)) {
-            return new InstallerResult { Operation = InstallerOperation.Install, ExitCode = 1603,
-              Message = "Automatic replacement of this legacy installation is blocked because its uninstaller cannot guarantee preservation of installed drivers. Manual migration review is required." };
-          }
           // Never elevate non-MSI uninstall commands sourced from HKCU since
           // those registry values are user-writable and could be tampered with.
           var allowElevation = requestElevationIfNeeded && !product.IsPerUser;
@@ -7867,16 +7844,6 @@ namespace VibepolloInstaller {
     }
 
     private static bool ShouldPreUninstallCompetingProducts(List<string> args) {
-      var operation = args.FirstOrDefault(IsOperationSwitch);
-      if (string.IsNullOrWhiteSpace(operation)) {
-        return false;
-      }
-
-      return string.Equals(operation, "/i", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(operation, "/package", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool ShouldPreUninstallProblematicUpgradeSource(List<string> args) {
       var operation = args.FirstOrDefault(IsOperationSwitch);
       if (string.IsNullOrWhiteSpace(operation)) {
         return false;
