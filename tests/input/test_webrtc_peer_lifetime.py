@@ -199,9 +199,15 @@ int main(int argc,char **argv) {
     answer_sdp="replacement-sdp";
     if(mode.rfind("repeat-error-",0)==0)fail_stage=mode.substr(13);
     check(offer(),"replacement offer accepted");
+    // A candidate for the new offer must not reach the peer while the old
+    // remote description is still the one libwebrtc would match it against.
+    const int ice_before_renegotiation=ice_calls;
+    check(candidate(),"a candidate for the replacement offer is stored");
+    check(ice_calls==ice_before_renegotiation,"a candidate during renegotiation is held until the new remote description is applied");
     check(!get_local_answer("session",sdp,type),"polling cannot return the previous offer's answer while renegotiating");
     check(!wait_for_local_answer("session",sdp,type,0ms),"the offer route waits for this negotiation instead of returning cached SDP");
     drain();
+    check(ice_calls==ice_before_renegotiation+(fail_stage=="offer" ? 0 : 1),"the held candidate reaches the peer once the new remote description is applied, and only then");
     if(fail_stage.empty()) {
       check(wait_for_local_answer("session",sdp,type,0ms)&&sdp=="replacement-sdp","completed renegotiation returns the replacement answer");
     } else {

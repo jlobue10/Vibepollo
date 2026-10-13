@@ -6498,6 +6498,14 @@ namespace confighttp {
     blocking_route_pool.start(1);
     thread_pool_util::ThreadPool metadata_route_pool;
     metadata_route_pool.start(1);
+    // WebRTC signaling that blocks: the offer route waits up to 3 s for the
+    // answer and the delete route runs the whole session close (peer close,
+    // capture and media thread joins, display revert). Neither may hold the
+    // HTTPS io thread, and they get their own pool so a blocked offer wait
+    // cannot queue a disconnect behind it, or behind the single-thread
+    // blocking pool that session creation parks on during a teardown.
+    thread_pool_util::ThreadPool webrtc_signaling_route_pool;
+    webrtc_signaling_route_pool.start(2);
     clear_token_route_catalog();
     auto register_api_route = [&](const char *pattern, const char *method, const auto &handler) {
       server.resource[pattern][method] = [method, handler](resp_https_t response, req_https_t request) {
@@ -6617,8 +6625,8 @@ namespace confighttp {
     register_api_route("^/api/history/sessions/([A-Fa-f0-9-]+)$", "DELETE", deleteSessionHistory);
     register_blocking_api_route("^/api/webrtc/sessions$", "POST", createWebRTCSession);
     register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)$", "GET", getWebRTCSession);
-    register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)$", "DELETE", deleteWebRTCSession);
-    register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)/offer$", "POST", postWebRTCOffer);
+    register_blocking_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)$", "DELETE", deleteWebRTCSession, &webrtc_signaling_route_pool);
+    register_blocking_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)/offer$", "POST", postWebRTCOffer, &webrtc_signaling_route_pool);
     register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)/answer$", "GET", getWebRTCAnswer);
     register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)/ice$", "GET", getWebRTCIce);
     register_api_route("^/api/webrtc/sessions/([A-Fa-f0-9-]+)/ice$", "POST", postWebRTCIce);
@@ -6729,8 +6737,10 @@ namespace confighttp {
     tcp.join();
     blocking_route_pool.stop();
     metadata_route_pool.stop();
+    webrtc_signaling_route_pool.stop();
     blocking_route_pool.join();
     metadata_route_pool.join();
+    webrtc_signaling_route_pool.join();
     webrtc_stream::shutdown_all_sessions();
     // std::jthread (cleanup_thread) auto-joins on destruction, no need for joinable/join
   }
