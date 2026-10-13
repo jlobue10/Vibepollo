@@ -6302,6 +6302,11 @@ namespace webrtc_stream {
       it->second.remote_offer_sdp = sdp;
       it->second.remote_offer_type = type;
       it->second.state.has_remote_offer = true;
+      // An answer belongs to one offer. Until this negotiation completes, both
+      // the offer route and polling must wait rather than return cached SDP.
+      it->second.state.has_local_answer = false;
+      it->second.local_answer_sdp.clear();
+      it->second.local_answer_type.clear();
       it->second.negotiation_error.clear();
 
 #ifdef SUNSHINE_ENABLE_WEBRTC
