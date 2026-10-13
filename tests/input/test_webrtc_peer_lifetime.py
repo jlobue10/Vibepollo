@@ -3,7 +3,8 @@
 
 Native WebRTC, capture, input and history are boundary fakes. Real threads and
 ASan exercise native-call/teardown overlap and late asynchronous callbacks.
---baseline reads HEAD and reproduces freed-peer access in five separate cases.
+--baseline reads HEAD and reproduces freed-peer access in five separate cases,
+and candidates handed to the peer before it has a remote description.
 """
 from pathlib import Path
 import os
@@ -58,6 +59,9 @@ void check(bool ok,const char *name) { ++checks;if(!ok){++failures;std::cerr<<"F
 struct lwrtc_peer { int live=1234; };
 struct lwrtc_constraints {};
 std::atomic_int closes=0,releases=0,ice_calls=0,answer_calls=0,local_calls=0;
+// libwebrtc refuses AddIceCandidate until a remote description is set: count the
+// candidates handed over before any set-remote-description completion.
+std::atomic_int remote_descriptions=0,ice_before_remote=0;
 std::vector<std::function<void()>> pending;
 bool synchronous=false,cross_thread=false,create_fails=false,attach_fails=false,constraints_fail=false;
 std::string fail_stage;
@@ -79,9 +83,11 @@ void next_callback() { auto callback=std::move(pending.front());pending.erase(pe
 void drain() { while(!pending.empty())next_callback(); }
 void lwrtc_peer_close(lwrtc_peer_t *peer) { assert(peer->live==1234);peer->live=0;++closes; }
 void lwrtc_peer_release(lwrtc_peer_t *peer) { assert(peer->live==0);delete peer;++releases; }
-void lwrtc_peer_add_candidate(lwrtc_peer_t *peer,const char *,int,const char *) { native_entry("ice",peer);++ice_calls; }
+void lwrtc_peer_add_candidate(lwrtc_peer_t *peer,const char *,int,const char *) {
+  native_entry("ice",peer);if(remote_descriptions==0)++ice_before_remote;++ice_calls;
+}
 void lwrtc_peer_set_remote_description(lwrtc_peer_t *peer,const char *,const char *,lwrtc_ok_cb ok,lwrtc_err_cb err,void *user) {
-  native_entry("offer",peer);dispatch([=]{if(fail_stage=="offer")err(user,"offer failure");else ok(user);});
+  native_entry("offer",peer);dispatch([=]{if(fail_stage=="offer")err(user,"offer failure");else{++remote_descriptions;ok(user);}});
 }
 void lwrtc_peer_create_answer(lwrtc_peer_t *peer,lwrtc_sdp_cb ok,lwrtc_err_cb err,lwrtc_constraints_t *,void *user) {
   native_entry("answer",peer);++answer_calls;dispatch([=]{if(fail_stage=="answer")err(user,"answer failure");else ok(user,"sdp","answer");});
@@ -128,6 +134,7 @@ struct Session {
   lwrtc_data_channel_t *input_channel=nullptr;
   struct IceCandidate { std::string mid;int mline_index;std::string candidate; };
   std::vector<IceCandidate> candidates;
+  bool remote_description_applied=false;std::size_t candidates_applied=0;
 };
 struct Av1Offer { bool offered=false;std::optional<Av1FmtpParams> fmtp; };
 struct HevcOffer { bool offered=false;std::vector<std::string> fmtp_candidates; };
@@ -173,7 +180,8 @@ int main(int argc,char **argv) {
     if(mode.rfind("error-",0)==0)fail_stage=mode.substr(6);
     check(candidate(),"ICE can queue before peer creation");
     check(offer(),"offer accepted");drain();
-    check(ice_calls==1,"queued ICE replayed once");
+    check(ice_calls==(fail_stage=="offer" ? 0 : 1),"queued ICE replayed once, only with a remote description");
+    check(ice_before_remote==0,"no candidate reaches the peer before its remote description is set");
     if(fail_stage.empty()) {
       check(sessions.at("session").state.has_local_answer,"answer stored");
       check(answer_calls==1 && local_calls==1,"full negotiation completes");
@@ -198,7 +206,9 @@ int main(int argc,char **argv) {
     // Pause inside the native boundary, after the production handler has
     // acquired its peer. Teardown must wait for this one admitted call.
     if(mode=="ice") { check(offer(),"initial offer accepted");drain(); }
-    if(mode=="queued-ice")check(candidate(),"initial candidate queued");
+    // The stored candidate is replayed from the set-remote-description completion;
+    // run that completion inside the native call so the replay is the paused call.
+    if(mode=="queued-ice") { check(candidate(),"initial candidate queued");synchronous=true; }
     pause_at=(mode=="offer") ? "offer" : "ice";
     auto request=std::async(std::launch::async,[&]{return mode=="ice" ? candidate() : offer();});
     check(native_entered.get_future().wait_for(2s)==std::future_status::ready,"native call entered");

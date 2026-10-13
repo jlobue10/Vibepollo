@@ -1885,6 +1885,11 @@ namespace webrtc_stream {
       };
 
       std::vector<IceCandidate> candidates;
+      // libwebrtc refuses remote candidates until a remote description is set.
+      // Until on_set_remote_success() the stored list is the only copy; after
+      // it, candidates_applied counts how many have reached the peer.
+      bool remote_description_applied = false;
+      std::size_t candidates_applied = 0;
 
       struct LocalCandidate {
         std::string mid;
@@ -4024,6 +4029,34 @@ namespace webrtc_stream {
         delete ctx;
         return;
       }
+      // The remote description is set, so libwebrtc accepts candidates now.
+      // Replay the ones the HTTP route stored up to this point (including any
+      // that arrived while the description was being applied); later ones go
+      // straight to the peer from add_ice_candidate().
+      std::vector<Session::IceCandidate> pending_candidates;
+      {
+        std::lock_guard lg {session_mutex};
+        auto it = sessions.find(ctx->session_id);
+        if (it != sessions.end() && it->second.peer == ctx->peer) {
+          auto &session = it->second;
+          session.remote_description_applied = true;
+          if (session.candidates_applied < session.candidates.size()) {
+            pending_candidates.assign(
+              session.candidates.begin() + static_cast<std::ptrdiff_t>(session.candidates_applied),
+              session.candidates.end()
+            );
+          }
+          session.candidates_applied = session.candidates.size();
+        }
+      }
+      for (const auto &candidate : pending_candidates) {
+        lwrtc_peer_add_candidate(
+          peer_call.get(),
+          candidate.mid.c_str(),
+          candidate.mline_index,
+          candidate.candidate.c_str()
+        );
+      }
       auto *constraints = create_constraints();
       if (!constraints) {
         BOOST_LOG(error) << "WebRTC: failed to create media constraints";
@@ -5752,6 +5785,15 @@ namespace webrtc_stream {
     SessionState snapshot = session.state;
     bool first_session = false;
     {
+      // Lock order: session_mutex, then webrtc_capture.mutex. The encoder
+      // (submit_video_packet) and media threads hold session_mutex while a
+      // dependency gap reaches request_keyframe() -> current_capture_mail(),
+      // which takes the capture mutex; taking the capture mutex first here
+      // deadlocked session creation against a frame drop on another session.
+      // The pending-to-active transfer still happens under the capture mutex,
+      // so the idle-capture stop cannot observe a moment with neither a
+      // reservation nor an active session.
+      std::lock_guard lg {session_mutex};
       std::lock_guard<std::mutex> capture_lock(webrtc_capture.mutex);
       if (webrtc_capture.pending_session_creations.load(std::memory_order_acquire) == 0) {
         BOOST_LOG(error) << "WebRTC: create_session called without a capture reservation";
@@ -5761,23 +5803,20 @@ namespace webrtc_stream {
         BOOST_LOG(error) << "WebRTC: capture stopped before the reserved session could be created";
         return std::nullopt;
       }
-      {
-        std::lock_guard lg {session_mutex};
-        if (sessions.size() >= kMaxWebRtcSessions) {
-          BOOST_LOG(warning) << "WebRTC: refusing session, " << sessions.size() << " already registered (limit " << kMaxWebRtcSessions << ')';
-          if (create_error) {
-            *create_error = create_error_e::limit;
-          }
-          return std::nullopt;  // reservation_guard releases the capture reservation
+      if (sessions.size() >= kMaxWebRtcSessions) {
+        BOOST_LOG(warning) << "WebRTC: refusing session, " << sessions.size() << " already registered (limit " << kMaxWebRtcSessions << ')';
+        if (create_error) {
+          *create_error = create_error_e::limit;
         }
-        {
-          std::lock_guard input_lock {input_mutex};
-          browser_inputs.emplace(snapshot.id, nullptr);
-        }
-        sessions.emplace(snapshot.id, std::move(session));
-        first_session = active_sessions.fetch_add(1, std::memory_order_relaxed) == 0;
-        host_stats::webrtc_session_started();
+        return std::nullopt;  // reservation_guard releases the capture reservation
       }
+      {
+        std::lock_guard input_lock {input_mutex};
+        browser_inputs.emplace(snapshot.id, nullptr);
+      }
+      sessions.emplace(snapshot.id, std::move(session));
+      first_session = active_sessions.fetch_add(1, std::memory_order_relaxed) == 0;
+      host_stats::webrtc_session_started();
       webrtc_capture.pending_session_creations.fetch_sub(1, std::memory_order_release);
       reservation_guard.disable();
     }
@@ -6252,10 +6291,9 @@ namespace webrtc_stream {
     BOOST_LOG(debug) << "WebRTC: set_remote_offer enter id=" << session_id;
     std::shared_ptr<peer_t> peer;
     int audio_channels = kDefaultAudioChannels;
-    std::vector<Session::IceCandidate> queued_remote_candidates;
 #endif
     {
-      std::lock_guard lg {session_mutex};
+      std::unique_lock lg {session_mutex};
       auto it = sessions.find(session_id);
       if (it == sessions.end()) {
         return false;
@@ -6327,6 +6365,10 @@ namespace webrtc_stream {
         }
         it->second.peer = std::make_shared<peer_t>(new_peer);
         created_peer = true;
+        // A fresh peer has no remote description yet: every stored candidate
+        // is replayed from on_set_remote_success().
+        it->second.remote_description_applied = false;
+        it->second.candidates_applied = 0;
       }
       if (!it->second.data_channel_context) {
         auto data_context = std::make_shared<SessionDataChannelContext>();
@@ -6350,27 +6392,33 @@ namespace webrtc_stream {
       BOOST_LOG(debug) << "WebRTC: attaching media tracks id=" << session_id;
       if (!attach_media_tracks(it->second)) {
         BOOST_LOG(error) << "WebRTC: failed to attach media tracks id=" << session_id;
+        std::shared_ptr<peer_t> discarded_peer;
+        lwrtc_audio_track_t *discarded_audio_track = nullptr;
+        lwrtc_video_track_t *discarded_video_track = nullptr;
         if (created_peer && it->second.peer) {
-          it->second.peer->close();
-          it->second.peer = nullptr;
           // These tracks belonged to the discarded peer. A retry must attach
           // fresh tracks instead of treating retained pointers as attachments.
-          if (it->second.audio_track) {
-            lwrtc_audio_track_release(it->second.audio_track);
-            it->second.audio_track = nullptr;
-          }
-          if (it->second.video_track) {
-            lwrtc_video_track_release(it->second.video_track);
-            it->second.video_track = nullptr;
-          }
+          discarded_peer = std::exchange(it->second.peer, nullptr);
+          discarded_audio_track = std::exchange(it->second.audio_track, nullptr);
+          discarded_video_track = std::exchange(it->second.video_track, nullptr);
+        }
+        // peer_t::close() drains admitted native calls and blocks inside
+        // libwebrtc, whose signaling callbacks take session_mutex. Release
+        // the map lock first, as close_session does.
+        lg.unlock();
+        if (discarded_peer) {
+          discarded_peer->close();
+        }
+        if (discarded_audio_track) {
+          lwrtc_audio_track_release(discarded_audio_track);
+        }
+        if (discarded_video_track) {
+          lwrtc_video_track_release(discarded_video_track);
         }
         return false;
       }
       peer = it->second.peer;
       audio_channels = it->second.state.audio_channels.value_or(kDefaultAudioChannels);
-      if (created_peer) {
-        queued_remote_candidates = it->second.candidates;
-      }
 #endif
     }
 
@@ -6380,19 +6428,11 @@ namespace webrtc_stream {
       return false;
     }
 
-    // ICE can arrive immediately after the browser sets its local offer. The
-    // HTTP route stores those candidates before this peer exists, so replay
-    // the stored set once the peer is ready instead of stranding the first
-    // candidate until a later trickle update happens to arrive.
-    for (const auto &candidate : queued_remote_candidates) {
-      lwrtc_peer_add_candidate(
-        peer_call.get(),
-        candidate.mid.c_str(),
-        candidate.mline_index,
-        candidate.candidate.c_str()
-      );
-    }
-
+    // ICE can arrive immediately after the browser sets its local offer, before
+    // this peer exists or while the remote description is still being applied.
+    // The HTTP route stores every candidate; on_set_remote_success() hands the
+    // stored set to libwebrtc once it has a remote description to match them
+    // against (it refuses candidates before that).
     auto *ctx = new SessionPeerContext {session_id, peer, audio_channels};
     lwrtc_peer_set_remote_description(
       peer_call.get(),
@@ -6438,12 +6478,15 @@ namespace webrtc_stream {
       it->second.candidates.emplace_back(std::move(entry));
       it->second.state.ice_candidates = it->second.candidates.size();
 #ifdef SUNSHINE_ENABLE_WEBRTC
-      peer = it->second.peer;
-      if (!it->second.candidates.empty()) {
+      // Before the remote description is applied the peer refuses candidates;
+      // on_set_remote_success() replays everything stored up to then.
+      if (it->second.peer && it->second.remote_description_applied) {
+        peer = it->second.peer;
         const auto &stored = it->second.candidates.back();
         stored_mid = stored.mid;
         stored_candidate = stored.candidate;
         stored_mline_index = stored.mline_index;
+        it->second.candidates_applied = it->second.candidates.size();
       }
 #endif
     }
