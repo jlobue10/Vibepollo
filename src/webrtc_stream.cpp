@@ -3694,16 +3694,28 @@ namespace webrtc_stream {
         // ignore at most the caller's still-held close reservation.
         teardown_sessions.fetch_sub(1, std::memory_order_acq_rel);
         capture_teardown_reserved = false;
-        const stream::session::shared_runtime_finalize_context_t finalize_context {
-          .ignore_current_webrtc_teardown = teardown_reserved && *teardown_reserved,
-          .apply_deferred_config = false,
-          .force_display_revert_when_idle = true,
-          .virtual_display_guid_bytes = teardown.virtual_display_guid_bytes,
-        };
-        finalized_shared_runtime = stream::session::finalize_shared_runtime_if_idle(
-          "webrtc_capture_stop",
-          finalize_context
-        );
+      }
+      // The shared-runtime finalizer can revert the display topology, which
+      // takes seconds. It runs without webrtc_capture.mutex: teardown_in_progress
+      // stays set, so a session reservation waits on teardown_cv (never holding
+      // a lock) and create_session for an earlier reservation observes
+      // capture.active == false, both as before. Holding the mutex here parked a
+      // concurrent create_session (session_mutex, then this mutex) and with it
+      // every session_mutex user for the whole revert. The lifecycle gate is
+      // still held, so this stop stays serialised against starts and the RTSP
+      // paths. Everything the finalizer needs was captured above.
+      const stream::session::shared_runtime_finalize_context_t finalize_context {
+        .ignore_current_webrtc_teardown = teardown_reserved && *teardown_reserved,
+        .apply_deferred_config = false,
+        .force_display_revert_when_idle = true,
+        .virtual_display_guid_bytes = teardown.virtual_display_guid_bytes,
+      };
+      finalized_shared_runtime = stream::session::finalize_shared_runtime_if_idle(
+        "webrtc_capture_stop",
+        finalize_context
+      );
+      {
+        std::lock_guard<std::mutex> capture_lock(webrtc_capture.mutex);
         webrtc_capture.launch_session.reset();
         if (finalized_shared_runtime) {
           // The centralized finalizer invalidates any output override lease.
@@ -6374,6 +6386,16 @@ namespace webrtc_stream {
         // is replayed from on_set_remote_success().
         it->second.remote_description_applied = false;
         it->second.candidates_applied = 0;
+      } else if (it->second.remote_description_applied) {
+        // Renegotiation on a live peer (ICE restart, re-offer): the candidates
+        // stored so far belong to the description being replaced and are not
+        // replayed; the ones that arrive while the new description is being
+        // applied would be matched against the old ufrag and dropped by
+        // libwebrtc, so they are held and replayed from on_set_remote_success()
+        // exactly as for a new peer. A previous attempt that never applied
+        // keeps its pending range, so a retried offer still replays it.
+        it->second.remote_description_applied = false;
+        it->second.candidates_applied = it->second.candidates.size();
       }
       if (!it->second.data_channel_context) {
         auto data_context = std::make_shared<SessionDataChannelContext>();
