@@ -6460,9 +6460,25 @@ namespace video {
           session_hdr_metadata = initialized.value->hdr_metadata;
         } else if (amd_initialization_fallback.failed_rollback ||
                    (!initialization_was_cancelled && !initialization_gate_contended)) {
-          BOOST_LOG(error) << "AMF: stream initialization failed (stage=" << amf::lifecycle::initialization_failure_name(initialized.failure)
-                           << ", implementation=" << enc_ptr->name << "); ending stream without changing negotiated format"sv;
-          return;
+          // A failed rollback and a quarantined runtime are terminal; every other
+          // failure gets the strike budget and backoff the other encoders have
+          // (the AMD session is prepared here, before encode_run, so the shared
+          // policy below never saw these).
+          const bool terminal = amd_initialization_fallback.failed_rollback.has_value() ||
+                                native_amf_lifecycle_gate.is_quarantined() ||
+                                initialized.failure == failure_e::unsupported_format;
+          ++consecutive_encoder_initialization_failures;
+          if (terminal || consecutive_encoder_initialization_failures >= 3) {
+            BOOST_LOG(error) << "AMF: stream initialization failed (stage=" << amf::lifecycle::initialization_failure_name(initialized.failure)
+                             << ", implementation=" << enc_ptr->name << ", attempt " << consecutive_encoder_initialization_failures
+                             << "); ending stream without changing negotiated format"sv;
+            return;
+          }
+          const auto retry_delay = std::chrono::milliseconds(100 * (1 << (consecutive_encoder_initialization_failures - 1)));
+          BOOST_LOG(warning) << "AMF: stream initialization failed (stage=" << amf::lifecycle::initialization_failure_name(initialized.failure)
+                             << "); retrying in " << retry_delay.count() << "ms with the same implementation"sv;
+          std::this_thread::sleep_for(retry_delay);
+          continue;
         }
       } else
 #endif
