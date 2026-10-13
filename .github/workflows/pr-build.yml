@@ -135,6 +135,7 @@ jobs:
           python3 tests/input/test_browser_gamepad_admission.py
           python3 tests/input/test_browser_numeric_input.py
           python3 tests/input/test_peer_state_bridge.py
+          python3 tests/input/test_webrtc_peer_lifetime.py
       - name: Check PyroWave fence import and conversion timeout ordering
         run: python3 tests/input/test_pyrowave_sync.py
 

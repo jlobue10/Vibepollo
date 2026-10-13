@@ -48,6 +48,7 @@
 
 #ifdef SUNSHINE_ENABLE_WEBRTC
   #include <libwebrtc_c.h>
+  #include "webrtc_peer.h"
 #endif
 
 // local includes
@@ -1807,13 +1808,13 @@ namespace webrtc_stream {
 
     struct SessionPeerContext {
       std::string session_id;
-      lwrtc_peer_t *peer = nullptr;
+      std::shared_ptr<peer_t> peer;
       int audio_channels = 2;
     };
 
     struct LocalDescriptionContext {
       std::string session_id;
-      lwrtc_peer_t *peer = nullptr;
+      std::shared_ptr<peer_t> peer;
       std::string sdp;
       std::string type;
     };
@@ -1860,7 +1861,7 @@ namespace webrtc_stream {
       std::shared_ptr<lwrtc_factory_t> factory;
       std::optional<Av1FmtpParams> av1_fmtp;
       std::optional<std::string> hevc_fmtp;
-      lwrtc_peer_t *peer = nullptr;
+      std::shared_ptr<peer_t> peer;
       std::shared_ptr<SessionIceContext> ice_context;
       std::shared_ptr<lwrtc_audio_source_t> audio_source;
       std::shared_ptr<lwrtc_video_source_t> video_source;
@@ -3969,8 +3970,9 @@ namespace webrtc_stream {
       if (!ctx) {
         return;
       }
-      if (!ctx->peer) {
-        BOOST_LOG(error) << "WebRTC: missing peer connection for " << ctx->session_id;
+      auto peer_call = ctx->peer ? ctx->peer->acquire() : peer_t::call_t {};
+      if (!peer_call) {
+        BOOST_LOG(debug) << "WebRTC: peer retired before answer completion for " << ctx->session_id;
         delete ctx;
         return;
       }
@@ -3990,7 +3992,7 @@ namespace webrtc_stream {
         std::move(type_copy)
       };
       lwrtc_peer_set_local_description(
-        ctx->peer,
+        peer_call.get(),
         local_ctx->sdp.c_str(),
         local_ctx->type.c_str(),
         &on_set_local_success,
@@ -4016,8 +4018,9 @@ namespace webrtc_stream {
       if (!ctx) {
         return;
       }
-      if (!ctx->peer) {
-        BOOST_LOG(error) << "WebRTC: missing peer connection for " << ctx->session_id;
+      auto peer_call = ctx->peer ? ctx->peer->acquire() : peer_t::call_t {};
+      if (!peer_call) {
+        BOOST_LOG(debug) << "WebRTC: peer retired before remote description completion for " << ctx->session_id;
         delete ctx;
         return;
       }
@@ -4028,7 +4031,7 @@ namespace webrtc_stream {
         return;
       }
       lwrtc_peer_create_answer(
-        ctx->peer,
+        peer_call.get(),
         &on_create_answer_success,
         &on_create_answer_failure,
         constraints,
@@ -5392,6 +5395,11 @@ namespace webrtc_stream {
       if (!session.peer || !session.factory) {
         return false;
       }
+      auto peer_call = session.peer->acquire();
+      if (!peer_call) {
+        return false;
+      }
+
       auto *factory = session.factory.get();
 
       BOOST_LOG(debug) << "WebRTC: attach_media_tracks enter id=" << session.state.id;
@@ -5441,7 +5449,7 @@ namespace webrtc_stream {
           BOOST_LOG(error) << "WebRTC: failed to create audio track for " << session.state.id;
           return false;
         }
-        if (!lwrtc_peer_add_audio_track(session.peer, session.audio_track, audio_stream_id.c_str())) {
+        if (!lwrtc_peer_add_audio_track(peer_call.get(), session.audio_track, audio_stream_id.c_str())) {
           BOOST_LOG(error) << "WebRTC: failed to add audio track for " << session.state.id;
           return false;
         }
@@ -5524,7 +5532,7 @@ namespace webrtc_stream {
           BOOST_LOG(error) << "WebRTC: failed to create video track for " << session.state.id;
           return false;
         }
-        if (!lwrtc_peer_add_video_track(session.peer, session.video_track, video_stream_id.c_str())) {
+        if (!lwrtc_peer_add_video_track(peer_call.get(), session.video_track, video_stream_id.c_str())) {
           BOOST_LOG(error) << "WebRTC: failed to add video track for " << session.state.id;
           return false;
         }
@@ -5817,7 +5825,7 @@ namespace webrtc_stream {
 #ifdef SUNSHINE_ENABLE_WEBRTC
     BOOST_LOG(debug) << "WebRTC: close_session enter id=" << id;
     std::shared_ptr<lwrtc_factory_t> factory;
-    lwrtc_peer_t *peer = nullptr;
+    std::shared_ptr<peer_t> peer;
     std::shared_ptr<SessionIceContext> ice_context;
     lwrtc_audio_track_t *audio_track = nullptr;
     lwrtc_video_track_t *video_track = nullptr;
@@ -5901,8 +5909,9 @@ namespace webrtc_stream {
       );
     }
     if (peer) {
-      lwrtc_peer_close(peer);
-      lwrtc_peer_release(peer);
+      // Reject later continuations and drain admitted native calls before
+      // releasing the wrapper or its factory/callback dependencies below.
+      peer->close();
     }
     if (input_channel) {
       lwrtc_data_channel_unregister_observer(input_channel);
@@ -6237,7 +6246,7 @@ namespace webrtc_stream {
     std::string session_id {id};
 #ifdef SUNSHINE_ENABLE_WEBRTC
     BOOST_LOG(debug) << "WebRTC: set_remote_offer enter id=" << session_id;
-    lwrtc_peer_t *peer = nullptr;
+    std::shared_ptr<peer_t> peer;
     int audio_channels = kDefaultAudioChannels;
     std::vector<Session::IceCandidate> queued_remote_candidates;
 #endif
@@ -6312,7 +6321,7 @@ namespace webrtc_stream {
           BOOST_LOG(error) << "WebRTC: failed to create peer id=" << session_id;
           return false;
         }
-        it->second.peer = new_peer;
+        it->second.peer = std::make_shared<peer_t>(new_peer);
         created_peer = true;
       }
       if (!it->second.data_channel_context) {
@@ -6320,23 +6329,25 @@ namespace webrtc_stream {
         data_context->id = session_id;
         it->second.data_channel_context = std::move(data_context);
       }
-      lwrtc_peer_register_state_callback(
-        it->second.peer,
-        &on_peer_state,
-        it->second.data_channel_context.get()
-      );
-      BOOST_LOG(debug) << "WebRTC: registering data channel id=" << session_id;
-      lwrtc_peer_register_data_channel(
-        it->second.peer,
-        &on_data_channel,
-        it->second.data_channel_context.get()
-      );
+      {
+        auto setup_call = it->second.peer->acquire();
+        lwrtc_peer_register_state_callback(
+          setup_call.get(),
+          &on_peer_state,
+          it->second.data_channel_context.get()
+        );
+        BOOST_LOG(debug) << "WebRTC: registering data channel id=" << session_id;
+        lwrtc_peer_register_data_channel(
+          setup_call.get(),
+          &on_data_channel,
+          it->second.data_channel_context.get()
+        );
+      }
       BOOST_LOG(debug) << "WebRTC: attaching media tracks id=" << session_id;
       if (!attach_media_tracks(it->second)) {
         BOOST_LOG(error) << "WebRTC: failed to attach media tracks id=" << session_id;
         if (created_peer && it->second.peer) {
-          lwrtc_peer_close(it->second.peer);
-          lwrtc_peer_release(it->second.peer);
+          it->second.peer->close();
           it->second.peer = nullptr;
         }
         return false;
@@ -6350,7 +6361,8 @@ namespace webrtc_stream {
     }
 
 #ifdef SUNSHINE_ENABLE_WEBRTC
-    if (!peer) {
+    auto peer_call = peer ? peer->acquire() : peer_t::call_t {};
+    if (!peer_call) {
       return false;
     }
 
@@ -6360,7 +6372,7 @@ namespace webrtc_stream {
     // candidate until a later trickle update happens to arrive.
     for (const auto &candidate : queued_remote_candidates) {
       lwrtc_peer_add_candidate(
-        peer,
+        peer_call.get(),
         candidate.mid.c_str(),
         candidate.mline_index,
         candidate.candidate.c_str()
@@ -6369,7 +6381,7 @@ namespace webrtc_stream {
 
     auto *ctx = new SessionPeerContext {session_id, peer, audio_channels};
     lwrtc_peer_set_remote_description(
-      peer,
+      peer_call.get(),
       sdp.c_str(),
       type.c_str(),
       &on_set_remote_success,
@@ -6386,7 +6398,7 @@ namespace webrtc_stream {
 
   bool add_ice_candidate(std::string_view id, std::string mid, int mline_index, std::string candidate) {
 #ifdef SUNSHINE_ENABLE_WEBRTC
-    lwrtc_peer_t *peer = nullptr;
+    std::shared_ptr<peer_t> peer;
     std::string stored_mid;
     std::string stored_candidate;
     int stored_mline_index = -1;
@@ -6423,7 +6435,11 @@ namespace webrtc_stream {
     }
 #ifdef SUNSHINE_ENABLE_WEBRTC
     if (peer && !stored_candidate.empty()) {
-      lwrtc_peer_add_candidate(peer, stored_mid.c_str(), stored_mline_index, stored_candidate.c_str());
+      auto peer_call = peer->acquire();
+      if (!peer_call) {
+        return false;
+      }
+      lwrtc_peer_add_candidate(peer_call.get(), stored_mid.c_str(), stored_mline_index, stored_candidate.c_str());
     }
 #endif
     return true;
