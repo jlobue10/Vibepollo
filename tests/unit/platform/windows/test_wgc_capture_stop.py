@@ -129,7 +129,8 @@ struct capture_thread_async_ctx_t {
 #define _WIN32
 // END
 #undef _WIN32
-struct session_t{std::thread videoThread,audioThread;safe::signal_t controlEnd;};
+struct packet_channel_stub_t{std::atomic<int> closes{0};void close(){++closes;}};
+struct session_t{std::thread videoThread,audioThread;safe::signal_t controlEnd;std::shared_ptr<packet_channel_stub_t> packet_channel=std::make_shared<packet_channel_stub_t>();};
 void join_session(session_t& session){
 // JOIN
 }
@@ -146,6 +147,7 @@ template<class Display> void cancel(int phase){
  auto limit=std::chrono::steady_clock::now()+1s;while(c.capture_ctx_queue->running()&&std::chrono::steady_clock::now()<limit)std::this_thread::yield();
  check(!c.capture_ctx_queue->running(),"capture queue stopped");
  std::thread reaper([&]{join_session(s);});resume.set_value();reaper.join();
+ check(s.packet_channel->closes==1,"join closes the packet channel once control has ended");
  check(traps==0,"WGC cancellation completes before video watchdog");check(ipc->stop_requested(),"stop targets this WGC generation");check(ipc->setups==0,"cancelled helper imports no handles");
 }
 int main(){
@@ -159,7 +161,7 @@ int main(){
  auto initializing=std::make_shared<IPC>();initializing->_initializing=true;
  std::promise<void> completed;auto done=completed.get_future();std::thread waiter([&]{initializing->initialize_if_needed();completed.set_value();});
  initializing->request_stop();check(done.wait_for(50ms)==std::future_status::ready,"initialization contender responds to stop");initializing->_initializing=false;waiter.join();
- std::cout<<"13 production WGC stop/handshake/ownership/isolation scenarios, failures="<<failures<<"\n";return failures?1:0;
+ std::cout<<"14 production WGC stop/handshake/ownership/isolation scenarios, failures="<<failures<<"\n";return failures?1:0;
 }
 '''
 budgets='\n'.join(re.findall(r'^    constexpr auto kHelperHandle(?:WaitTimeout|ProgressInterval) = [^\n]+',ipc,re.M))
