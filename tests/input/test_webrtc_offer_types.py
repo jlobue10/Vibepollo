@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 source = (subprocess.check_output(['git', 'show', 'HEAD:src/confighttp.cpp'], cwd=ROOT, text=True)
           if '--baseline' in sys.argv else (ROOT / 'src/confighttp.cpp').read_text())
 start = source.index('  void postWebRTCOffer(')
-handler = source[start:source.index('\n  void getWebRTCAnswer(', start)]
+handler = source[start:source.index('\n  void postWebRTCIce(', start)]
 code = r'''
 #include <chrono>
 #include <iostream>
@@ -36,14 +36,18 @@ void bad_request(resp_https_t response,req_https_t,const std::string &error) {
 void send_response(resp_https_t response,const json &body) { response->status=200;response->body=body; }
 namespace webrtc_stream {
   int offers=0,waits=0;
-  std::string last_type,last_sdp;
+  std::string last_type,last_sdp,negotiation_error;
+  bool session_exists=true,answer_ready=true;
   bool set_remote_offer(const std::string &,const std::string &sdp,const std::string &type) {
     ++offers;last_type=type;last_sdp=sdp;return true;
   }
-  bool get_session(const std::string &) { return true; }
-  std::string get_negotiation_error(const std::string &) { return {}; }
+  bool get_session(const std::string &) { return session_exists; }
+  std::string get_negotiation_error(const std::string &) { return session_exists ? negotiation_error : std::string {}; }
+  bool get_local_answer(const std::string &,std::string &sdp,std::string &type) {
+    if(!session_exists||!answer_ready)return false;sdp="local-answer";type="answer";return true;
+  }
   bool wait_for_local_answer(const std::string &,std::string &sdp,std::string &type,std::chrono::seconds) {
-    ++waits;sdp="local-answer";type="answer";return true;
+    ++waits;if(!session_exists||!answer_ready)return false;sdp="local-answer";type="answer";return true;
   }
 }
 @@HANDLER@@
@@ -75,6 +79,30 @@ int main() {
     check(webrtc_stream::offers==before+1&&webrtc_stream::last_type=="offer"&&webrtc_stream::last_sdp=="browser-offer",
           "valid SDP reaches signaling unchanged");
   }
+  // A session deleted while the offer handler awaited the answer (the delete
+  // route runs on the other signaling thread) must be reported as gone. The web
+  // client stops polling on any error other than "Answer not ready".
+  auto poll=[]{
+    auto response=std::make_shared<response_t>();auto request=std::make_shared<request_t>();
+    getWebRTCAnswer(response,request);return response;
+  };
+  webrtc_stream::answer_ready=false;
+  {
+    auto response=invoke({{"sdp","browser-offer"}});
+    check(response->status==200&&response->body.value("status",false)&&!response->body.value("answer_ready",true),
+          "an answer that is merely late is reported as not ready");
+    auto polled=poll();
+    check(polled->status==200&&polled->body["error"]=="Answer not ready","polling a live session without an answer keeps the client polling");
+  }
+  webrtc_stream::session_exists=false;
+  {
+    auto response=invoke({{"sdp","browser-offer"}});
+    check(response->status==200&&response->body["error"]=="Session not found"&&!response->body.contains("answer_ready"),
+          "an offer whose session was deleted during the wait reports the session gone");
+    auto polled=poll();
+    check(polled->status==200&&polled->body["error"]=="Session not found","polling a deleted session reports it gone instead of not ready");
+  }
+  webrtc_stream::session_exists=true;webrtc_stream::answer_ready=true;
   std::cout<<checks<<" offer-type checks, "<<failures<<" failures\n";
   return failures ? 1 : 0;
 }

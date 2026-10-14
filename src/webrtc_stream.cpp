@@ -1810,6 +1810,9 @@ namespace webrtc_stream {
       std::string session_id;
       std::shared_ptr<peer_t> peer;
       int audio_channels = 2;
+      // The offer this context was created for (Session::offer_generation at the
+      // time). A completion for an older offer is stale once a newer one started.
+      std::uint64_t offer_generation = 0;
     };
 
     struct LocalDescriptionContext {
@@ -1890,6 +1893,12 @@ namespace webrtc_stream {
       // it, candidates_applied counts how many have reached the peer.
       bool remote_description_applied = false;
       std::size_t candidates_applied = 0;
+      // Incremented by every accepted offer. The set-remote-description
+      // completions carry the generation they were started for, so a completion
+      // for an offer that a newer one has since replaced cannot mark the remote
+      // description applied, replay candidates, create an answer or record a
+      // negotiation error against the newer negotiation.
+      std::uint64_t offer_generation = 0;
 
       struct LocalCandidate {
         std::string mid;
@@ -4046,10 +4055,20 @@ namespace webrtc_stream {
       // that arrived while the description was being applied); later ones go
       // straight to the peer from add_ice_candidate().
       std::vector<Session::IceCandidate> pending_candidates;
+      bool stale = false;
       {
         std::lock_guard lg {session_mutex};
         auto it = sessions.find(ctx->session_id);
         if (it != sessions.end() && it->second.peer == ctx->peer) {
+          auto &session = it->second;
+          // A newer offer on this peer has started since this one was sent:
+          // libwebrtc will complete that one too, and only it may proceed.
+          // Marking the description applied here would release held
+          // candidates against the replaced description, and a second answer
+          // would race the newer negotiation.
+          stale = session.offer_generation != ctx->offer_generation;
+        }
+        if (!stale && it != sessions.end() && it->second.peer == ctx->peer) {
           auto &session = it->second;
           session.remote_description_applied = true;
           if (session.candidates_applied < session.candidates.size()) {
@@ -4060,6 +4079,12 @@ namespace webrtc_stream {
           }
           session.candidates_applied = session.candidates.size();
         }
+      }
+      if (stale) {
+        BOOST_LOG(debug) << "WebRTC: ignoring a remote description completion superseded by a newer offer for "
+                         << ctx->session_id;
+        delete ctx;
+        return;
       }
       for (const auto &candidate : pending_candidates) {
         lwrtc_peer_add_candidate(
@@ -4090,16 +4115,25 @@ namespace webrtc_stream {
       if (!ctx) {
         return;
       }
-      BOOST_LOG(error) << "WebRTC: failed to set remote description for " << ctx->session_id
-                       << ": " << (err ? err : "unknown");
       std::string offer_sdp;
       {
         std::lock_guard lg {session_mutex};
         auto it = sessions.find(ctx->session_id);
         if (it != sessions.end()) {
+          if (it->second.offer_generation != ctx->offer_generation) {
+            // The failed offer was already replaced; its error belongs to a
+            // negotiation nobody is waiting on any more. The stored SDP is the
+            // newer offer's, so it is not the one that was rejected.
+            BOOST_LOG(debug) << "WebRTC: ignoring a remote description failure superseded by a newer offer for "
+                             << ctx->session_id << ": " << (err ? err : "unknown");
+            delete ctx;
+            return;
+          }
           offer_sdp = it->second.remote_offer_sdp;
         }
       }
+      BOOST_LOG(error) << "WebRTC: failed to set remote description for " << ctx->session_id
+                       << ": " << (err ? err : "unknown");
       if (!offer_sdp.empty()) {
         // Truncated: the offer is client-supplied and the route accepts up to 256 KiB.
         constexpr std::size_t kLoggedSdpBytes = 4096;
@@ -6311,6 +6345,7 @@ namespace webrtc_stream {
     std::shared_ptr<peer_t> peer;
     int audio_channels = kDefaultAudioChannels;
 #endif
+    std::uint64_t offer_generation = 0;
     {
       std::unique_lock lg {session_mutex};
       auto it = sessions.find(session_id);
@@ -6321,6 +6356,9 @@ namespace webrtc_stream {
       it->second.remote_offer_sdp = sdp;
       it->second.remote_offer_type = type;
       it->second.state.has_remote_offer = true;
+      // This offer supersedes any still-pending one on the same session: the
+      // completions below check the generation they were created for.
+      offer_generation = ++it->second.offer_generation;
       // An answer belongs to one offer. Until this negotiation completes, both
       // the offer route and polling must wait rather than return cached SDP.
       it->second.state.has_local_answer = false;
@@ -6467,7 +6505,7 @@ namespace webrtc_stream {
     // The HTTP route stores every candidate; on_set_remote_success() hands the
     // stored set to libwebrtc once it has a remote description to match them
     // against (it refuses candidates before that).
-    auto *ctx = new SessionPeerContext {session_id, peer, audio_channels};
+    auto *ctx = new SessionPeerContext {session_id, peer, audio_channels, offer_generation};
     lwrtc_peer_set_remote_description(
       peer_call.get(),
       sdp.c_str(),

@@ -4376,6 +4376,14 @@ namespace confighttp {
         output["sdp"] = answer_sdp;
         output["type"] = answer_type;
       } else {
+        if (!webrtc_stream::get_session(session_id)) {
+          // Deleted while the answer was awaited (the delete route runs on the
+          // other signaling thread): "not ready" would keep the client polling
+          // a session that no longer exists, so report it gone instead.
+          output["error"] = "Session not found";
+          send_response(response, output);
+          return;
+        }
         const auto negotiation_error = webrtc_stream::get_negotiation_error(session_id);
         if (!negotiation_error.empty()) {
           output["error"] = negotiation_error;
@@ -4411,6 +4419,10 @@ namespace confighttp {
       output["answer_ready"] = true;
       output["sdp"] = answer_sdp;
       output["type"] = answer_type;
+    } else if (!webrtc_stream::get_session(session_id)) {
+      // The client stops polling on any error other than "Answer not ready".
+      output["status"] = false;
+      output["error"] = "Session not found";
     } else {
       const auto negotiation_error = webrtc_stream::get_negotiation_error(session_id);
       output["status"] = false;
