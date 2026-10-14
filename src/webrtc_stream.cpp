@@ -1820,6 +1820,7 @@ namespace webrtc_stream {
       std::shared_ptr<peer_t> peer;
       std::string sdp;
       std::string type;
+      std::uint64_t offer_generation = 0;
     };
 
     lwrtc_constraints_t *create_constraints();
@@ -1893,11 +1894,9 @@ namespace webrtc_stream {
       // it, candidates_applied counts how many have reached the peer.
       bool remote_description_applied = false;
       std::size_t candidates_applied = 0;
-      // Incremented by every accepted offer. The set-remote-description
-      // completions carry the generation they were started for, so a completion
-      // for an offer that a newer one has since replaced cannot mark the remote
-      // description applied, replay candidates, create an answer or record a
-      // negotiation error against the newer negotiation.
+      // Incremented by every accepted offer and carried through remote, answer
+      // and local-description callbacks. A superseded completion cannot publish
+      // an answer or record an error against the newer negotiation.
       std::uint64_t offer_generation = 0;
 
       struct LocalCandidate {
@@ -3960,17 +3959,35 @@ namespace webrtc_stream {
       if (!ctx) {
         return;
       }
-      if (!set_local_answer(ctx->session_id, ctx->sdp, ctx->type)) {
-        BOOST_LOG(error) << "WebRTC: failed to store local description for " << ctx->session_id;
+      bool stored = false;
+      {
+        std::lock_guard lg {session_mutex};
+        auto it = sessions.find(ctx->session_id);
+        // Check and publish together: a new offer may start at any stage of
+        // the old negotiation, including while SetLocalDescription is pending.
+        if (it != sessions.end() && it->second.peer == ctx->peer &&
+            it->second.offer_generation == ctx->offer_generation) {
+          it->second.local_answer_sdp = ctx->sdp;
+          it->second.local_answer_type = ctx->type;
+          it->second.state.has_local_answer = true;
+          stored = true;
+        }
+      }
+      if (stored) {
+        local_answer_cv.notify_all();
+      } else {
+        BOOST_LOG(debug) << "WebRTC: ignoring a retired local description completion for " << ctx->session_id;
       }
       delete ctx;
     }
 
-    void store_negotiation_error(const std::string &session_id, std::string message) {
+    void store_negotiation_error(const std::string &session_id, const std::shared_ptr<peer_t> &peer,
+                                 std::uint64_t offer_generation, std::string message) {
       {
         std::lock_guard lg {session_mutex};
         auto it = sessions.find(session_id);
-        if (it == sessions.end()) {
+        if (it == sessions.end() || it->second.peer != peer ||
+            it->second.offer_generation != offer_generation) {
           return;
         }
         it->second.negotiation_error = std::move(message);
@@ -3987,13 +4004,26 @@ namespace webrtc_stream {
       }
       BOOST_LOG(error) << "WebRTC: failed to set local description for " << ctx->session_id
                        << ": " << (err ? err : "unknown");
-      store_negotiation_error(ctx->session_id, std::string {"Failed to set local description: "} + (err ? err : "unknown"));
+      store_negotiation_error(ctx->session_id, ctx->peer, ctx->offer_generation,
+                              std::string {"Failed to set local description: "} + (err ? err : "unknown"));
       delete ctx;
     }
 
     void on_create_answer_success(void *user, const char *sdp, const char *type) {
       auto *ctx = static_cast<SessionPeerContext *>(user);
       if (!ctx) {
+        return;
+      }
+      bool current;
+      {
+        std::lock_guard lg {session_mutex};
+        auto it = sessions.find(ctx->session_id);
+        current = it != sessions.end() && it->second.peer == ctx->peer &&
+                  it->second.offer_generation == ctx->offer_generation;
+      }
+      if (!current) {
+        BOOST_LOG(debug) << "WebRTC: ignoring an answer superseded by a newer offer for " << ctx->session_id;
+        delete ctx;
         return;
       }
       auto peer_call = ctx->peer ? ctx->peer->acquire() : peer_t::call_t {};
@@ -4015,7 +4045,8 @@ namespace webrtc_stream {
         ctx->session_id,
         ctx->peer,
         std::move(sdp_copy),
-        std::move(type_copy)
+        std::move(type_copy),
+        ctx->offer_generation
       };
       lwrtc_peer_set_local_description(
         peer_call.get(),
@@ -4035,7 +4066,8 @@ namespace webrtc_stream {
       }
       BOOST_LOG(error) << "WebRTC: failed to create answer for " << ctx->session_id
                        << ": " << (err ? err : "unknown");
-      store_negotiation_error(ctx->session_id, std::string {"Failed to create answer: "} + (err ? err : "unknown"));
+      store_negotiation_error(ctx->session_id, ctx->peer, ctx->offer_generation,
+                              std::string {"Failed to create answer: "} + (err ? err : "unknown"));
       delete ctx;
     }
 
@@ -4055,7 +4087,7 @@ namespace webrtc_stream {
       // that arrived while the description was being applied); later ones go
       // straight to the peer from add_ice_candidate().
       std::vector<Session::IceCandidate> pending_candidates;
-      bool stale = false;
+      bool stale = true;
       {
         std::lock_guard lg {session_mutex};
         auto it = sessions.find(ctx->session_id);
@@ -4142,7 +4174,8 @@ namespace webrtc_stream {
                            << offer_sdp.substr(0, kLoggedSdpBytes)
                            << (offer_sdp.size() > kLoggedSdpBytes ? "\n... (truncated)" : "");
       }
-      store_negotiation_error(ctx->session_id, std::string {"Failed to set remote description: "} + (err ? err : "unknown"));
+      store_negotiation_error(ctx->session_id, ctx->peer, ctx->offer_generation,
+                              std::string {"Failed to set remote description: "} + (err ? err : "unknown"));
       delete ctx;
     }
 

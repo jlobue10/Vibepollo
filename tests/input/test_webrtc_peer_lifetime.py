@@ -88,14 +88,16 @@ void lwrtc_peer_add_candidate(lwrtc_peer_t *peer,const char *,int,const char *) 
   native_entry("ice",peer);if(remote_descriptions==0)++ice_before_remote;++ice_calls;
 }
 void lwrtc_peer_set_remote_description(lwrtc_peer_t *peer,const char *,const char *,lwrtc_ok_cb ok,lwrtc_err_cb err,void *user) {
-  native_entry("offer",peer);++offer_calls;dispatch([=]{if(fail_stage=="offer")err(user,"offer failure");else{++remote_descriptions;ok(user);}});
+  native_entry("offer",peer);++offer_calls;const bool fail=fail_stage=="offer";
+  dispatch([=]{if(fail)err(user,"offer failure");else{++remote_descriptions;ok(user);}});
 }
 void lwrtc_peer_create_answer(lwrtc_peer_t *peer,lwrtc_sdp_cb ok,lwrtc_err_cb err,lwrtc_constraints_t *,void *user) {
-  native_entry("answer",peer);++answer_calls;auto sdp=answer_sdp;
-  dispatch([=]{if(fail_stage=="answer")err(user,"answer failure");else ok(user,sdp.c_str(),"answer");});
+  native_entry("answer",peer);++answer_calls;auto sdp=answer_sdp;const bool fail=fail_stage=="answer";
+  dispatch([=]{if(fail)err(user,"answer failure");else ok(user,sdp.c_str(),"answer");});
 }
 void lwrtc_peer_set_local_description(lwrtc_peer_t *peer,const char *,const char *,lwrtc_ok_cb ok,lwrtc_err_cb err,void *user) {
-  native_entry("local",peer);++local_calls;dispatch([=]{if(fail_stage=="local")err(user,"local failure");else ok(user);});
+  native_entry("local",peer);++local_calls;const bool fail=fail_stage=="local";
+  dispatch([=]{if(fail)err(user,"local failure");else ok(user);});
 }
 void lwrtc_peer_register_state_callback(lwrtc_peer_t *,lwrtc_peer_state_cb,void *) {}
 void lwrtc_peer_register_data_channel(lwrtc_peer_t *,lwrtc_data_channel_cb,void *) {}
@@ -240,6 +242,30 @@ int main(int argc,char **argv) {
     check(answer_calls==answers_before+1&&local_calls==1,"exactly one answer is negotiated");
     check(wait_for_local_answer("session",sdp,type,0ms)&&sdp=="sdp","the newest negotiation's answer is returned");
     close_session("session");
+  } else if(mode.rfind("stale-answer-",0)==0 || mode.rfind("stale-local-",0)==0) {
+    const bool local=mode.rfind("stale-local-",0)==0;
+    const bool error=mode.find("error")!=std::string::npos;
+    const bool after=mode.ends_with("-after");
+    if(error)fail_stage=local ? "local" : "answer";
+    check(offer(),"first offer accepted");next_callback();
+    if(local)next_callback();
+    auto stale=std::move(pending.front());pending.erase(pending.begin());
+    fail_stage.clear();answer_sdp="current-answer";
+    check(offer(),"replacement accepted while an older answer stage is pending");
+    if(after)drain();
+    const int native_locals_before=local_calls;
+    stale();
+    check(local_calls==native_locals_before,"a superseded answer cannot apply a native local description");
+    check(sessions.at("session").negotiation_error.empty(),"an older answer/local failure cannot poison the current negotiation");
+    std::string sdp,type;
+    check(get_local_answer("session",sdp,type)==after&&(!after||sdp=="current-answer"),
+          "a stale completion cannot publish or replace the current answer");
+    check(wait_for_local_answer("session",sdp,type,0ms)==after&&(!after||sdp=="current-answer"),
+          "the offer response reflects only the current negotiation");
+    drain();
+    check(get_local_answer("session",sdp,type)&&sdp=="current-answer"&&sessions.at("session").negotiation_error.empty(),
+          "the current answer survives draining all late callbacks");
+    close_session("session");
   } else if(mode=="invalid-types-new" || mode=="invalid-types-active") {
     const bool active=mode=="invalid-types-active";
     if(active) { check(offer(),"initial offer accepted");drain(); }
@@ -318,6 +344,8 @@ with tempfile.TemporaryDirectory(prefix='webrtc-peer-') as directory:
                  'remote-callback', 'answer-callback', 'local-callback', 'ice', 'offer', 'queued-ice',
                  'repeat-offer', 'repeat-error-offer', 'repeat-error-answer', 'repeat-error-local',
                  'invalid-types-new', 'invalid-types-active', 'double-offer', 'double-offer-stale-error']
+    modes += [f'stale-{stage}-{result}-{timing}' for stage in ('answer', 'local')
+              for result in ('success', 'error') for timing in ('before', 'after')]
     for mode in modes:
         run = subprocess.run([str(binary), mode], timeout=15, capture_output=True, text=True,
                              env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))
