@@ -677,7 +677,7 @@ remembered_identity_body = nvhttp.split(
 )[1].split("std::string get_client_uuid_from_request", 1)[0]
 require(
     remembered_identity_body,
-    "paired_client_uuid_enabled_locked(it->second.uuid)",
+    "paired_client_uuid_enabled_locked(it->second.identity.uuid)",
     "cached TLS identity live authorization",
 )
 
