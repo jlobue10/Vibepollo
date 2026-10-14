@@ -1110,6 +1110,10 @@ export class BrowserWebRtcSession {
       const result = await apiGet<WebRtcIceCandidateResponse>(
         `/api/webrtc/sessions/${encodeURIComponent(this.sessionId)}/ice?since=${this.remoteCandidateIndex}`,
       );
+      // Disconnect/reconnect can finish while this request is in flight. Its
+      // cursor belongs to the old session; applying it would skip the new
+      // session's candidates even though receiveRemoteCandidate rejects them.
+      if (!this.isActiveGeneration(generation)) return;
       for (const candidate of result.candidates ?? [])
         this.receiveRemoteCandidate(candidate, generation);
       if (typeof result.next_since === 'number') {
