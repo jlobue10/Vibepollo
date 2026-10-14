@@ -27,6 +27,11 @@ namespace {
   using platf::vhf_gamepad::backend_e;
   using platf::vhf_gamepad::decode_rumble_rgb;
   using platf::vhf_gamepad::decode_steam_haptic;
+  using platf::vhf_gamepad::decode_steam_settings;
+  using platf::vhf_gamepad::steam_settings_t;
+  using platf::vhf_gamepad::STEAM_SETTINGS_LOAD_DEFAULTS;
+  using platf::vhf_gamepad::STEAM_SETTINGS_SET_VALUES;
+  using platf::vhf_gamepad::STEAM_SETTINGS_TRIPLES_MAX;
   using platf::vhf_gamepad::steam_haptic_t;
   using platf::vhf_gamepad::synthesize_steam_rumble;
   using platf::vhf_gamepad::synthesized_rumble_t;
@@ -547,6 +552,56 @@ namespace {
     haptic.length = static_cast<std::uint8_t>(report.size());
     std::copy(report.begin(), report.end(), haptic.report.begin());
     return haptic;
+  }
+
+  lvg::feedback_event make_steam_settings_event(const std::uint8_t command, const std::uint8_t count, std::initializer_list<std::uint8_t> triples) {
+    lvg::steam_settings_feedback payload {};
+    payload.command = command;
+    payload.count = count;
+    std::copy(triples.begin(), triples.end(), payload.triples);
+    lvg::feedback_event event {};
+    event.header.size = sizeof(event);
+    event.header.version = lvg::k_protocol_version;
+    event.type = lvg::feedback_type::steam_settings;
+    event.payload_size = sizeof(payload);
+    std::memcpy(event.payload, &payload, sizeof(payload));
+    return event;
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamSettingsWriteIsDecodedVerbatim) {
+    steam_settings_t settings {};
+    ASSERT_TRUE(decode_steam_settings(
+      make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, 2, {48, 0x18, 0x00, 7, 0x07, 0x00}), settings));
+    EXPECT_EQ(settings.command, STEAM_SETTINGS_SET_VALUES);
+    EXPECT_EQ(settings.count, 2);
+    EXPECT_EQ(settings.triples[0], 48);
+    EXPECT_EQ(settings.triples[1], 0x18);
+    EXPECT_EQ(settings.triples[3], 7);
+    EXPECT_EQ(settings.triples[4], 0x07);
+    EXPECT_EQ(settings.triples[6], 0);
+
+    ASSERT_TRUE(decode_steam_settings(make_steam_settings_event(STEAM_SETTINGS_LOAD_DEFAULTS, 0, {}), settings));
+    EXPECT_EQ(settings.command, STEAM_SETTINGS_LOAD_DEFAULTS);
+    EXPECT_EQ(settings.count, 0);
+
+    // A settings event is nothing else, and a haptic event is not a settings write.
+    steam_haptic_t haptic {};
+    EXPECT_FALSE(decode_steam_haptic(make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, 1, {9, 0, 0}), haptic));
+    rumble_rgb_t rumble {};
+    EXPECT_FALSE(decode_rumble_rgb(make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, 1, {9, 0, 0}), rumble));
+    EXPECT_FALSE(decode_steam_settings(make_steam_haptic_event({0x82, 0x01, 0x02, 0xf2}), settings));
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamSettingsWriteWithAnImpossibleShapeIsRefused) {
+    steam_settings_t settings {};
+    EXPECT_FALSE(decode_steam_settings(make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, 0, {}), settings));
+    EXPECT_FALSE(decode_steam_settings(
+      make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, STEAM_SETTINGS_TRIPLES_MAX + 1, {}), settings));
+    EXPECT_FALSE(decode_steam_settings(make_steam_settings_event(STEAM_SETTINGS_LOAD_DEFAULTS, 1, {9, 0, 0}), settings));
+    EXPECT_FALSE(decode_steam_settings(make_steam_settings_event(0x89, 1, {9, 0, 0}), settings));
+    auto truncated = make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, 1, {9, 0, 0});
+    truncated.payload_size = sizeof(lvg::steam_settings_feedback) - 1;
+    EXPECT_FALSE(decode_steam_settings(truncated, settings));
   }
 
   TEST_F(VhfGamepadPolicyTest, SteamHapticEventIsDecodedVerbatim) {

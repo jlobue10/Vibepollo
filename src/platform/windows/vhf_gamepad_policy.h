@@ -239,6 +239,30 @@ namespace platf::vhf_gamepad {
   [[nodiscard]] bool decode_steam_haptic(const lvg::feedback_event &event, steam_haptic_t &haptic) noexcept;
 
   /**
+   * @brief A Steam Controller (2026) settings write the driver forwarded verbatim.
+   * @details `command` is 0x87 (SET_SETTINGS_VALUES) with `count` (id, lo, hi) triples, at most
+   *          nine per event (the driver splits a longer write into events in order), or 0x8E
+   *          (LOAD_DEFAULT_SETTINGS) with none. A client with the real controller applies them so
+   *          its firmware runs with Steam's settings; the virtual device keeps its own table.
+   */
+  struct steam_settings_t {
+    std::uint8_t command {};
+    std::uint8_t count {};
+    std::array<std::uint8_t, 27> triples {};
+  };
+
+  constexpr std::uint8_t STEAM_SETTINGS_SET_VALUES = 0x87;
+  constexpr std::uint8_t STEAM_SETTINGS_LOAD_DEFAULTS = 0x8E;
+  constexpr std::uint8_t STEAM_SETTINGS_TRIPLES_MAX = 9;
+
+  /**
+   * @brief Decodes a driver feedback event that carries a Steam Controller settings write.
+   * @return `true` when `settings` was populated: the payload size matches, the command is one of
+   *         the two, and the count is what that command allows.
+   */
+  [[nodiscard]] bool decode_steam_settings(const lvg::feedback_event &event, steam_settings_t &settings) noexcept;
+
+  /**
    * @brief Rumble rendered from haptic reports for a client without the controller's pads.
    * @details Each side keeps its own hold: 0 means "until the next report for that side",
    *          otherwise the side should fall silent after that many milliseconds. Steam's UI
