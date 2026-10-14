@@ -315,6 +315,26 @@ namespace platf::vhf_gamepad {
     return true;
   }
 
+  bool decode_steam_settings(const lvg::feedback_event &event, steam_settings_t &settings) noexcept {
+    if (event.type != lvg::feedback_type::steam_settings ||
+        event.payload_size != sizeof(lvg::steam_settings_feedback)) {
+      return false;
+    }
+    static_assert(sizeof(lvg::steam_settings_feedback::triples) == sizeof(steam_settings_t::triples));
+    lvg::steam_settings_feedback payload {};
+    std::memcpy(&payload, event.payload, sizeof(payload));
+    const bool set_values = payload.command == STEAM_SETTINGS_SET_VALUES &&
+                            payload.count >= 1 && payload.count <= STEAM_SETTINGS_TRIPLES_MAX;
+    const bool load_defaults = payload.command == STEAM_SETTINGS_LOAD_DEFAULTS && payload.count == 0;
+    if (!set_values && !load_defaults) {
+      return false;
+    }
+    settings.command = payload.command;
+    settings.count = payload.count;
+    std::memcpy(settings.triples.data(), payload.triples, settings.triples.size());
+    return true;
+  }
+
   namespace {
     std::uint16_t read_le16(const std::uint8_t *bytes) noexcept {
       return static_cast<std::uint16_t>(bytes[0] | (bytes[1] << 8));

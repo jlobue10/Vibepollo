@@ -39,6 +39,10 @@
 #ifndef LI_CCAP_STEAM_HAPTIC
   #define LI_CCAP_STEAM_HAPTIC 0x800
 #endif
+// A client that applies Steam's settings writes to the real controller (same fork).
+#ifndef LI_CCAP_STEAM_SETTINGS
+  #define LI_CCAP_STEAM_SETTINGS 0x2000
+#endif
 
 namespace platf {
   using namespace std::literals;
@@ -275,6 +279,7 @@ namespace platf {
     void feedback_loop();
     void raise_feedback(int nr, const vhf_gamepad::rumble_rgb_t &feedback);
     void raise_steam_haptic(int nr, const vhf_gamepad::steam_haptic_t &haptic, std::chrono::steady_clock::time_point now);
+    void raise_steam_settings(int nr, const vhf_gamepad::steam_settings_t &settings);
     void expire_synthesized_rumble(int nr, std::chrono::steady_clock::time_point now);
   };
 
@@ -439,6 +444,31 @@ namespace platf {
   }
 
   /**
+   * @brief Forwards a Steam Controller settings write to a client that drives the real controller.
+   * @details Only a client that advertised `LI_CCAP_STEAM_SETTINGS` gets them; nothing stands in
+   *          for them elsewhere (the virtual device keeps its own table either way). Settings are
+   *          events, never coalesced, so a chunk of a longer write cannot replace its siblings.
+   *          Independent of `forward_rumble`: the writes also carry pad modes and click pressure.
+   *          Runs on the feedback thread.
+   */
+  void vhf_gamepad_t::impl_t::raise_steam_settings(const int nr, const vhf_gamepad::steam_settings_t &settings) {
+    auto &slot = slots[nr];
+    if (!slot.active || !slot.feedback_queue || !(slot.client_capabilities & LI_CCAP_STEAM_SETTINGS)) {
+      return;
+    }
+    auto msg = gamepad_feedback_msg_t::make_steam_settings(
+      slot.client_relative_index,
+      settings.command,
+      settings.count,
+      settings.triples
+    );
+    if (!raise_gamepad_feedback(*slot.feedback_queue, std::move(msg))) {
+      BOOST_LOG(warning) << "VHF gamepad "sv << nr << ": feedback queue full, dropping Steam settings write 0x"sv
+                         << std::hex << int(settings.command) << std::dec << " ("sv << int(settings.count) << " triples)"sv;
+    }
+  }
+
+  /**
    * @brief Silences a synthesized rumble side whose hold has run out.
    * @details Runs on the feedback thread on every poll, so a side goes quiet within one poll
    *          interval of its deadline whether or not the driver has anything new.
@@ -530,6 +560,12 @@ namespace platf {
           vhf_gamepad::steam_haptic_t haptic {};
           if (vhf_gamepad::decode_steam_haptic(event, haptic)) {
             raise_steam_haptic(nr, haptic, now);
+            continue;
+          }
+
+          vhf_gamepad::steam_settings_t settings {};
+          if (vhf_gamepad::decode_steam_settings(event, settings)) {
+            raise_steam_settings(nr, settings);
             continue;
           }
 

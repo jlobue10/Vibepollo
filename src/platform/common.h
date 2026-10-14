@@ -122,6 +122,7 @@ namespace platf {
     set_adaptive_triggers,  ///< Set adaptive triggers
     haptics_pcm,  ///< 5 ms of 48 kHz S16LE stereo actuator samples
     steam_haptic,  ///< A Steam Controller (2026) haptic output report, verbatim (Vibepollo extension)
+    steam_settings,  ///< A Steam Controller (2026) settings write, verbatim (Vibepollo extension)
   };
 
   struct gamepad_feedback_msg_t {
@@ -180,6 +181,22 @@ namespace platf {
       return msg;
     }
 
+    /**
+     * @brief A Steam Controller (2026) settings write for a client that drives the real controller.
+     * @param command 0x87 SET_SETTINGS_VALUES (1..9 triples) or 0x8E LOAD_DEFAULT_SETTINGS (none).
+     * @param count Triples valid in `triples`.
+     * @param triples `(id, lo, hi)` triples as Steam wrote them.
+     */
+    static gamepad_feedback_msg_t make_steam_settings(std::uint16_t id, std::uint8_t command, std::uint8_t count, const std::array<std::uint8_t, 27> &triples) {
+      gamepad_feedback_msg_t msg;
+      msg.type = gamepad_feedback_e::steam_settings;
+      msg.id = id;
+      msg.data.steam_settings.command = command;
+      msg.data.steam_settings.count = count;
+      msg.data.steam_settings.triples = triples;
+      return msg;
+    }
+
     gamepad_feedback_e type;
     std::uint16_t id;
 
@@ -222,6 +239,12 @@ namespace platf {
         std::uint8_t length;
         std::array<std::uint8_t, 12> report;
       } steam_haptic;
+
+      struct {
+        std::uint8_t command;
+        std::uint8_t count;
+        std::array<std::uint8_t, 27> triples;
+      } steam_settings;
     } data;
   };
 
