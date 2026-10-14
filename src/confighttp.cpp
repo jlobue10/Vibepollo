@@ -4352,8 +4352,8 @@ namespace confighttp {
         bad_request(response, request, "SDP offer too large or malformed");
         return;
       }
-      if (type != "offer" && type != "pranswer" && type != "answer" && type != "rollback") {
-        bad_request(response, request, "Unsupported SDP type");
+      if (type != "offer") {
+        bad_request(response, request, "This endpoint only accepts SDP offers");
         return;
       }
       nlohmann::json output;
