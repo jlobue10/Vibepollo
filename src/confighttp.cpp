@@ -4490,6 +4490,9 @@ namespace confighttp {
       }
       if (ok) {
         output["status"] = true;
+      } else if (webrtc_stream::get_session(session_id)) {
+        // The session exists: the candidate was refused (storage bound, oversize entry).
+        output["error"] = "ICE candidate rejected";
       } else {
         output["error"] = "Session not found";
       }

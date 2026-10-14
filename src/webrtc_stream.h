@@ -123,7 +123,6 @@ namespace webrtc_stream {
 
   bool set_remote_offer(std::string_view id, const std::string &sdp, const std::string &type);
   bool add_ice_candidate(std::string_view id, std::string mid, int mline_index, std::string candidate);
-  bool set_local_answer(std::string_view id, const std::string &sdp, const std::string &type);
   bool get_local_answer(std::string_view id, std::string &sdp_out, std::string &type_out);
   bool wait_for_local_answer(
     std::string_view id,

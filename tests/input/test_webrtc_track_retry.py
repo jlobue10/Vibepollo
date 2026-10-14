@@ -90,7 +90,7 @@ constexpr auto kWebrtcStartupKeyframeHold=1s,kWebrtcStartupKeyframeDeadline=5s;
 '''
 contexts = source[source.index('    struct SessionIceContext {'):source.index('    lwrtc_constraints_t *create_constraints();')]
 functions = '\n'.join(block(marker) for marker in (
-    '    bool attach_media_tracks(', '  bool set_local_answer(',
+    '    bool attach_media_tracks(',
     '    void on_set_local_success(', '    void store_negotiation_error(',
     '    void on_set_local_failure(', '    void on_create_answer_success(',
     '    void on_create_answer_failure(', '    void on_set_remote_success(',
