@@ -123,7 +123,6 @@ namespace webrtc_stream {
   }  // namespace
 
   bool add_local_candidate(std::string_view id, std::string mid, int mline_index, std::string candidate);
-  bool set_local_answer(std::string_view id, const std::string &sdp, const std::string &type);
 
   namespace {
     constexpr std::size_t kMaxVideoFrames = 4;
@@ -6472,8 +6471,15 @@ namespace webrtc_stream {
         // libwebrtc, so they are held and replayed from on_set_remote_success()
         // exactly as for a new peer. A previous attempt that never applied
         // keeps its pending range, so a retried offer still replays it.
+        // The entries below the cursor belong to the description being
+        // replaced and are never read again: drop them, so the per-session
+        // storage bound is per negotiation and cannot accumulate across ICE
+        // restarts into a refusal (H33-01).
+        auto &stored = it->second.candidates;
+        stored.erase(stored.begin(), stored.begin() + static_cast<std::ptrdiff_t>(it->second.candidates_applied));
+        it->second.state.ice_candidates = stored.size();
         it->second.remote_description_applied = false;
-        it->second.candidates_applied = it->second.candidates.size();
+        it->second.candidates_applied = 0;
       }
       if (!it->second.data_channel_context) {
         auto data_context = std::make_shared<SessionDataChannelContext>();
@@ -6604,22 +6610,6 @@ namespace webrtc_stream {
       lwrtc_peer_add_candidate(peer_call.get(), stored_mid.c_str(), stored_mline_index, stored_candidate.c_str());
     }
 #endif
-    return true;
-  }
-
-  bool set_local_answer(std::string_view id, const std::string &sdp, const std::string &type) {
-    {
-      std::lock_guard lg {session_mutex};
-      auto it = sessions.find(std::string {id});
-      if (it == sessions.end()) {
-        return false;
-      }
-
-      it->second.local_answer_sdp = sdp;
-      it->second.local_answer_type = type;
-      it->second.state.has_local_answer = true;
-    }
-    local_answer_cv.notify_all();
     return true;
   }
 

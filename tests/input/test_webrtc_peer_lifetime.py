@@ -16,6 +16,11 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 source = (subprocess.check_output(['git', 'show', 'HEAD:src/webrtc_stream.cpp'], cwd=ROOT, text=True)
           if '--baseline' in sys.argv else (ROOT / 'src/webrtc_stream.cpp').read_text())
+# H33-02: the answer publication that bypassed the peer/generation check has no caller and
+# is gone; a merge that brings it back (upstream still has it) fails this run.
+unchecked_publication = 'set_local_answer(' in source
+if unchecked_publication:
+    print('FAIL set_local_answer() is back: an answer must only be published by on_set_local_success')
 
 
 def block(marker):
@@ -198,6 +203,9 @@ int main(int argc,char **argv) {
     check(offer(),"first offer accepted");drain();
     std::string sdp,type;
     check(get_local_answer("session",sdp,type)&&sdp=="sdp","first answer can be polled");
+    // H33-01: the first negotiation's candidates are dropped when a renegotiation starts, so
+    // the per-negotiation storage bound cannot accumulate across ICE restarts into a refusal.
+    {bool all=true;for(int i=0;i<1024;++i)all=candidate()&&all;check(all,"1024 candidates on the first negotiation are accepted");}
     answer_sdp="replacement-sdp";
     if(mode.rfind("repeat-error-",0)==0)fail_stage=mode.substr(13);
     check(offer(),"replacement offer accepted");
@@ -205,6 +213,7 @@ int main(int argc,char **argv) {
     // remote description is still the one libwebrtc would match it against.
     const int ice_before_renegotiation=ice_calls;
     check(candidate(),"a candidate for the replacement offer is stored");
+    check(sessions.at("session").candidates.size()==1&&sessions.at("session").state.ice_candidates==1,"the replaced negotiation's candidates are dropped");
     check(ice_calls==ice_before_renegotiation,"a candidate during renegotiation is held until the new remote description is applied");
     check(!get_local_answer("session",sdp,type),"polling cannot return the previous offer's answer while renegotiating");
     check(!wait_for_local_answer("session",sdp,type,0ms),"the offer route waits for this negotiation instead of returning cached SDP");
@@ -321,7 +330,7 @@ int main(int argc,char **argv) {
 }
 '''
 functions = '\n'.join(block(marker) for marker in (
-    '  bool set_local_answer(', '  bool get_local_answer(', '  bool wait_for_local_answer(',
+    '  bool get_local_answer(', '  bool wait_for_local_answer(',
     '    void on_set_local_success(', '    void store_negotiation_error(',
     '    void on_set_local_failure(', '    void on_create_answer_success(',
     '    void on_create_answer_failure(', '    void on_set_remote_success(',
@@ -354,4 +363,4 @@ with tempfile.TemporaryDirectory(prefix='webrtc-peer-') as directory:
             failed.append(mode)
             print(run.stderr[:4500])
     print(f'{len(modes) - len(failed)}/{len(modes)} peer-lifetime scenarios passed; failed: {failed}')
-    sys.exit(bool(failed))
+    sys.exit(bool(failed) or unchecked_publication)
