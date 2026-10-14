@@ -136,7 +136,7 @@ struct Session {
   lwrtc_data_channel_t *input_channel=nullptr;
   struct IceCandidate { std::string mid;int mline_index;std::string candidate; };
   std::vector<IceCandidate> candidates;
-  bool remote_description_applied=false;std::size_t candidates_applied=0;
+  bool remote_description_applied=false;std::size_t candidates_applied=0;std::uint64_t offer_generation=0;
 };
 struct Av1Offer { bool offered=false;std::optional<Av1FmtpParams> fmtp; };
 struct HevcOffer { bool offered=false;std::vector<std::string> fmtp_candidates; };
@@ -215,6 +215,31 @@ int main(int argc,char **argv) {
       check(!get_local_answer("session",sdp,type)&&!sessions.at("session").negotiation_error.empty(),"polling reports no answer after a negotiation failure");
     }
     close_session("session");
+  } else if(mode=="double-offer" || mode=="double-offer-stale-error") {
+    // Two offers in flight on one peer: the completion of the replaced offer
+    // must not mark the remote description applied, replay held candidates,
+    // create an answer or (when it fails) record an error against the newer
+    // negotiation. Only the newest offer's completion proceeds.
+    if(mode=="double-offer-stale-error")fail_stage="offer";
+    check(offer(),"first offer accepted");
+    fail_stage.clear();
+    check(candidate(),"a candidate is stored while the first offer is pending");
+    check(offer(),"a second offer is accepted while the first is still pending");
+    check(candidate(),"a candidate is stored while the second offer is pending");
+    const int ice_before=ice_calls,answers_before=answer_calls;
+    next_callback();
+    check(ice_calls==ice_before&&answer_calls==answers_before,"the replaced offer's completion neither replays candidates nor creates an answer");
+    check(!sessions.at("session").remote_description_applied,"the replaced offer's completion does not mark the remote description applied");
+    check(sessions.at("session").negotiation_error.empty(),"a failure of the replaced offer is not recorded against the newer negotiation");
+    std::string sdp,type;
+    check(!wait_for_local_answer("session",sdp,type,0ms),"the offer route keeps waiting for the newer negotiation");
+    drain();
+    // Both stored candidates are handed over by the newest completion; libwebrtc
+    // drops any whose ufrag belongs to the replaced description.
+    check(sessions.at("session").remote_description_applied&&ice_calls==ice_before+2,"the newest offer's completion applies and replays the held candidates");
+    check(answer_calls==answers_before+1&&local_calls==1,"exactly one answer is negotiated");
+    check(wait_for_local_answer("session",sdp,type,0ms)&&sdp=="sdp","the newest negotiation's answer is returned");
+    close_session("session");
   } else if(mode=="invalid-types-new" || mode=="invalid-types-active") {
     const bool active=mode=="invalid-types-active";
     if(active) { check(offer(),"initial offer accepted");drain(); }
@@ -292,7 +317,7 @@ with tempfile.TemporaryDirectory(prefix='webrtc-peer-') as directory:
                  'create-failure', 'attach-failure', 'constraints-failure',
                  'remote-callback', 'answer-callback', 'local-callback', 'ice', 'offer', 'queued-ice',
                  'repeat-offer', 'repeat-error-offer', 'repeat-error-answer', 'repeat-error-local',
-                 'invalid-types-new', 'invalid-types-active']
+                 'invalid-types-new', 'invalid-types-active', 'double-offer', 'double-offer-stale-error']
     for mode in modes:
         run = subprocess.run([str(binary), mode], timeout=15, capture_output=True, text=True,
                              env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))
