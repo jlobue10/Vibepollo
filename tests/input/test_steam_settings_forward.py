@@ -39,9 +39,9 @@ using namespace std::literals;
 constexpr int LI_CCAP_STEAM_HAPTIC=1;
 constexpr int LI_CCAP_STEAM_SETTINGS=2;
 namespace config { struct { bool forward_rumble=true; } input; }
-TYPES
-PARSER
-HELPERS
+@TYPES@
+@PARSER@
+@HELPERS@
 namespace vhf_gamepad {
 struct steam_haptic_t {std::uint8_t length;std::array<std::uint8_t,12> report;};
 struct steam_settings_t {std::uint8_t command;std::uint8_t count;std::array<std::uint8_t,27> triples;};
@@ -49,8 +49,8 @@ struct steam_settings_t {std::uint8_t command;std::uint8_t count;std::array<std:
 struct slot_t {bool active=true;unsigned client_capabilities=3;std::uint16_t client_relative_index=0;
  std::shared_ptr<safe::queue_t<gamepad_feedback_msg_t>> feedback_queue;};
 std::array<slot_t,16> slots;
-HAPTIC
-SETTINGS
+@HAPTIC_BODY@
+@SETTINGS_BODY@
 int main(){int failures=0;
  auto check=[&](bool ok,const char* msg){std::cout<<(ok?"PASS ":"FAIL ")<<msg<<'\n';failures+=!ok;};
  auto queue=std::make_shared<safe::queue_t<gamepad_feedback_msg_t>>(256);
@@ -95,7 +95,7 @@ int main(){int failures=0;
  check(verbatim,"all nine triples reach the client byte for byte");
  return failures!=0;
 }
-""".replace('TYPES',types).replace('PARSER',parser).replace('HELPERS',helpers).replace('HAPTIC',haptic_body).replace('SETTINGS',settings_body)
+""".replace('@TYPES@',types).replace('@PARSER@',parser).replace('@HELPERS@',helpers).replace('@HAPTIC_BODY@',haptic_body).replace('@SETTINGS_BODY@',settings_body)
 with tempfile.TemporaryDirectory(prefix='host-settings-') as directory:
     work=Path(directory);(work/'thread_safe_test.h').write_text(read('src/thread_safe.h'));(work/'test.cpp').write_text(code)
     args=['g++','-std=c++20','-fsanitize=address,undefined','-g','-I'+str(ROOT/'src')]
