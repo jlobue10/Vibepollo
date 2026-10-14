@@ -6556,6 +6556,9 @@ namespace webrtc_stream {
     BOOST_LOG(debug) << "WebRTC: set_remote_offer exit id=" << session_id;
     return true;
 #else
+    // The generation only feeds the SessionPeerContext of a WebRTC build; the
+    // session counter still advances above so both builds share one state model.
+    (void) offer_generation;
     BOOST_LOG(error) << "WebRTC: support is disabled at build time";
     return false;
 #endif
