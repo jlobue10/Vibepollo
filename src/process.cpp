@@ -53,6 +53,7 @@
 #include "display_device.h"
 #include "deferred_action.h"
 #include "file_handler.h"
+#include "globals.h"
 #include "logging.h"
 #include "platform/common.h"
 #if defined(_WIN32) || defined(__linux__)
@@ -2522,7 +2523,21 @@ namespace proc {
         }
       }
 
+      // The wait stays unbounded (prep commands are allowed to take as long as
+      // they need), but a slow one must be visible: the launch is blocked here.
+      constexpr auto kPrepCommandSlowWarning = 10s;
+      const auto prep_started = std::chrono::steady_clock::now();
+      const auto prep_watchdog = task_pool.pushDelayed([do_cmd = cmd.do_cmd, warn_after = kPrepCommandSlowWarning]() {
+        BOOST_LOG(warning) << "Prep command ["sv << do_cmd << "] has been running for more than "
+                           << warn_after.count() << " s; the launch is waiting on it.";
+      }, kPrepCommandSlowWarning).task_id;
       child.wait(ec);
+      task_pool.cancel(prep_watchdog);
+      const auto prep_elapsed = std::chrono::steady_clock::now() - prep_started;
+      if (prep_elapsed >= kPrepCommandSlowWarning) {
+        BOOST_LOG(info) << "Prep command ["sv << cmd.do_cmd << "] finished after "
+                        << std::chrono::duration_cast<std::chrono::seconds>(prep_elapsed).count() << " s.";
+      }
       if (ec) {
         BOOST_LOG(error) << '[' << cmd.do_cmd << "] wait failed with error code ["sv << ec << ']';
         return -1;
