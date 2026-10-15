@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <string>
 
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
@@ -415,6 +416,22 @@ namespace platf::vhf_gamepad {
         // LFO tone, log sweep, script: nothing a rumble motor can stand in for.
         return 0;
     }
+  }
+
+  bool feedback_counters_notable(const lvg::feedback_counters &counters) noexcept {
+    return counters.haptic_evicted != 0 || counters.settings_evicted != 0 ||
+           counters.transitions_dropped != 0 || counters.unknown_commands != 0;
+  }
+
+  std::string describe_feedback_counters(const lvg::feedback_counters &counters) {
+    const auto count = [](const std::uint8_t value) {
+      // The driver keeps the full count; the wire saturates at 255.
+      return value == 0xFF ? std::string {"255+"} : std::to_string(value);
+    };
+    return "haptic_evicted=" + count(counters.haptic_evicted) +
+           " settings_evicted=" + count(counters.settings_evicted) +
+           " transitions_dropped=" + count(counters.transitions_dropped) +
+           " unknown_commands=" + count(counters.unknown_commands);
   }
 
 }  // namespace platf::vhf_gamepad

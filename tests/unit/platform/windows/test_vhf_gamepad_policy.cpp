@@ -719,4 +719,28 @@ namespace {
     EXPECT_TRUE(pointers.empty());
     EXPECT_FALSE(send(lvg::touch_event::down, 1, std::numeric_limits<float>::quiet_NaN()));
   }
+
+  TEST_F(VhfGamepadPolicyTest, FeedbackCountersAreNotableOnlyWhenSomethingWasDropped) {
+    using platf::vhf_gamepad::feedback_counters_notable;
+    const auto counters = [](std::uint8_t haptic, std::uint8_t settings, std::uint8_t transitions, std::uint8_t unknown) {
+      return lvg::feedback_counters {haptic, settings, transitions, unknown};
+    };
+    EXPECT_FALSE(feedback_counters_notable(counters(0, 0, 0, 0)));
+    EXPECT_TRUE(feedback_counters_notable(counters(1, 0, 0, 0)));
+    EXPECT_TRUE(feedback_counters_notable(counters(0, 1, 0, 0)));
+    EXPECT_TRUE(feedback_counters_notable(counters(0, 0, 1, 0)));
+    EXPECT_TRUE(feedback_counters_notable(counters(0, 0, 0, 1)));
+  }
+
+  TEST_F(VhfGamepadPolicyTest, FeedbackCountersDescribeEveryFieldAndMarkWireSaturation) {
+    using platf::vhf_gamepad::describe_feedback_counters;
+    EXPECT_EQ(
+      describe_feedback_counters(lvg::feedback_counters {0, 0, 0, 0}),
+      "haptic_evicted=0 settings_evicted=0 transitions_dropped=0 unknown_commands=0"
+    );
+    EXPECT_EQ(
+      describe_feedback_counters(lvg::feedback_counters {3, 0xFF, 254, 1}),
+      "haptic_evicted=3 settings_evicted=255+ transitions_dropped=254 unknown_commands=1"
+    );
+  }
 }  // namespace
