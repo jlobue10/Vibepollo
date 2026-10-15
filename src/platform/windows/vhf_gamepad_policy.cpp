@@ -3,6 +3,7 @@
  * @brief Definitions for translating normalized gamepad state into the VHF driver protocol.
  */
 // local includes
+#include "src/steam_controller_protocol.h"
 #include "vhf_gamepad_policy.h"
 
 // standard includes
@@ -14,14 +15,6 @@
 
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
-
-// moonlight-common-c grew LI_CTYPE_STEAM after the revision pinned here; the wire value is fixed.
-#ifndef LI_CTYPE_STEAM
-  #define LI_CTYPE_STEAM 0x04
-#endif
-#ifndef LI_CCAP_SC26_BUTTONS
-  #define LI_CCAP_SC26_BUTTONS 0x1000
-#endif
 }
 
 namespace platf::vhf_gamepad {

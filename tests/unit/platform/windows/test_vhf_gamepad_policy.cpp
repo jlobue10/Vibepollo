@@ -12,15 +12,8 @@
 #include <string_view>
 #include <utility>
 
-extern "C" {
-#include <moonlight-common-c/src/Limelight.h>
-
-#ifndef LI_CTYPE_STEAM
-  #define LI_CTYPE_STEAM 0x04
-#endif
-}
-
 #include <src/platform/windows/vhf_gamepad_policy.h>
+#include <src/steam_controller_protocol.h>
 
 namespace {
 
@@ -29,9 +22,6 @@ namespace {
   using platf::vhf_gamepad::decode_steam_haptic;
   using platf::vhf_gamepad::decode_steam_settings;
   using platf::vhf_gamepad::steam_settings_t;
-  using platf::vhf_gamepad::STEAM_SETTINGS_LOAD_DEFAULTS;
-  using platf::vhf_gamepad::STEAM_SETTINGS_SET_VALUES;
-  using platf::vhf_gamepad::STEAM_SETTINGS_TRIPLES_MAX;
   using platf::vhf_gamepad::steam_haptic_t;
   using platf::vhf_gamepad::synthesize_steam_rumble;
   using platf::vhf_gamepad::synthesized_rumble_t;

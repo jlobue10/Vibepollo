@@ -60,6 +60,7 @@ extern "C" {
 #include "rtsp.h"
 #include "rtsp_pending_policy.h"
 #include "session_history.h"
+#include "steam_controller_protocol.h"
 #include "stream.h"
 #include "server_cmd_budget.h"
 #include "sync.h"
@@ -130,8 +131,8 @@ static const short packetTypes[] = {
   0x3001,  // Set Clipboard (Apollo protocol extension)
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
-  0x5504,  // Steam Controller haptic report (Vibepollo protocol extension)
-  0x5505,  // Steam Controller settings write (Vibepollo protocol extension)
+  STEAM_HAPTIC_PACKET_TYPE,  // 0x5504: Steam Controller haptic report (Vibepollo protocol extension)
+  STEAM_SETTINGS_PACKET_TYPE,  // 0x5505: Steam Controller settings write (Vibepollo protocol extension)
 };
 
 namespace asio = boost::asio;
@@ -461,7 +462,7 @@ namespace stream {
 
     std::uint16_t id;
     std::uint8_t length;
-    std::uint8_t report[12];
+    std::uint8_t report[STEAM_HAPTIC_REPORT_MAX];
   };
 
   /**
@@ -475,7 +476,7 @@ namespace stream {
     std::uint16_t id;
     std::uint8_t command;
     std::uint8_t count;
-    std::uint8_t triples[27];
+    std::uint8_t triples[STEAM_SETTINGS_PAYLOAD_SIZE];
   };
 
   struct control_hdr_mode_t {

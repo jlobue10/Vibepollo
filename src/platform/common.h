@@ -37,6 +37,7 @@
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
 }
+#include "src/steam_controller_protocol.h"
 
 using namespace std::literals;
 
@@ -96,17 +97,17 @@ namespace platf {
   // Moonlight extension (LI_CCAP_GRIP_SENSE): the Steam Controller (2026)'s capacitive
   // grip sensors, "held" rather than pressed. Only the VHF Steam Controller profile
   // consumes them; every other backend ignores the two bits.
-  constexpr std::uint32_t LEFT_GRIP_TOUCH = 0x400000;
-  constexpr std::uint32_t RIGHT_GRIP_TOUCH = 0x800000;
+  constexpr std::uint32_t LEFT_GRIP_TOUCH = LEFT_GRIP_TOUCH_FLAG;
+  constexpr std::uint32_t RIGHT_GRIP_TOUCH = RIGHT_GRIP_TOUCH_FLAG;
   // Moonlight extension (LI_CCAP_STICK_TOUCH): capacitive touch of the Steam Controller's
   // sticks, held rather than pressed. Same consumer as the grips.
-  constexpr std::uint32_t LEFT_STICK_TOUCH = 0x1000000;
-  constexpr std::uint32_t RIGHT_STICK_TOUCH = 0x2000000;
+  constexpr std::uint32_t LEFT_STICK_TOUCH = LEFT_STICK_TOUCH_FLAG;
+  constexpr std::uint32_t RIGHT_STICK_TOUCH = RIGHT_STICK_TOUCH_FLAG;
   // LI_CCAP_SC26_BUTTONS: independent physical pad and trigger end-stop clicks.
-  constexpr std::uint32_t LEFT_PAD_CLICK = 0x04000000;
-  constexpr std::uint32_t RIGHT_PAD_CLICK = 0x08000000;
-  constexpr std::uint32_t LEFT_TRIGGER_CLICK = 0x10000000;
-  constexpr std::uint32_t RIGHT_TRIGGER_CLICK = 0x20000000;
+  constexpr std::uint32_t LEFT_PAD_CLICK = LEFT_PAD_CLICK_FLAG;
+  constexpr std::uint32_t RIGHT_PAD_CLICK = RIGHT_PAD_CLICK_FLAG;
+  constexpr std::uint32_t LEFT_TRIGGER_CLICK = LEFT_TRIGGER_CLICK_FLAG;
+  constexpr std::uint32_t RIGHT_TRIGGER_CLICK = RIGHT_TRIGGER_CLICK_FLAG;
 
   struct supported_gamepad_t {
     std::string name;
@@ -249,6 +250,11 @@ namespace platf {
   };
 
   using feedback_queue_t = safe::mail_raw_t::queue_t<gamepad_feedback_msg_t>;
+
+  // The verbatim payloads above are sized by literal so the tests/input harnesses can slice
+  // them standalone; the protocol header is the authority they must agree with.
+  static_assert(sizeof(gamepad_feedback_msg_t::data.steam_haptic.report) == STEAM_HAPTIC_REPORT_MAX);
+  static_assert(sizeof(gamepad_feedback_msg_t::data.steam_settings.triples) == STEAM_SETTINGS_PAYLOAD_SIZE);
 
   // Per controller: seven raw haptic states/stops plus eight conventional
   // state keys. Keep at most 32 ordinary events, even if state capacity is idle.
