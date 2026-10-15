@@ -257,7 +257,8 @@ namespace platf {
   static_assert(sizeof(gamepad_feedback_msg_t::data.steam_settings.triples) == STEAM_SETTINGS_PAYLOAD_SIZE);
 
   // Per controller: seven raw haptic states/stops plus eight conventional
-  // state keys. Keep at most 32 ordinary events, even if state capacity is idle.
+  // state keys. Keep at most 32 ordinary events and 16 settings chunks, even
+  // if state capacity is idle. Haptic bursts must not split a settings write.
   inline constexpr std::uint32_t GAMEPAD_FEEDBACK_QUEUE_CAPACITY = 256;
 
   // Return a stop key including both report family and actuator mask.
@@ -308,9 +309,10 @@ namespace platf {
   inline bool raise_gamepad_feedback(safe::queue_t<gamepad_feedback_msg_t> &queue, gamepad_feedback_msg_t msg) {
     const auto key = gamepad_feedback_state_key(msg);
     const auto id = msg.id;
-    return queue.raise_latest(std::move(msg), [key, id](const auto &pending) {
+    return queue.raise_latest_classed(std::move(msg), [key, id](const auto &pending) {
       return key != 0 && pending.id == id && gamepad_feedback_state_key(pending) == key;
-    }, [](const auto &pending) { return gamepad_feedback_state_key(pending) != 0; }, 32);
+    }, [](const auto &pending) { return gamepad_feedback_state_key(pending) != 0; }, 32,
+      [](const auto &pending) { return pending.type == gamepad_feedback_e::steam_settings; }, 16);
   }
 
   namespace speaker {
