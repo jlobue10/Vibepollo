@@ -212,6 +212,7 @@ let videoPlaybackStream: MediaStream | null = null;
 let gamepadCapture: BrowserGamepadCapture | null = null;
 let autoFullscreenAttempt = 0;
 let connectionAttempt = 0;
+let viewDisposed = false;
 let preserveAutoFullscreenDuringRestart = false;
 let streamSurfaceFocusedBeforeCollapse = false;
 
@@ -648,7 +649,7 @@ async function fetchSessionStatus(): Promise<void> {
 
 function startSessionStatusPolling(): void {
   stopSessionStatusPolling();
-  if (connectionPending.value || isConnected.value) return;
+  if (viewDisposed || connectionPending.value || isConnected.value) return;
   void fetchSessionStatus();
   sessionStatusTimer = window.setInterval(fetchSessionStatus, 5000);
 }
@@ -898,6 +899,7 @@ function attachRemoteStream(stream: MediaStream): void {
 }
 
 async function connect(resume: boolean): Promise<void> {
+  if (viewDisposed) return;
   if (startDisabled.value) {
     streamError.value = validationError.value || t('ui.browser_stream.errors.unavailable');
     return;
@@ -999,7 +1001,7 @@ function requestTerminate(): void {
 }
 
 async function confirmTerminate(): Promise<void> {
-  if (sessionActionPending.value) return;
+  if (viewDisposed || sessionActionPending.value) return;
   sessionActionPending.value = true;
   sessionActionError.value = '';
   const shouldStart = startAfterTerminate.value;
@@ -1012,19 +1014,25 @@ async function confirmTerminate(): Promise<void> {
   }
   try {
     const response = await apiPost<MutationResponse>('/api/apps/close', {});
+    // Closing the host app can finish after navigation. The close request may
+    // complete, but the retired page must not restart polling or create a stream.
+    if (viewDisposed) return;
     if (response.status !== true) {
       throw new Error(response.error || t('webrtc.termination_failed_desc'));
     }
     terminateOpen.value = false;
     startAfterTerminate.value = false;
     await disconnect();
+    if (viewDisposed) return;
     await fetchSessionStatus();
+    if (viewDisposed) return;
     if (shouldStart) {
       sessionActionPending.value = false;
       preserveAutoFullscreenDuringRestart = false;
       await connect(false);
     }
   } catch (error) {
+    if (viewDisposed) return;
     if (shouldStart) {
       preserveAutoFullscreenDuringRestart = false;
       cancelAutoFullscreen();
@@ -1693,6 +1701,9 @@ onMounted(() => {
   videoEl.value?.addEventListener('webkitendfullscreen', onNativeVideoFullscreenEnd);
 });
 onBeforeUnmount(() => {
+  viewDisposed = true;
+  // Fullscreen is preserved only across a restart within this page.
+  preserveAutoFullscreenDuringRestart = false;
   stopSessionStatusPolling();
   cancelFullscreenExitHold();
   finishFullscreenExitSwipe();

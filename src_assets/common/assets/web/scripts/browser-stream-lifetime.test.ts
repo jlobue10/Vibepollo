@@ -26,7 +26,8 @@ const viewScript = viewSource.split('<script setup lang="ts">')[1].split('</scri
 const viewCode = stripTypeScriptTypes(viewScript).replace(/^import\s[\s\S]*?from\s+'[^']+';\s*/gm, '')
   + `\nObject.assign(globalThis, { connect, disconnect, browserSession,
     loading, hostCapabilities, browserCapabilities, connectionState, inputReady,
-    isConnecting, startDisabled, streamError, nativeFullscreen, videoEl, audioEl });`;
+    isConnecting, startDisabled, streamError, nativeFullscreen, videoEl, audioEl,
+    confirmTerminate, startAfterTerminate, sessionActionPending, sessionActionError });`;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -37,7 +38,7 @@ function deferred<T>() {
 
 const answer = { answer_ready: true, type: 'answer', sdp: 'answer' };
 
-function setup(t: TestContext, blocked: 'create' | 'offer' = 'create') {
+function setup(t: TestContext, blocked: 'create' | 'offer' | 'none' = 'create') {
   const peers: FakePeer[] = [];
   class FakePeer {
     remoteDescription: unknown = null;
@@ -99,12 +100,18 @@ function setup(t: TestContext, blocked: 'create' | 'offer' = 'create') {
   const nextOfferReached = deferred<void>();
   const deleteResponse = deferred<void>();
   const deleteReached = deferred<void>();
+  const closeResponse = deferred<unknown>();
+  const closeReached = deferred<void>();
+  const statusResponse = deferred<unknown>();
+  const statusReached = deferred<void>();
   const deletes: string[] = [];
   let created = 0;
   let holdNextAnswer = false;
   let holdDelete = false;
+  let holdStatus = false;
   setApi({
     async post(url: string) {
+      if (url === '/api/apps/close') { closeReached.resolve(); return closeResponse.promise; }
       if (url === '/api/webrtc/sessions') {
         const id = `session-${++created}`;
         if (created === 1 && blocked === 'create') { reached.resolve(); return response.promise; }
@@ -121,7 +128,13 @@ function setup(t: TestContext, blocked: 'create' | 'offer' = 'create') {
       deletes.push(url);
       if (holdDelete) { holdDelete = false; deleteReached.resolve(); await deleteResponse.promise; }
     },
-    async get() { return { status: true, candidates: [], next_since: 0 }; },
+    async get(url: string) {
+      if (url === '/api/session/status' && holdStatus) {
+        statusReached.resolve();
+        return statusResponse.promise;
+      }
+      return { status: true, candidates: [], next_since: 0 };
+    },
   });
   const unmount: Array<() => void> = [];
   const view = {
@@ -149,14 +162,19 @@ function setup(t: TestContext, blocked: 'create' | 'offer' = 'create') {
     response.resolve(blocked === 'create' ? { session: { id: 'session-1' } } : answer);
     nextAnswer.resolve(answer);
     deleteResponse.resolve();
+    closeResponse.resolve({ status: true });
+    statusResponse.resolve({ status: true });
     await view.disconnect(false);
     for (const restore of restoreGlobals) restore();
   });
   return {
     view, peers, timers, deletes, reached, response, nextOfferReached, nextAnswer,
     deleteReached, deleteResponse,
+    closeReached, closeResponse, statusReached, statusResponse,
+    created: () => created,
     holdNextAnswer: () => { holdNextAnswer = true; },
     holdDelete: () => { holdDelete = true; },
+    holdStatus: () => { holdStatus = true; },
     unmount: () => unmount.forEach((callback) => callback()),
     fullscreen: () => { view.nativeFullscreen.value = true; document.fullscreenElement = {}; },
     fullscreenExits: () => fullscreenExits,
@@ -256,4 +274,100 @@ test('an earlier Disconnect response cannot detach a replacement after repeated 
   assert.equal(h.view.audioEl.value.srcObject, stream);
   h.response.resolve(answer);
   await oldConnect;
+});
+
+for (const restart of [false, true]) {
+  test(`an app-close response after unmount cannot resume work (restart=${restart})`, async (t) => {
+    const h = setup(t, 'none');
+    h.view.startAfterTerminate.value = restart;
+    const closing = h.view.confirmTerminate();
+    await h.closeReached.promise;
+    h.unmount();
+    h.closeResponse.resolve({ status: true });
+    await closing;
+    assert.equal(h.created(), 0, 'leaving the page must not launch a browser session');
+    assert.equal(h.timers.size, 0, 'leaving the page must not restart polling');
+  });
+}
+
+test('unmount during restart cleanup cannot launch a replacement stream', async (t) => {
+  const h = setup(t, 'none');
+  await h.view.connect(false);
+  h.view.startAfterTerminate.value = true;
+  h.holdDelete();
+  const closing = h.view.confirmTerminate();
+  await h.closeReached.promise;
+  h.closeResponse.resolve({ status: true });
+  await h.deleteReached.promise;
+  h.unmount();
+  h.deleteResponse.resolve();
+  await closing;
+  assert.equal(h.created(), 1, 'the retired view must not replace its first session');
+  assert.equal(h.timers.size, 0);
+});
+
+test('unmount during the post-close status request cancels the pending restart', async (t) => {
+  const h = setup(t, 'none');
+  h.view.startAfterTerminate.value = true;
+  h.holdStatus();
+  const closing = h.view.confirmTerminate();
+  await h.closeReached.promise;
+  h.closeResponse.resolve({ status: true });
+  await h.statusReached.promise;
+  h.unmount();
+  h.statusResponse.resolve({ status: true });
+  await closing;
+  assert.equal(h.created(), 0);
+  assert.equal(h.timers.size, 0);
+});
+
+test('a late app-close failure cannot exit another page\'s fullscreen', async (t) => {
+  const h = setup(t, 'none');
+  h.view.startAfterTerminate.value = true;
+  const closing = h.view.confirmTerminate();
+  await h.closeReached.promise;
+  h.unmount();
+  h.fullscreen(); // the destination page has entered fullscreen
+  h.closeResponse.reject(new Error('retired close failed'));
+  await closing;
+  assert.equal(h.fullscreenExits(), 0);
+  assert.equal(h.created(), 0);
+});
+
+test('unmount releases fullscreen reserved for a pending restart', async (t) => {
+  const h = setup(t, 'none');
+  h.fullscreen();
+  h.view.startAfterTerminate.value = true;
+  const closing = h.view.confirmTerminate();
+  await h.closeReached.promise;
+  h.unmount();
+  assert.equal(h.fullscreenExits(), 1, 'navigation ends the restart fullscreen reservation');
+  h.closeResponse.resolve({ status: true });
+  await closing;
+});
+
+for (const restart of [false, true]) {
+  test(`a mounted app-close action still completes (restart=${restart})`, async (t) => {
+    const h = setup(t, 'none');
+    h.view.startAfterTerminate.value = restart;
+    const closing = h.view.confirmTerminate();
+    await h.closeReached.promise;
+    h.closeResponse.resolve({ status: true });
+    await closing;
+    assert.equal(h.created(), restart ? 1 : 0);
+    assert.equal(h.view.sessionActionPending.value, false);
+    assert.equal(h.view.sessionActionError.value, '');
+  });
+}
+
+test('a mounted app-close failure is reported without launching a stream', async (t) => {
+  const h = setup(t, 'none');
+  h.view.startAfterTerminate.value = true;
+  const closing = h.view.confirmTerminate();
+  await h.closeReached.promise;
+  h.closeResponse.reject(new Error('current close failed'));
+  await closing;
+  assert.equal(h.created(), 0);
+  assert.equal(h.view.sessionActionPending.value, false);
+  assert.equal(h.view.sessionActionError.value, 'current close failed');
 });
