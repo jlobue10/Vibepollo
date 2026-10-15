@@ -63,6 +63,7 @@ jobs:
           python3 tests/input/test_deferred_launch_lifecycle.py
           python3 tests/input/test_capture_display_wait.py
           python3 tests/input/test_encoder_retry.py
+          python3 tests/input/test_http_probe_hint_lifetime.py
       - name: Check IPC framing bounds and overlapped completion races
         run: python3 tests/input/test_ipc_pipe_contract.py
       - name: Check malformed app catalog entry recovery

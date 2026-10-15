@@ -879,7 +879,6 @@ namespace nvhttp {
     // the pool joins, so a late request simply answers from the cache.
     std::atomic<thread_pool_util::ThreadPool *> http_capability_probe_pool {nullptr};
     single_flight::admission_t http_capability_probe_admission;
-    std::atomic_bool http_capability_probe_running {false};
     // Bumped when a background probe ends, filled or skipped, so a request that
     // is waiting for it can tell "still running" from "ended without a cache".
     std::atomic<unsigned> http_capability_probe_finished {0};
@@ -921,9 +920,7 @@ namespace nvhttp {
     // on its own worker: validate_config() allows a minute per codec attempt and
     // ensure_display() may restart or reinstall the virtual display driver.
     void run_idle_http_capability_probe() {
-      http_capability_probe_running.store(true, std::memory_order_release);
-      auto running_guard = util::fail_guard([] {
-        http_capability_probe_running.store(false, std::memory_order_release);
+      auto finished_guard = util::fail_guard([] {
         http_capability_probe_finished.fetch_add(1, std::memory_order_acq_rel);
       });
       const auto started = std::chrono::steady_clock::now();
@@ -931,14 +928,9 @@ namespace nvhttp {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
       };
 
-      const auto idle_virtual_adapter_hint = publish_idle_virtual_adapter_hint();
-      auto idle_virtual_adapter_hint_guard = util::fail_guard([&] {
-        clear_idle_virtual_adapter_hint(idle_virtual_adapter_hint);
-      });
-
       // Session starts publish their pending owner while holding this gate.
-      // Hold it through the idle decision and temporary-display probe so a
-      // new start cannot enter between the counter samples below.
+      // Acquire it before publishing a hint as well: a refused worker must not
+      // replace and then clear the current owner's adapter expectation.
       std::unique_lock<std::mutex> lifecycle_lock(
         stream_lifecycle_mutex(),
         std::try_to_lock
@@ -947,17 +939,20 @@ namespace nvhttp {
         BOOST_LOG(info) << "Background encoder capability probe skipped: stream lifecycle work owns the gate.";
         return;
       }
+      if (has_active_or_stopping_stream_session()) {
+        BOOST_LOG(info) << "Background encoder capability probe skipped: a streaming session is active or stopping.";
+        return;
+      }
+      const auto idle_virtual_adapter_hint = publish_idle_virtual_adapter_hint();
+      auto idle_virtual_adapter_hint_guard = util::fail_guard([&] {
+        clear_idle_virtual_adapter_hint(idle_virtual_adapter_hint);
+      });
       bool probe_complete = false;
       (void) video::advertised_encoder_capabilities(false, &probe_complete);
       if (probe_complete) {
         BOOST_LOG(debug) << "Background encoder capability probe skipped: cache already matches.";
         return;
       }
-      if (has_active_or_stopping_stream_session()) {
-        BOOST_LOG(info) << "Background encoder capability probe skipped: a streaming session is active or stopping.";
-        return;
-      }
-
       auto ensure_result = VDISPLAY::ensure_display(idle_virtual_adapter_hint.required_adapter);
       auto cleanup_probe_display = util::fail_guard([&ensure_result]() {
         VDISPLAY::cleanup_ensure_display(ensure_result);
@@ -1002,16 +997,6 @@ namespace nvhttp {
     }
 
     http_encoder_capabilities_t advertised_encoder_capabilities_for_http() {
-      // Do not touch the adapter hint while the background probe owns it; its
-      // lease is the one the cache key must keep matching until it finishes.
-      idle_virtual_adapter_hint_t idle_virtual_adapter_hint;
-      if (!http_capability_probe_running.load(std::memory_order_acquire)) {
-        idle_virtual_adapter_hint = publish_idle_virtual_adapter_hint();
-      }
-      auto idle_virtual_adapter_hint_guard = util::fail_guard([&] {
-        clear_idle_virtual_adapter_hint(idle_virtual_adapter_hint);
-      });
-
       const auto publish = [](
                              video::advertised_encoder_capabilities_t caps,
                              const bool probe_complete,
@@ -1032,7 +1017,21 @@ namespace nvhttp {
       };
 
       bool probe_complete = false;
-      auto caps = video::advertised_encoder_capabilities(false, &probe_complete);
+      const auto read_cached_capabilities = [&] {
+        // A running flag alone cannot protect the check-to-publication window.
+        // Share the lifecycle gate with probes and session starts, but never
+        // wait for it: a busy owner supplies the current adapter expectation.
+        std::unique_lock<std::mutex> lifecycle_lock(stream_lifecycle_mutex(), std::try_to_lock);
+        idle_virtual_adapter_hint_t idle_virtual_adapter_hint;
+        if (lifecycle_lock.owns_lock()) {
+          idle_virtual_adapter_hint = publish_idle_virtual_adapter_hint();
+        }
+        auto idle_virtual_adapter_hint_guard = util::fail_guard([&] {
+          clear_idle_virtual_adapter_hint(idle_virtual_adapter_hint);
+        });
+        return video::advertised_encoder_capabilities(false, &probe_complete);
+      };
+      auto caps = read_cached_capabilities();
       if (probe_complete) {
         return publish(std::move(caps), true, "matching-cache");
       }
@@ -1064,7 +1063,9 @@ namespace nvhttp {
         };
         const auto outcome = http_capability_probe::wait_for_probe(
           [&] {
-            caps = video::advertised_encoder_capabilities(false, &probe_complete);
+            // The worker clears its lease before announcing completion. Reapply
+            // the idle expectation for this sample if the gate is free again.
+            caps = read_cached_capabilities();
             return probe_complete;
           },
           [&] {
