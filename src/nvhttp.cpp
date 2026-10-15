@@ -67,6 +67,8 @@
 #include "update_notification_state.h"
 #include "single_flight.h"
 #include "state_storage_policy.h"
+#include "http_capability_probe_policy.h"
+#include "stream_start_gate_policy.h"
 #ifdef _WIN32
   #include "platform/windows/display.h"
   #include "platform/windows/display_helper_request_policy.h"
@@ -872,9 +874,28 @@ namespace nvhttp {
 
     bool has_active_or_stopping_stream_session();
 
-    http_encoder_capabilities_t advertised_encoder_capabilities_for_http() {
-      std::optional<video::encoder_probe_adapter_hint_lease_t> idle_virtual_adapter_hint;
-      std::optional<LUID> idle_virtual_required_adapter;
+    // The idle encoder probe runs on this worker, never on a discovery request.
+    // nvhttp::start() publishes the pool for its lifetime and clears it before
+    // the pool joins, so a late request simply answers from the cache.
+    std::atomic<thread_pool_util::ThreadPool *> http_capability_probe_pool {nullptr};
+    single_flight::admission_t http_capability_probe_admission;
+    std::atomic_bool http_capability_probe_running {false};
+    // Bumped when a background probe ends, filled or skipped, so a request that
+    // is waiting for it can tell "still running" from "ended without a cache".
+    std::atomic<unsigned> http_capability_probe_finished {0};
+    // How often a waiting discovery request re-samples the cache
+    // (http_capability_probe_policy.h bounds the whole wait).
+    constexpr auto kHttpCapabilityProbePoll = std::chrono::milliseconds(50);
+
+    struct idle_virtual_adapter_hint_t {
+      std::optional<video::encoder_probe_adapter_hint_lease_t> lease;
+      std::optional<LUID> required_adapter;
+    };
+
+    // Predict the adapter a temporary probe display would land on so the cache
+    // lookup uses the same key the probe publishes under.
+    idle_virtual_adapter_hint_t publish_idle_virtual_adapter_hint() {
+      idle_virtual_adapter_hint_t hint;
       if (config::video.virtual_display_mode != config::video_t::virtual_display_mode_e::disabled &&
           !has_stream_session_activity()) {
         const auto intended_adapter = platf::resolve_preferred_render_adapter(
@@ -882,15 +903,113 @@ namespace nvhttp {
           config::video.adapter_pnp_id
         );
         if (intended_adapter) {
-          idle_virtual_required_adapter = *intended_adapter.luid;
-          idle_virtual_adapter_hint =
-            video::set_pending_virtual_display_adapter_hint(*intended_adapter.luid);
+          hint.required_adapter = *intended_adapter.luid;
+          hint.lease = video::set_pending_virtual_display_adapter_hint(*intended_adapter.luid);
         }
       }
+      return hint;
+    }
+
+    void clear_idle_virtual_adapter_hint(const idle_virtual_adapter_hint_t &hint) {
+      if (hint.lease) {
+        (void) video::clear_pending_virtual_display_adapter_hint(*hint.lease);
+      }
+    }
+
+    // The idle probe that /serverinfo and /applist used to run inline. It owns
+    // the lifecycle gate for the whole temporary-display probe, so it must run
+    // on its own worker: validate_config() allows a minute per codec attempt and
+    // ensure_display() may restart or reinstall the virtual display driver.
+    void run_idle_http_capability_probe() {
+      http_capability_probe_running.store(true, std::memory_order_release);
+      auto running_guard = util::fail_guard([] {
+        http_capability_probe_running.store(false, std::memory_order_release);
+        http_capability_probe_finished.fetch_add(1, std::memory_order_acq_rel);
+      });
+      const auto started = std::chrono::steady_clock::now();
+      const auto elapsed_ms = [started] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+      };
+
+      const auto idle_virtual_adapter_hint = publish_idle_virtual_adapter_hint();
       auto idle_virtual_adapter_hint_guard = util::fail_guard([&] {
-        if (idle_virtual_adapter_hint) {
-          (void) video::clear_pending_virtual_display_adapter_hint(*idle_virtual_adapter_hint);
+        clear_idle_virtual_adapter_hint(idle_virtual_adapter_hint);
+      });
+
+      // Session starts publish their pending owner while holding this gate.
+      // Hold it through the idle decision and temporary-display probe so a
+      // new start cannot enter between the counter samples below.
+      std::unique_lock<std::mutex> lifecycle_lock(
+        stream_lifecycle_mutex(),
+        std::try_to_lock
+      );
+      if (!lifecycle_lock.owns_lock()) {
+        BOOST_LOG(info) << "Background encoder capability probe skipped: stream lifecycle work owns the gate.";
+        return;
+      }
+      bool probe_complete = false;
+      (void) video::advertised_encoder_capabilities(false, &probe_complete);
+      if (probe_complete) {
+        BOOST_LOG(debug) << "Background encoder capability probe skipped: cache already matches.";
+        return;
+      }
+      if (has_active_or_stopping_stream_session()) {
+        BOOST_LOG(info) << "Background encoder capability probe skipped: a streaming session is active or stopping.";
+        return;
+      }
+
+      auto ensure_result = VDISPLAY::ensure_display(idle_virtual_adapter_hint.required_adapter);
+      auto cleanup_probe_display = util::fail_guard([&ensure_result]() {
+        VDISPLAY::cleanup_ensure_display(ensure_result);
+      });
+      if (idle_virtual_adapter_hint.required_adapter && !ensure_result.owns_temporary_probe_request()) {
+        BOOST_LOG(warning)
+          << "HTTP capability discovery could not acquire a temporary-display lease; continuing with exact-adapter synthetic validation.";
+      } else if (ensure_result.owns_temporary_probe_request() && !ensure_result.ready_for_capture()) {
+        BOOST_LOG(info)
+          << "HTTP capability discovery is probing synthetic surfaces before the temporary display is published.";
+      }
+      BOOST_LOG(info) << "Background encoder capability probe: temporary display ready after " << elapsed_ms() << " ms; probing encoders.";
+      const auto caps = video::advertised_encoder_capabilities(true, &probe_complete);
+      BOOST_LOG(info)
+        << "Background encoder capability probe finished in " << elapsed_ms() << " ms: probe_complete=" << probe_complete
+        << ", hevc_mode=" << caps.hevc_mode
+        << ", av1_mode=" << caps.av1_mode
+        << ", pyrowave_mode=" << caps.pyrowave_mode << '.';
+    }
+
+    enum class idle_probe_schedule_e {
+      started,
+      already_running,
+      unavailable,
+    };
+
+    // Single-flight: one probe in flight; later requests reuse the cache once filled.
+    idle_probe_schedule_e schedule_idle_http_capability_probe() {
+      auto *pool = http_capability_probe_pool.load(std::memory_order_acquire);
+      if (!pool) {
+        return idle_probe_schedule_e::unavailable;
+      }
+      const bool submitted = http_capability_probe_admission.try_submit(
+        [pool](auto task) {
+          pool->push(std::move(task));
+        },
+        [] {
+          run_idle_http_capability_probe();
         }
+      );
+      return submitted ? idle_probe_schedule_e::started : idle_probe_schedule_e::already_running;
+    }
+
+    http_encoder_capabilities_t advertised_encoder_capabilities_for_http() {
+      // Do not touch the adapter hint while the background probe owns it; its
+      // lease is the one the cache key must keep matching until it finishes.
+      idle_virtual_adapter_hint_t idle_virtual_adapter_hint;
+      if (!http_capability_probe_running.load(std::memory_order_acquire)) {
+        idle_virtual_adapter_hint = publish_idle_virtual_adapter_hint();
+      }
+      auto idle_virtual_adapter_hint_guard = util::fail_guard([&] {
+        clear_idle_virtual_adapter_hint(idle_virtual_adapter_hint);
       });
 
       const auto publish = [](
@@ -918,40 +1037,56 @@ namespace nvhttp {
         return publish(std::move(caps), true, "matching-cache");
       }
 
-      // Session starts publish their pending owner while holding this gate.
-      // Hold it through the idle decision and temporary-display probe so a
-      // new start cannot enter between the counter samples below.
-      std::unique_lock<std::mutex> lifecycle_lock(
-        stream_lifecycle_mutex(),
-        std::try_to_lock
-      );
-      if (!lifecycle_lock.owns_lock()) {
-        BOOST_LOG(debug) << "Skipping HTTP encoder capability probe while stream lifecycle work owns the gate.";
-        return publish(std::move(caps), false, "lifecycle-gate");
+      // Never run the probe on the request: a /serverinfo that held the
+      // lifecycle gate through a cold probe stalled the /launch that followed
+      // it past the client's timeout. The single-flight worker fills the cache;
+      // the request waits for it up to kHttpCapabilityProbeWait and only then
+      // answers with the conservative baseline (H.264 only, no HDR).
+      const unsigned finished_before = http_capability_probe_finished.load(std::memory_order_acquire);
+      const char *reason = "background-probe-started";
+      bool wait_for_probe = true;
+      switch (schedule_idle_http_capability_probe()) {
+        case idle_probe_schedule_e::started:
+          break;
+        case idle_probe_schedule_e::already_running:
+          reason = "background-probe-running";
+          break;
+        case idle_probe_schedule_e::unavailable:
+          reason = "background-probe-unavailable";
+          wait_for_probe = false;
+          BOOST_LOG(info) << "HTTP capability discovery answered without a fresh encoder probe; no probe worker is available.";
+          break;
       }
-      caps = video::advertised_encoder_capabilities(false, &probe_complete);
-      if (probe_complete) {
-        return publish(std::move(caps), true, "matching-cache-after-gate");
+      if (wait_for_probe) {
+        const auto wait_started = std::chrono::steady_clock::now();
+        const auto waited_ms = [wait_started] {
+          return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_started).count();
+        };
+        const auto outcome = http_capability_probe::wait_for_probe(
+          [&] {
+            caps = video::advertised_encoder_capabilities(false, &probe_complete);
+            return probe_complete;
+          },
+          [&] {
+            return http_capability_probe_finished.load(std::memory_order_acquire) == finished_before;
+          },
+          wait_started + http_capability_probe::kHttpCapabilityProbeWait,
+          [] {
+            return std::chrono::steady_clock::now();
+          },
+          [] {
+            std::this_thread::sleep_for(kHttpCapabilityProbePoll);
+          }
+        );
+        if (outcome == http_capability_probe::wait_outcome_e::probe_complete) {
+          BOOST_LOG(info) << "HTTP capability discovery waited " << waited_ms() << " ms for the background encoder probe.";
+          return publish(std::move(caps), true, "background-probe-finished");
+        }
+        reason = outcome == http_capability_probe::wait_outcome_e::expired ? "background-probe-wait-expired" : "background-probe-skipped";
+        BOOST_LOG(info) << "HTTP capability discovery answered without a fresh encoder probe after " << waited_ms()
+                        << " ms: " << http_capability_probe::wait_outcome_name(outcome) << '.';
       }
-
-      if (has_active_or_stopping_stream_session()) {
-        BOOST_LOG(debug) << "Skipping HTTP encoder capability probe while a streaming session is active or stopping.";
-        return publish(std::move(caps), false, "active-or-stopping-session");
-      }
-
-      auto ensure_result = VDISPLAY::ensure_display(idle_virtual_required_adapter);
-      auto cleanup_probe_display = util::fail_guard([&ensure_result]() {
-        VDISPLAY::cleanup_ensure_display(ensure_result);
-      });
-      if (idle_virtual_required_adapter && !ensure_result.owns_temporary_probe_request()) {
-        BOOST_LOG(warning)
-          << "HTTP capability discovery could not acquire a temporary-display lease; continuing with exact-adapter synthetic validation.";
-      } else if (ensure_result.owns_temporary_probe_request() && !ensure_result.ready_for_capture()) {
-        BOOST_LOG(info)
-          << "HTTP capability discovery is probing synthetic surfaces before the temporary display is published.";
-      }
-      caps = video::advertised_encoder_capabilities(true, &probe_complete);
-      return publish(std::move(caps), probe_complete, "idle-probe");
+      return publish(std::move(caps), false, reason);
     }
 
     void cleanup_virtual_display_state(const bool force_display_restore = false) {
@@ -1790,6 +1925,11 @@ namespace nvhttp {
           }
           VDISPLAY::setWatchdogFeedingEnabled(true);
           const char *hdr_profile = launch_session->hdr_profile ? launch_session->hdr_profile->c_str() : nullptr;
+          // Creation is unbounded by design (up to three driver attempts with
+          // recovery/reinstall between them); log its duration so a slow or
+          // stuck driver is visible in the host log next to the launch timeline.
+          const auto create_started = std::chrono::steady_clock::now();
+          BOOST_LOG(info) << "Virtual display creation: begin for client " << client_label << '.';
           auto display_info = VDISPLAY::createVirtualDisplay(
             display_uuid_source.c_str(),
             client_label.c_str(),
@@ -1806,6 +1946,10 @@ namespace nvhttp {
             !shared_mode,
             !remote_display_topology::instance().protected_remote_monitor_client_ids().empty()
           );
+          BOOST_LOG(info)
+            << "Virtual display creation: end after "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - create_started).count()
+            << " ms (" << (display_info ? "ok" : "failed") << ").";
           if (display_info) {
             launch_session->virtual_display = true;
             launch_session->virtual_display_failed = false;
@@ -2751,24 +2895,77 @@ namespace nvhttp {
       return stream_lifecycle_gate;
     }
 
-    std::unique_lock<std::mutex> acquire_stream_start_lifecycle_lock() {
-      bool waited_for_teardown = false;
-      for (;;) {
-        std::unique_lock<std::mutex> lifecycle_lock {stream_lifecycle_gate};
-        if (stream::session::teardown_sessions.load(std::memory_order_acquire) == 0) {
-          if (waited_for_teardown) {
-            BOOST_LOG(debug) << "Stream start: prior RTSP teardown completed; lifecycle gate acquired.";
-          }
-          return lifecycle_lock;
-        }
+    using stream_start_gate_result_t = stream_start_gate::acquire_result_t<std::mutex>;
 
-        if (!waited_for_teardown) {
-          waited_for_teardown = true;
-          BOOST_LOG(debug) << "Stream start: yielding lifecycle gate to prior RTSP teardown.";
+    // /launch and /resume run on a single blocking worker. A gate that never
+    // yields (a probe holding the mutex, or a stuck teardown keeping the counter
+    // above zero) must fail the request instead of hanging the client.
+    constexpr auto kStreamStartGateTimeout = std::chrono::seconds(20);
+
+    stream_start_gate_result_t acquire_stream_start_lifecycle_gate(
+      const std::optional<std::chrono::steady_clock::time_point> deadline
+    ) {
+      bool logged_teardown_wait = false;
+      auto result = stream_start_gate::acquire(
+        stream_lifecycle_gate,
+        [&logged_teardown_wait] {
+          const auto pending = stream::session::teardown_sessions.load(std::memory_order_acquire);
+          if (pending != 0 && !logged_teardown_wait) {
+            logged_teardown_wait = true;
+            BOOST_LOG(debug) << "Stream start: yielding lifecycle gate to prior RTSP teardown.";
+          }
+          return pending;
+        },
+        deadline,
+        [] {
+          return std::chrono::steady_clock::now();
+        },
+        [] {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        lifecycle_lock.unlock();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      );
+      if (result.acquired() && result.waited_for_teardown) {
+        BOOST_LOG(debug) << "Stream start: prior RTSP teardown completed; lifecycle gate acquired.";
       }
+      return result;
+    }
+
+    std::unique_lock<std::mutex> acquire_stream_start_lifecycle_lock() {
+      auto gate = acquire_stream_start_lifecycle_gate(std::nullopt);
+      return std::move(gate.lock);
+    }
+
+    stream_start_gate_result_t try_acquire_stream_start_lifecycle_lock(const std::chrono::steady_clock::duration timeout) {
+      return acquire_stream_start_lifecycle_gate(std::chrono::steady_clock::now() + timeout);
+    }
+
+    // Same body shape as the busy-worker refusal in start(): status_code 503
+    // plus a zeroed operation element, which Moonlight reports as a launch error.
+    void reply_stream_start_gate_timeout(
+      resp_https_t response,
+      const char *operation,
+      const stream_start_gate_result_t &gate,
+      const std::chrono::steady_clock::time_point handler_started
+    ) {
+      const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - handler_started).count();
+      BOOST_LOG(error)
+        << '/' << operation << ": stream lifecycle gate not acquired after " << elapsed_ms
+        << " ms (" << stream_start_gate::blocker_name(gate.blocker)
+        << ", teardown_sessions=" << gate.teardown_sessions
+        << "); replying 503 instead of waiting.";
+      pt::ptree tree;
+      tree.put(std::string("root.") + operation, 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put(
+        "root.<xmlattr>.status_message",
+        "The host is still finishing a previous stream operation. Retry in a few seconds; if this persists, check the host log for the blocked lifecycle gate."
+      );
+      std::ostringstream data;
+      pt::write_xml(data, tree);
+      response->close_connection_after_response = true;
+      response->write(data.str());
+      BOOST_LOG(info) << '/' << operation << " reply: status=503, elapsed=" << elapsed_ms << " ms (lifecycle gate timeout).";
     }
 
     std::string resolve_known_client_uuid_from_launch_id(const std::string &launch_unique_id) {
@@ -4389,10 +4586,24 @@ namespace nvhttp {
       }
     }
 
-    void resume(bool &host_audio, resp_https_t response, req_https_t request, int current_appid, bool normal_app_transition = true, bool launched_from_applist = false);
+    void resume(
+      bool &host_audio,
+      resp_https_t response,
+      req_https_t request,
+      int current_appid,
+      bool normal_app_transition = true,
+      bool launched_from_applist = false,
+      std::chrono::steady_clock::time_point handler_started = std::chrono::steady_clock::now()
+    );
     void cancel(resp_https_t response, req_https_t request);
 
-    void launch(bool &host_audio, resp_https_t response, req_https_t request, int current_appid) {
+    void launch(
+      bool &host_audio,
+      resp_https_t response,
+      req_https_t request,
+      int current_appid,
+      const std::chrono::steady_clock::time_point handler_started = std::chrono::steady_clock::now()
+    ) {
       print_req<SunshineHTTPS>(request);
 
 #ifdef _WIN32
@@ -4402,12 +4613,19 @@ namespace nvhttp {
 #endif
       pt::ptree tree;
       bool revert_display_configuration = false;
+      std::string reply_client_label = "unresolved";
       auto g = util::fail_guard([&]() {
         std::ostringstream data;
 
         pt::write_xml(data, tree);
         response->write(data.str());
         response->close_connection_after_response = true;
+        BOOST_LOG(info)
+          << "/launch reply: status=" << tree.get<int>("root.<xmlattr>.status_code", 0)
+          << ", client=" << reply_client_label
+          << ", elapsed="
+          << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - handler_started).count()
+          << " ms.";
 
         if (revert_display_configuration) {
           display_helper_integration::revert();
@@ -4453,6 +4671,7 @@ namespace nvhttp {
         tree.put("root.<xmlattr>.status_message", "A paired TLS client identity is required");
         return;
       }
+      reply_client_label = verified_client->name;
 
       auto appid_str = get_arg(args, "appid", "0");
       auto appuuid_str = get_arg(args, "appuuid", "");
@@ -4479,7 +4698,7 @@ namespace nvhttp {
           if (requests_active_app) {
             remote_session::clear_app_replacement_confirmation(request_client_identity.uuid);
             g.disable();
-            resume(host_audio, std::move(response), std::move(request), current_appid, true, true);
+            resume(host_audio, std::move(response), std::move(request), current_appid, true, true, handler_started);
             return;
           }
         }
@@ -4515,7 +4734,7 @@ namespace nvhttp {
         remote_session::clear_app_replacement_confirmation(request_client_identity.uuid);
         if (decision.resume && decision.resume_role == remote_session::role_e::game && current_appid > 0) {
           g.disable();
-          resume(host_audio, std::move(response), std::move(request), current_appid, true, true);
+          resume(host_audio, std::move(response), std::move(request), current_appid, true, true, handler_started);
           return;
         }
         if (decision.terminate) {
@@ -4614,7 +4833,7 @@ namespace nvhttp {
             synthetic_control == remote_session::control_e::running_game) {
           if (decision.resume_role == remote_session::role_e::game && current_appid > 0) {
             g.disable();
-            resume(host_audio, std::move(response), std::move(request), current_appid, true, true);
+            resume(host_audio, std::move(response), std::move(request), current_appid, true, true, handler_started);
             return;
           }
           if (decision.resume_role != remote_session::role_e::monitor ||
@@ -5224,12 +5443,18 @@ namespace nvhttp {
       bool encoder_probe_failed = false;
       if (!video::has_successful_encoder_probe()) {
         {
+          const auto probe_started = std::chrono::steady_clock::now();
+          const auto probe_elapsed_ms = [probe_started] {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - probe_started).count();
+          };
+          BOOST_LOG(info) << "Launch encoder probe: begin (no matching selected-GPU cache).";
           VDISPLAY::ensure_display_result ensure_result {};
           auto cleanup_probe_display = util::fail_guard([&ensure_result]() {
             VDISPLAY::cleanup_ensure_display(ensure_result);
           });
           if (VDISPLAY::policy::should_ensure_probe_display(launch_session->virtual_display)) {
             ensure_result = VDISPLAY::ensure_display();
+            BOOST_LOG(info) << "Launch encoder probe: temporary display ensured after " << probe_elapsed_ms() << " ms.";
             if (!ensure_result.owns_temporary_probe_request() && !ensure_result.ready_for_capture()) {
               BOOST_LOG(warning)
                 << "Launch could not acquire a temporary-display lease; continuing with synthetic encoder validation.";
@@ -5237,6 +5462,8 @@ namespace nvhttp {
           }
 
           encoder_probe_failed = video::probe_encoders();
+          BOOST_LOG(info)
+            << "Launch encoder probe: end after " << probe_elapsed_ms() << " ms (" << (encoder_probe_failed ? "failed" : "ok") << ").";
         }
       } else {
         BOOST_LOG(debug) << "Launch encoder probe skipped (matching selected-GPU cache).";
@@ -5402,7 +5629,15 @@ namespace nvhttp {
       runtime_overrides_guard.disable();
     }
 
-  void resume(bool &host_audio, resp_https_t response, req_https_t request, int current_appid, const bool normal_app_transition, const bool launched_from_applist) {
+  void resume(
+    bool &host_audio,
+    resp_https_t response,
+    req_https_t request,
+    int current_appid,
+    const bool normal_app_transition,
+    const bool launched_from_applist,
+    const std::chrono::steady_clock::time_point handler_started
+  ) {
     print_req<SunshineHTTPS>(request);
 
 #ifdef _WIN32
@@ -5412,6 +5647,7 @@ namespace nvhttp {
 #endif
     pt::ptree tree;
     bool revert_display_configuration {false};
+    std::string reply_client_label = "unresolved";
     auto g = util::fail_guard([&]() {
       std::ostringstream data;
 
@@ -5422,6 +5658,13 @@ namespace nvhttp {
       pt::write_xml(data, tree);
       response->write(data.str());
       response->close_connection_after_response = true;
+      BOOST_LOG(info)
+        << (launched_from_applist ? "/launch (resume) reply: status=" : "/resume reply: status=")
+        << tree.get<int>("root.<xmlattr>.status_code", 0)
+        << ", client=" << reply_client_label
+        << ", elapsed="
+        << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - handler_started).count()
+        << " ms.";
 
       if (revert_display_configuration) {
         display_helper_integration::revert();
@@ -5436,6 +5679,7 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "A paired TLS client identity is required");
       return;
     }
+    reply_client_label = verified_client->name;
     if (!has_client_perm(verified_client, PERM::_allow_view)) {
       log_permission_denied("ViewApp"sv, "View stream"sv, verified_client);
 
@@ -5966,12 +6210,18 @@ namespace nvhttp {
       bool encoder_probe_failed = false;
       if (!video::has_successful_encoder_probe()) {
         {
+          const auto probe_started = std::chrono::steady_clock::now();
+          const auto probe_elapsed_ms = [probe_started] {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - probe_started).count();
+          };
+          BOOST_LOG(info) << "Resume encoder probe: begin (no matching selected-GPU cache).";
           VDISPLAY::ensure_display_result ensure_result {};
           auto cleanup_probe_display = util::fail_guard([&ensure_result]() {
             VDISPLAY::cleanup_ensure_display(ensure_result);
           });
           if (VDISPLAY::policy::should_ensure_probe_display(launch_session->virtual_display)) {
             ensure_result = VDISPLAY::ensure_display();
+            BOOST_LOG(info) << "Resume encoder probe: temporary display ensured after " << probe_elapsed_ms() << " ms.";
             if (!ensure_result.owns_temporary_probe_request() && !ensure_result.ready_for_capture()) {
               BOOST_LOG(warning)
                 << "Resume could not acquire a temporary-display lease; continuing with synthetic encoder validation.";
@@ -5979,6 +6229,8 @@ namespace nvhttp {
           }
 
           encoder_probe_failed = video::probe_encoders();
+          BOOST_LOG(info)
+            << "Resume encoder probe: end after " << probe_elapsed_ms() << " ms (" << (encoder_probe_failed ? "failed" : "ok") << ").";
         }
       } else {
         BOOST_LOG(debug) << "Resume encoder probe skipped (matching selected-GPU cache).";
@@ -6621,6 +6873,18 @@ namespace nvhttp {
     http_server_t http_server;
     thread_pool_util::ThreadPool blocking_route_pool;
     blocking_route_pool.start(1);
+#ifdef _WIN32
+    // The idle encoder probe behind /serverinfo and /applist gets its own worker
+    // so discovery answers immediately. Declared before the discovery pool so it
+    // is still alive (and its pointer still published) while discovery handlers
+    // can enqueue; the guard unpublishes it before the pool stops and joins.
+    thread_pool_util::ThreadPool capability_probe_pool;
+    capability_probe_pool.start(1);
+    http_capability_probe_pool.store(&capability_probe_pool, std::memory_order_release);
+    auto unpublish_capability_probe_pool = util::fail_guard([] {
+      http_capability_probe_pool.store(nullptr, std::memory_order_release);
+    });
+#endif
     // Discovery routes are observation-only, so they must not queue behind the mutating
     // routes. A launch/resume/cancel handler can hold the lifecycle gate across unbounded
     // work, and on a single FIFO worker that made the host undiscoverable until restart.
@@ -6773,11 +7037,18 @@ namespace nvhttp {
     };
     https_server.resource["^/appasset$"]["GET"] = appasset;
     https_server.resource["^/launch$"]["GET"] = [&host_audio, run_blocking_nvhttp](auto resp, auto req) {
-      run_blocking_nvhttp(resp, "launch", [&host_audio, resp, req = std::move(req)]() mutable {
+      const auto handler_started = std::chrono::steady_clock::now();
+      run_blocking_nvhttp(resp, "launch", [&host_audio, resp, req = std::move(req), handler_started]() mutable {
+        const auto args = req->parse_query_string();
+        BOOST_LOG(info)
+          << "/launch request from " << req->remote_endpoint().address().to_string()
+          << ": appid=" << get_arg(args, "appid", "0")
+          << ", appuuid=" << get_arg(args, "appuuid", "")
+          << ", queued=" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - handler_started).count()
+          << " ms.";
         // Preserve request ordering until the teardown-aware handoff is available.
         std::lock_guard launch_lock {launch_request_mutex};
         (void) proc::proc.running();
-        const auto args = req->parse_query_string();
         const auto control = remote_session::identify(
           util::from_view(get_arg(args, "appid", "0")),
           get_arg(args, "appuuid", "")
@@ -6791,23 +7062,36 @@ namespace nvhttp {
           // gate during their final cleanup. Let the teardown path acquire
           // lifecycle ownership itself rather than recursively locking it.
           const int current_appid = proc::proc.current_app_id();
-          launch(host_audio, std::move(resp), std::move(req), current_appid);
+          launch(host_audio, std::move(resp), std::move(req), current_appid, handler_started);
           return;
         }
 
-        auto lifecycle_lock = acquire_stream_start_lifecycle_lock();
+        auto lifecycle_gate = try_acquire_stream_start_lifecycle_lock(kStreamStartGateTimeout);
+        if (!lifecycle_gate.acquired()) {
+          reply_stream_start_gate_timeout(std::move(resp), "launch", lifecycle_gate, handler_started);
+          return;
+        }
         const int current_appid = proc::proc.current_app_id();
-        launch(host_audio, std::move(resp), std::move(req), current_appid);
+        launch(host_audio, std::move(resp), std::move(req), current_appid, handler_started);
       });
     };
     https_server.resource["^/resume$"]["GET"] = [&host_audio, run_blocking_nvhttp](auto resp, auto req) {
-      run_blocking_nvhttp(resp, "resume", [&host_audio, resp, req = std::move(req)]() mutable {
+      const auto handler_started = std::chrono::steady_clock::now();
+      run_blocking_nvhttp(resp, "resume", [&host_audio, resp, req = std::move(req), handler_started]() mutable {
+        BOOST_LOG(info)
+          << "/resume request from " << req->remote_endpoint().address().to_string()
+          << ": queued=" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - handler_started).count()
+          << " ms.";
         // Keep resume ordered with teardown and normal app transitions.
         std::lock_guard launch_lock {launch_request_mutex};
         (void) proc::proc.running();
-        auto lifecycle_lock = acquire_stream_start_lifecycle_lock();
+        auto lifecycle_gate = try_acquire_stream_start_lifecycle_lock(kStreamStartGateTimeout);
+        if (!lifecycle_gate.acquired()) {
+          reply_stream_start_gate_timeout(std::move(resp), "resume", lifecycle_gate, handler_started);
+          return;
+        }
         const int current_appid = proc::proc.current_app_id();
-        resume(host_audio, std::move(resp), std::move(req), current_appid);
+        resume(host_audio, std::move(resp), std::move(req), current_appid, true, false, handler_started);
       });
     };
     https_server.resource["^/cancel$"]["GET"] = [run_blocking_nvhttp](auto resp, auto req) {
