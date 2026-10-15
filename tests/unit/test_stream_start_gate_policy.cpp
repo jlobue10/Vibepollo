@@ -171,3 +171,72 @@ TEST(StreamStartGatePolicy, BlockerNamesAreStable) {
   EXPECT_STREQ(stream_start_gate::blocker_name(blocker_e::teardown_sessions), "prior RTSP teardown still pending");
   EXPECT_STREQ(stream_start_gate::blocker_name(blocker_e::none), "none");
 }
+
+// Bounded wait for the background HTTP capability probe (same fake-clock style).
+#include "src/http_capability_probe_policy.h"
+
+namespace {
+  using http_capability_probe::wait_outcome_e;
+}
+
+TEST(HttpCapabilityProbeWaitPolicy, AnswersImmediatelyWhenCacheAlreadyMatches) {
+  fake_clock_t clock;
+  const auto outcome = http_capability_probe::wait_for_probe(
+    [] { return true; },
+    [] { return true; },
+    clock.now + http_capability_probe::kHttpCapabilityProbeWait,
+    clock.now_fn(),
+    clock.sleep_fn()
+  );
+  EXPECT_EQ(outcome, wait_outcome_e::probe_complete);
+  EXPECT_EQ(clock.sleeps, 0u);
+}
+
+TEST(HttpCapabilityProbeWaitPolicy, WaitsUntilProbeCompletesBeforeDeadline) {
+  fake_clock_t clock;
+  unsigned samples = 0;
+  const auto outcome = http_capability_probe::wait_for_probe(
+    [&] { return ++samples >= 4; },
+    [] { return true; },
+    clock.now + http_capability_probe::kHttpCapabilityProbeWait,
+    clock.now_fn(),
+    clock.sleep_fn(100ms)
+  );
+  EXPECT_EQ(outcome, wait_outcome_e::probe_complete);
+  EXPECT_EQ(clock.sleeps, 3u);
+}
+
+TEST(HttpCapabilityProbeWaitPolicy, ExpiresWhileProbeStillRunning) {
+  fake_clock_t clock;
+  const auto deadline = clock.now + http_capability_probe::kHttpCapabilityProbeWait;
+  const auto outcome = http_capability_probe::wait_for_probe(
+    [] { return false; },
+    [] { return true; },
+    deadline,
+    clock.now_fn(),
+    clock.sleep_fn(100ms)
+  );
+  EXPECT_EQ(outcome, wait_outcome_e::expired);
+  EXPECT_GE(clock.now, deadline);
+  EXPECT_EQ(clock.sleeps, 80u);
+}
+
+TEST(HttpCapabilityProbeWaitPolicy, StopsEarlyWhenProbeEndsWithoutCache) {
+  fake_clock_t clock;
+  unsigned samples = 0;
+  const auto outcome = http_capability_probe::wait_for_probe(
+    [] { return false; },
+    [&] { return ++samples < 3; },
+    clock.now + http_capability_probe::kHttpCapabilityProbeWait,
+    clock.now_fn(),
+    clock.sleep_fn(100ms)
+  );
+  EXPECT_EQ(outcome, wait_outcome_e::probe_not_running);
+  EXPECT_EQ(clock.sleeps, 2u);
+}
+
+TEST(HttpCapabilityProbeWaitPolicy, OutcomeNamesAreStable) {
+  EXPECT_STREQ(http_capability_probe::wait_outcome_name(wait_outcome_e::probe_complete), "probe finished during the wait");
+  EXPECT_STREQ(http_capability_probe::wait_outcome_name(wait_outcome_e::expired), "wait expired with the probe still running");
+  EXPECT_STREQ(http_capability_probe::wait_outcome_name(wait_outcome_e::probe_not_running), "probe ended without a matching cache");
+}

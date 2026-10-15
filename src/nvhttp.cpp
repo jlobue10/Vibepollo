@@ -67,6 +67,7 @@
 #include "update_notification_state.h"
 #include "single_flight.h"
 #include "state_storage_policy.h"
+#include "http_capability_probe_policy.h"
 #include "stream_start_gate_policy.h"
 #ifdef _WIN32
   #include "platform/windows/display.h"
@@ -879,6 +880,12 @@ namespace nvhttp {
     std::atomic<thread_pool_util::ThreadPool *> http_capability_probe_pool {nullptr};
     single_flight::admission_t http_capability_probe_admission;
     std::atomic_bool http_capability_probe_running {false};
+    // Bumped when a background probe ends, filled or skipped, so a request that
+    // is waiting for it can tell "still running" from "ended without a cache".
+    std::atomic<unsigned> http_capability_probe_finished {0};
+    // How often a waiting discovery request re-samples the cache
+    // (http_capability_probe_policy.h bounds the whole wait).
+    constexpr auto kHttpCapabilityProbePoll = std::chrono::milliseconds(50);
 
     struct idle_virtual_adapter_hint_t {
       std::optional<video::encoder_probe_adapter_hint_lease_t> lease;
@@ -917,6 +924,7 @@ namespace nvhttp {
       http_capability_probe_running.store(true, std::memory_order_release);
       auto running_guard = util::fail_guard([] {
         http_capability_probe_running.store(false, std::memory_order_release);
+        http_capability_probe_finished.fetch_add(1, std::memory_order_acq_rel);
       });
       const auto started = std::chrono::steady_clock::now();
       const auto elapsed_ms = [started] {
@@ -1031,21 +1039,52 @@ namespace nvhttp {
 
       // Never run the probe on the request: a /serverinfo that held the
       // lifecycle gate through a cold probe stalled the /launch that followed
-      // it past the client's timeout. Answer with the conservative baseline
-      // (H.264 only, no HDR) now and let the single-flight worker fill the cache.
+      // it past the client's timeout. The single-flight worker fills the cache;
+      // the request waits for it up to kHttpCapabilityProbeWait and only then
+      // answers with the conservative baseline (H.264 only, no HDR).
+      const unsigned finished_before = http_capability_probe_finished.load(std::memory_order_acquire);
       const char *reason = "background-probe-started";
+      bool wait_for_probe = true;
       switch (schedule_idle_http_capability_probe()) {
         case idle_probe_schedule_e::started:
-          BOOST_LOG(info) << "HTTP capability discovery answered without a fresh encoder probe; background probe started.";
           break;
         case idle_probe_schedule_e::already_running:
           reason = "background-probe-running";
-          BOOST_LOG(info) << "HTTP capability discovery answered without a fresh encoder probe; background probe still running.";
           break;
         case idle_probe_schedule_e::unavailable:
           reason = "background-probe-unavailable";
+          wait_for_probe = false;
           BOOST_LOG(info) << "HTTP capability discovery answered without a fresh encoder probe; no probe worker is available.";
           break;
+      }
+      if (wait_for_probe) {
+        const auto wait_started = std::chrono::steady_clock::now();
+        const auto waited_ms = [wait_started] {
+          return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_started).count();
+        };
+        const auto outcome = http_capability_probe::wait_for_probe(
+          [&] {
+            caps = video::advertised_encoder_capabilities(false, &probe_complete);
+            return probe_complete;
+          },
+          [&] {
+            return http_capability_probe_finished.load(std::memory_order_acquire) == finished_before;
+          },
+          wait_started + http_capability_probe::kHttpCapabilityProbeWait,
+          [] {
+            return std::chrono::steady_clock::now();
+          },
+          [] {
+            std::this_thread::sleep_for(kHttpCapabilityProbePoll);
+          }
+        );
+        if (outcome == http_capability_probe::wait_outcome_e::probe_complete) {
+          BOOST_LOG(info) << "HTTP capability discovery waited " << waited_ms() << " ms for the background encoder probe.";
+          return publish(std::move(caps), true, "background-probe-finished");
+        }
+        reason = outcome == http_capability_probe::wait_outcome_e::expired ? "background-probe-wait-expired" : "background-probe-skipped";
+        BOOST_LOG(info) << "HTTP capability discovery answered without a fresh encoder probe after " << waited_ms()
+                        << " ms: " << http_capability_probe::wait_outcome_name(outcome) << '.';
       }
       return publish(std::move(caps), false, reason);
     }
