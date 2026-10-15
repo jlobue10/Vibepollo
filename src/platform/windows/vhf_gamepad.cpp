@@ -29,20 +29,11 @@
 // local includes
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/steam_controller_protocol.h"
 #include "src/utility.h"
 #include "vhf_gamepad.h"
 #include "dualsense_haptics.h"
 #include "vhf_gamepad_policy.h"
-
-// A Moonlight client that can replay the Steam Controller's haptic reports on the real pads
-// (the jlobue10 moonlight-common-c fork); the submodule pinned here predates the flag.
-#ifndef LI_CCAP_STEAM_HAPTIC
-  #define LI_CCAP_STEAM_HAPTIC 0x800
-#endif
-// A client that applies Steam's settings writes to the real controller (same fork).
-#ifndef LI_CCAP_STEAM_SETTINGS
-  #define LI_CCAP_STEAM_SETTINGS 0x2000
-#endif
 
 namespace platf {
   using namespace std::literals;

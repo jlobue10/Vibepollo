@@ -15,6 +15,9 @@
 // lib includes
 #include <libvirtualgamepad/protocol.h>
 
+// local includes
+#include "src/steam_controller_protocol.h"
+
 namespace platf {
 
   /**
@@ -230,7 +233,7 @@ namespace platf::vhf_gamepad {
    */
   struct steam_haptic_t {
     std::uint8_t length {};
-    std::array<std::uint8_t, 12> report {};
+    std::array<std::uint8_t, STEAM_HAPTIC_REPORT_MAX> report {};
   };
 
   /**
@@ -249,12 +252,11 @@ namespace platf::vhf_gamepad {
   struct steam_settings_t {
     std::uint8_t command {};
     std::uint8_t count {};
-    std::array<std::uint8_t, 27> triples {};
+    std::array<std::uint8_t, STEAM_SETTINGS_PAYLOAD_SIZE> triples {};
   };
 
-  constexpr std::uint8_t STEAM_SETTINGS_SET_VALUES = 0x87;
-  constexpr std::uint8_t STEAM_SETTINGS_LOAD_DEFAULTS = 0x8E;
-  constexpr std::uint8_t STEAM_SETTINGS_TRIPLES_MAX = 9;
+  // STEAM_SETTINGS_SET_VALUES, STEAM_SETTINGS_LOAD_DEFAULTS and STEAM_SETTINGS_TRIPLES_MAX
+  // come from src/steam_controller_protocol.h (the client fork's names).
 
   /**
    * @brief Decodes a driver feedback event that carries a Steam Controller settings write.

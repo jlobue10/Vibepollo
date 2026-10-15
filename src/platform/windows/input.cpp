@@ -24,15 +24,11 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/steam_controller_protocol.h"
 #include "vhf_gamepad.h"
 #include "dualsense_usbip_gamepad.h"
 #include "dualsense_usbip_gamepad_policy.h"
 #include "vhf_gamepad_policy.h"
-
-// moonlight-common-c grew LI_CTYPE_STEAM after the revision pinned here; the wire value is fixed.
-#ifndef LI_CTYPE_STEAM
-  #define LI_CTYPE_STEAM 0x04
-#endif
 
 #ifdef __MINGW32__
 // DECLARE_HANDLE(HSYNTHETICPOINTERDEVICE);
