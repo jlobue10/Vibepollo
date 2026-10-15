@@ -512,7 +512,11 @@ import { ref, reactive, onBeforeUnmount, onMounted, watch, computed, nextTick } 
 import { useI18n } from 'vue-i18n';
 import { NTag, NSwitch, NInputNumber, NAlert, useDialog, useMessage } from 'naive-ui';
 import { WebRtcHttpApi } from '@/services/webrtcApi';
-import { WebRtcClient } from '@/utils/webrtc/client';
+import {
+  WebRtcClient,
+  WebRtcConnectionCanceledError,
+  type WebRtcDisconnectOptions,
+} from '@/utils/webrtc/client';
 import {
   computeVideoFrameCaptureToDisplayAgeMs,
   computeVideoFrameRenderDelayMs,
@@ -993,6 +997,8 @@ const client = new WebRtcClient(api);
 
 const isConnecting = ref(false);
 const isConnected = ref(false);
+let viewDisposed = false;
+let connectionAttempt = 0;
 
 function setWebRtcActive(active: boolean): void {
   try {
@@ -1906,11 +1912,15 @@ function stopServerSessionPolling(): void {
 
 function startServerSessionPolling(): void {
   stopServerSessionPolling();
-  if (!sessionId.value) return;
+  const id = sessionId.value;
+  const attempt = connectionAttempt;
+  const isCurrent = () => !viewDisposed && attempt === connectionAttempt && id === sessionId.value;
+  if (!id || !isCurrent()) return;
   const poll = async () => {
-    if (!sessionId.value) return;
+    if (!isCurrent()) return;
     try {
-      const result = await api.getSessionState(sessionId.value);
+      const result = await api.getSessionState(id);
+      if (!isCurrent()) return;
       if (result.session) {
         serverSession.value = result.session;
         const now = Date.now();
@@ -1934,6 +1944,7 @@ const WEBRTC_DIAG_LOG_INTERVAL_MS = 5000;
 
 function startWebrtcDiagnostics(): void {
   stopWebrtcDiagnostics();
+  if (viewDisposed) return;
   webrtcDiagTimer = window.setInterval(() => {
     if (!isConnected.value) return;
     // Diagnostics logging (simplified)
@@ -1956,6 +1967,7 @@ function stopDiagnosticsSampling(): void {
 
 function startDiagnosticsSampling(): void {
   stopDiagnosticsSampling();
+  if (viewDisposed) return;
   diagnosticsSampleTimer = window.setInterval(() => {
     if (!isConnected.value) return;
     const now = Date.now();
@@ -2073,9 +2085,12 @@ function stopSessionStatusPolling(): void {
 }
 
 async function fetchSessionStatus(): Promise<void> {
-  if (isConnected.value) return;
+  const attempt = connectionAttempt;
+  const isCurrent = () => !viewDisposed && !isConnected.value && attempt === connectionAttempt;
+  if (!isCurrent()) return;
   try {
     const result = await http.get('/api/session/status', { validateStatus: () => true });
+    if (!isCurrent()) return;
     if (result.status === 200 && result.data?.status) {
       sessionStatus.value = {
         activeSessions: Number(result.data.activeSessions ?? 0),
@@ -2087,12 +2102,12 @@ async function fetchSessionStatus(): Promise<void> {
   } catch {
     /* ignore */
   }
-  sessionStatus.value = null;
+  if (isCurrent()) sessionStatus.value = null;
 }
 
 function startSessionStatusPolling(): void {
   stopSessionStatusPolling();
-  if (isConnected.value) return;
+  if (viewDisposed || isConnected.value) return;
   void fetchSessionStatus();
   sessionStatusTimer = window.setInterval(fetchSessionStatus, 5000);
 }
@@ -2227,7 +2242,7 @@ const onOverlayHotkey = (event: KeyboardEvent) => {
 };
 
 const onPageHide = () => {
-  void client.disconnect({ keepalive: true });
+  void disconnect({ keepalive: true });
 };
 
 const onVisibilityChange = () => {
@@ -2729,6 +2744,7 @@ function startInboundVideoStats(
 }
 
 async function confirmTerminateAndConnect(): Promise<void> {
+  if (viewDisposed) return;
   dialog.warning({
     title: t('webrtc.terminate_confirm_title'),
     content: t('webrtc.terminate_confirm_message', {
@@ -2737,6 +2753,7 @@ async function confirmTerminateAndConnect(): Promise<void> {
     positiveText: t('webrtc.terminate_confirm_action'),
     negativeText: t('_common.cancel'),
     onPositiveClick: async () => {
+      if (viewDisposed) return;
       await terminateSession();
       await startConnect();
     },
@@ -2750,9 +2767,13 @@ async function waitForSpinnerFrame(): Promise<void> {
 }
 
 async function startConnect() {
+  if (viewDisposed) return;
+  const attempt = ++connectionAttempt;
+  const isCurrent = () => !viewDisposed && attempt === connectionAttempt;
   isConnecting.value = true;
   // Yield to allow the connecting spinner to render and start animating before heavy work
   await waitForSpinnerFrame();
+  if (!isCurrent()) return;
   negotiatedEncoding.value = null;
   hdrRuntimeWarning.value = null;
   audioAutoplayRequested = true;
@@ -2763,6 +2784,7 @@ async function startConnect() {
     try {
       const target = inputTarget.value;
       const entered = await tryEnterFullscreen(target);
+      if (!isCurrent()) return;
       if (!entered) pseudoFullscreen.value = true;
       onFullscreenChange();
       try {
@@ -2775,6 +2797,7 @@ async function startConnect() {
       /* ignore */
     }
   }
+  if (!isCurrent()) return;
   ensureAudioPlayback('connect');
   stopServerSessionPolling();
   sessionId.value = null;
@@ -2791,6 +2814,7 @@ async function startConnect() {
       { ...config, appId: effectiveAppId, resume: shouldResume },
       {
         onRemoteStream: (stream) => {
+          if (!isCurrent()) return;
           if (videoEl.value) {
             const hasVideo = updateVideoElement(stream);
             videoEl.value.muted = false;
@@ -2806,6 +2830,7 @@ async function startConnect() {
               const playPromise = videoEl.value.play();
               if (playPromise && typeof playPromise.catch === 'function') {
                 playPromise.catch((error) => {
+                  if (!isCurrent()) return;
                   const name = error && typeof error === 'object' ? (error as any).name : '';
                   pushVideoEvent(`play-error${name ? `:${name}` : ''}`);
                 });
@@ -2814,6 +2839,7 @@ async function startConnect() {
           }
         },
         onConnectionState: (state) => {
+          if (!isCurrent()) return;
           connectionState.value = state;
           isConnected.value = state === 'connected';
           if (state === 'connected') {
@@ -2822,6 +2848,7 @@ async function startConnect() {
               const pc = client.peerConnection;
               if (pc)
                 stopInboundVideoStatsTimer = startInboundVideoStats(pc, (sample) => {
+                  if (!isCurrent()) return;
                   inboundVideoStats.value = sample;
                 });
             }
@@ -2837,46 +2864,58 @@ async function startConnect() {
           }
         },
         onIceState: (state) => {
+          if (!isCurrent()) return;
           iceState.value = state;
         },
         onInputChannelState: (state) => {
+          if (!isCurrent()) return;
           inputChannelState.value = state;
         },
         onInputMessage: (message) => {
+          if (!isCurrent()) return;
           applyGamepadFeedback(message);
         },
         onStats: (snapshot) => {
+          if (!isCurrent()) return;
           stats.value = snapshot;
         },
         onNegotiatedEncoding: (encoding) => {
+          if (!isCurrent()) return;
           if (encoding === 'h264' || encoding === 'hevc' || encoding === 'av1')
             negotiatedEncoding.value = encoding;
         },
         onWarning: (warning) => {
+          if (!isCurrent()) return;
           notifyWarning(t('_common.warning'), warning);
           if (config.hdr && /^hdr\b/i.test(warning)) hdrRuntimeWarning.value = warning;
         },
       },
       { inputPriority: isFullscreenActive() || isTabActive() ? 'high' : 'low' },
     );
+    if (!isCurrent()) return;
     sessionId.value = id;
     startServerSessionPolling();
   } catch (error) {
+    if (!isCurrent() || error instanceof WebRtcConnectionCanceledError) return;
     const msg = error instanceof Error ? error.message : t('webrtc.connection_start_failed');
     notifyError(t('webrtc.connection_failed'), msg);
     console.error(error);
     audioAutoplayRequested = false;
     stopAudioPlayRetry();
   } finally {
-    isConnecting.value = false;
-    if (!isConnected.value) startSessionStatusPolling();
+    if (isCurrent()) {
+      isConnecting.value = false;
+      if (!isConnected.value) startSessionStatusPolling();
+    }
   }
 }
 
 async function connect() {
-  if (isConnecting.value) return;
+  if (viewDisposed || isConnecting.value) return;
+  const attempt = connectionAttempt;
   // Always fetch session status to know if we can resume
   if (!sessionStatus.value) await fetchSessionStatus();
+  if (viewDisposed || isConnecting.value || attempt !== connectionAttempt) return;
   if (selectedAppId.value && hasRunningSession.value) {
     await confirmTerminateAndConnect();
     return;
@@ -2884,9 +2923,13 @@ async function connect() {
   await startConnect();
 }
 
-async function disconnect() {
-  await client.disconnect();
+async function disconnect(options: WebRtcDisconnectOptions = {}) {
+  ++connectionAttempt;
+  const closing = client.disconnect(options);
+  // Clear this lifetime before waiting for HTTP teardown. A replacement may
+  // begin while that request is still in flight.
   stopServerSessionPolling();
+  isConnecting.value = false;
   isConnected.value = false;
   connectionState.value = null;
   iceState.value = null;
@@ -2941,18 +2984,21 @@ async function disconnect() {
   videoEvents.value = [];
   videoStateTick.value += 1;
   startSessionStatusPolling();
+  await closing;
 }
 
 async function terminateSession() {
-  if (terminatePending.value) return;
+  if (viewDisposed || terminatePending.value) return;
+  const attempt = connectionAttempt;
   terminatePending.value = true;
   try {
     await http.post('/api/apps/close', {}, { validateStatus: () => true });
   } catch (error) {
+    if (viewDisposed || attempt !== connectionAttempt) return;
     const msg = error instanceof Error ? error.message : t('webrtc.termination_failed_desc');
     notifyError(t('webrtc.termination_failed'), msg);
   } finally {
-    await disconnect();
+    if (!viewDisposed && attempt === connectionAttempt) await disconnect();
     terminatePending.value = false;
   }
 }
@@ -3080,6 +3126,8 @@ watch(videoEl, (el) => {
 });
 
 onBeforeUnmount(() => {
+  viewDisposed = true;
+  dismissNotification();
   setWebRtcActive(false);
   document.removeEventListener('fullscreenchange', onFullscreenChange);
   document.removeEventListener('webkitfullscreenchange', onFullscreenChange as EventListener);
@@ -3135,6 +3183,7 @@ onMounted(async () => {
   } catch {
     /* ignore */
   }
+  if (viewDisposed) return;
   encodingSupport.value = detectEncodingSupport();
   if (config.hdr) ensureHdrEncoding();
   startSessionStatusPolling();
