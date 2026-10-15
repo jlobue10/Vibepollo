@@ -21,6 +21,13 @@ export interface WebRtcDisconnectOptions {
   keepalive?: boolean;
 }
 
+export class WebRtcConnectionCanceledError extends Error {
+  constructor() {
+    super('Browser stream connection was canceled.');
+    this.name = 'WebRtcConnectionCanceledError';
+  }
+}
+
 interface StatsState {
   lastVideoInboundId?: string;
   lastAudioInboundId?: string;
@@ -397,7 +404,7 @@ export class WebRtcClient {
   private pendingLocalCandidates: RTCIceCandidateInit[] = [];
   private pendingLocalCandidatesTimer?: number;
   private autoDisconnectTimer?: number;
-  private disconnecting = false;
+  private generation = 0;
   private pendingInput: (string | ArrayBuffer)[] = [];
   private maxPendingInput = 256;
   private videoJitterTargetMs?: number;
@@ -456,9 +463,15 @@ export class WebRtcClient {
       }
     }
 
+    const generation = ++this.generation;
     try {
-      return await this.connectAttempt(config, callbacks, options);
+      const id = await this.connectAttempt(generation, config, callbacks, options);
+      this.throwIfCanceled(generation);
+      return id;
     } catch (error) {
+      this.throwIfCanceled(generation);
+      await this.disposeCurrentSession();
+      this.throwIfCanceled(generation);
       const message = error instanceof Error ? error.message : String(error);
       const requested = config.encoding.toLowerCase();
       const isCodecOfferMismatch = message.startsWith('Browser did not offer requested video codec');
@@ -509,13 +522,18 @@ export class WebRtcClient {
 
           try {
             const id = await this.connectAttempt(
+              generation,
               { ...config, encoding: candidate.encoding, hdr: candidate.hdr },
               callbacks,
               options,
             );
             callbacks.onNegotiatedEncoding?.(candidate.encoding);
+            this.throwIfCanceled(generation);
             return id;
           } catch {
+            this.throwIfCanceled(generation);
+            await this.disposeCurrentSession();
+            this.throwIfCanceled(generation);
             /* try next candidate */
           }
         }
@@ -529,15 +547,27 @@ export class WebRtcClient {
   }
 
   private async connectAttempt(
+    generation: number,
     config: StreamConfig,
     callbacks: WebRtcClientCallbacks = {},
     options: WebRtcClientConnectOptions = {},
   ): Promise<string> {
-    await this.disconnect();
+    this.throwIfCanceled(generation);
+    await this.disposeCurrentSession();
+    this.throwIfCanceled(generation);
     this.clearAutoDisconnectTimer();
-    this.disconnecting = false;
     const sessionConfig = config;
     const session = await this.api.createSession(sessionConfig);
+    if (generation !== this.generation) {
+      // The HTTP request can finish after disconnect, before a peer ever
+      // existed. Retire only that late server session, never the current one.
+      try {
+        await this.api.endSession(session.sessionId);
+      } catch {
+        /* best-effort cleanup */
+      }
+      throw new WebRtcConnectionCanceledError();
+    }
     this.sessionId = session.sessionId;
     this.pendingRemoteCandidates = [];
     this.videoJitterTargetMs = resolveVideoJitterTargetMs(sessionConfig);
@@ -553,6 +583,9 @@ export class WebRtcClient {
       bundlePolicy,
       rtcpMuxPolicy,
     });
+    const pc = this.pc;
+    const stream = this.remoteStream;
+    const isCurrent = () => generation === this.generation && this.pc === pc;
 
     const videoTransceiver = this.pc.addTransceiver('video', { direction: 'recvonly' });
     this.pc.addTransceiver('audio', { direction: 'recvonly' });
@@ -565,12 +598,18 @@ export class WebRtcClient {
       priority: inputPriority,
     });
     this.inputChannel.onopen = () => {
+      if (!isCurrent()) return;
       callbacks.onInputChannelState?.('open');
-      this.flushPendingInput();
+      if (isCurrent()) this.flushPendingInput();
     };
-    this.inputChannel.onclose = () => callbacks.onInputChannelState?.('closed');
-    this.inputChannel.onerror = () => callbacks.onInputChannelState?.('closing');
+    this.inputChannel.onclose = () => {
+      if (isCurrent()) callbacks.onInputChannelState?.('closed');
+    };
+    this.inputChannel.onerror = () => {
+      if (isCurrent()) callbacks.onInputChannelState?.('closing');
+    };
     this.inputChannel.onmessage = (event) => {
+      if (!isCurrent()) return;
       if (!callbacks.onInputMessage) return;
       if (typeof event.data !== 'string') return;
       try {
@@ -583,11 +622,12 @@ export class WebRtcClient {
     };
 
     this.pc.ontrack = (event) => {
+      if (!isCurrent()) return;
       const track = event.track;
       const kind = track.kind;
-      for (const existing of this.remoteStream.getTracks()) {
+      for (const existing of stream.getTracks()) {
         if (existing.kind !== kind) continue;
-        this.remoteStream.removeTrack(existing);
+        stream.removeTrack(existing);
         try {
           existing.stop();
         } catch {
@@ -595,11 +635,11 @@ export class WebRtcClient {
         }
       }
       const removeTrack = () => {
-        this.remoteStream.removeTrack(track);
+        stream.removeTrack(track);
         track.removeEventListener('ended', removeTrack);
       };
       track.addEventListener('ended', removeTrack);
-      this.remoteStream.addTrack(track);
+      stream.addTrack(track);
       if (kind === 'audio') {
         applyAudioReceiverHints(
           event.receiver,
@@ -610,41 +650,42 @@ export class WebRtcClient {
         track.contentHint = 'motion';
         applyVideoReceiverHints(event.receiver, this.videoJitterTargetMs);
       }
-      callbacks.onRemoteStream?.(this.remoteStream);
+      callbacks.onRemoteStream?.(stream);
     };
 
     this.pc.onconnectionstatechange = () => {
-      if (!this.pc) return;
-      const state = this.pc.connectionState;
+      if (!isCurrent()) return;
+      const state = pc.connectionState;
       callbacks.onConnectionState?.(state);
+      if (!isCurrent()) return;
       if (state === 'connected') {
         const now = Date.now();
         this.statsConnectedAtMs = now;
         this.statsFastUntilMs = now + STATS_POLL_FAST_BOOT_MS;
         this.clearAutoDisconnectTimer();
       } else if (state === 'failed' || state === 'closed') {
-        this.scheduleAutoDisconnect(0);
+        this.scheduleAutoDisconnect(0, generation);
       } else if (state === 'disconnected') {
-        this.scheduleAutoDisconnect(5000);
+        this.scheduleAutoDisconnect(5000, generation);
       }
     };
 
     this.pc.oniceconnectionstatechange = () => {
-      if (!this.pc) return;
-      callbacks.onIceState?.(this.pc.iceConnectionState);
+      if (!isCurrent()) return;
+      callbacks.onIceState?.(pc.iceConnectionState);
     };
 
     this.pc.onicecandidate = (event) => {
-      if (!event.candidate || !this.sessionId) return;
-      this.queueLocalCandidate(event.candidate.toJSON());
+      if (!isCurrent() || !event.candidate) return;
+      this.queueLocalCandidate(event.candidate.toJSON(), generation);
     };
 
     this.unsubscribeCandidates = this.api.subscribeRemoteCandidates(
       session.sessionId,
       (candidate) => {
-        if (!this.pc || !candidate) return;
-        if (this.pc.remoteDescription) {
-          void this.pc.addIceCandidate(candidate).catch(() => {});
+        if (!isCurrent() || !candidate) return;
+        if (pc.remoteDescription) {
+          void pc.addIceCandidate(candidate).catch(() => {});
           return;
         }
         this.pendingRemoteCandidates.push(candidate);
@@ -652,10 +693,11 @@ export class WebRtcClient {
     );
 
     try {
-      const offer = await this.pc.createOffer({
+      const offer = await pc.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
       });
+      this.throwIfCanceled(generation);
       const mungedOffer: RTCSessionDescriptionInit = {
         type: offer.type,
         sdp: applyInitialBitrateHints(offer.sdp ?? '', sessionConfig.bitrateKbps),
@@ -667,17 +709,21 @@ export class WebRtcClient {
           `Browser did not offer requested video codec '${sessionConfig.encoding}' (offered: ${offered})`,
         );
       }
-      await this.pc.setLocalDescription(mungedOffer);
+      await pc.setLocalDescription(mungedOffer);
+      this.throwIfCanceled(generation);
       const answer = await this.api.sendOffer(session.sessionId, {
         type: mungedOffer.type,
         sdp: mungedOffer.sdp ?? '',
       });
+      this.throwIfCanceled(generation);
       if (!answer?.sdp) {
         throw new Error('WebRTC answer not received');
       }
       try {
-        await this.pc.setRemoteDescription(answer);
+        await pc.setRemoteDescription(answer);
+        this.throwIfCanceled(generation);
       } catch (error) {
+        this.throwIfCanceled(generation);
         const offered =
           Array.from(getOfferedVideoCodecNames(mungedOffer.sdp ?? '')).join(', ') || 'none';
         console.error('Failed to apply WebRTC answer SDP', {
@@ -692,18 +738,20 @@ export class WebRtcClient {
           `Failed to apply WebRTC answer SDP (${sessionConfig.encoding}; offered: ${offered}): ${message}`,
         );
       }
-      await this.flushPendingCandidates();
+      await this.flushPendingCandidates(generation);
+      this.throwIfCanceled(generation);
     } catch (error) {
-      await this.disconnect();
+      this.throwIfCanceled(generation);
       throw error;
     }
 
-    this.startStatsPolling(callbacks);
+    this.startStatsPolling(callbacks, generation);
     return session.sessionId;
   }
 
-  private queueLocalCandidate(candidate: RTCIceCandidateInit): void {
+  private queueLocalCandidate(candidate: RTCIceCandidateInit, generation: number): void {
     if (!candidate?.candidate || !this.sessionId) return;
+    const pc = this.pc;
     this.pendingLocalCandidates.push(candidate);
     if (this.pendingLocalCandidates.length >= ICE_CANDIDATE_BATCH_LIMIT) {
       this.flushLocalCandidates();
@@ -711,6 +759,7 @@ export class WebRtcClient {
     }
     if (this.pendingLocalCandidatesTimer) return;
     this.pendingLocalCandidatesTimer = window.setTimeout(() => {
+      if (generation !== this.generation || pc !== this.pc) return;
       this.pendingLocalCandidatesTimer = undefined;
       this.flushLocalCandidates();
     }, ICE_CANDIDATE_BATCH_WINDOW_MS);
@@ -724,8 +773,23 @@ export class WebRtcClient {
   }
 
   async disconnect(options: WebRtcDisconnectOptions = {}): Promise<void> {
-    if (this.disconnecting) return;
-    this.disconnecting = true;
+    ++this.generation;
+    await this.disposeCurrentSession(options);
+  }
+
+  private throwIfCanceled(generation: number): void {
+    if (generation !== this.generation) throw new WebRtcConnectionCanceledError();
+  }
+
+  private async disposeCurrentSession(options: WebRtcDisconnectOptions = {}): Promise<void> {
+    // Detach shared state before the DELETE can yield. A new connect may start
+    // while that request is pending; its resources belong to a new lifetime.
+    const pc = this.pc;
+    const channel = this.inputChannel;
+    const sessionId = this.sessionId;
+    this.pc = undefined;
+    this.inputChannel = undefined;
+    this.sessionId = undefined;
     this.clearAutoDisconnectTimer();
     if (this.statsTimer) {
       window.clearTimeout(this.statsTimer);
@@ -735,23 +799,18 @@ export class WebRtcClient {
     this.statsConnectedAtMs = undefined;
     this.unsubscribeCandidates?.();
     this.unsubscribeCandidates = undefined;
-    if (this.inputChannel) {
+    if (channel) {
+      channel.onopen = channel.onclose = channel.onerror = channel.onmessage = null;
       try {
-        this.inputChannel.close();
+        channel.close();
       } catch {
         /* ignore */
       }
     }
-    if (this.pc) {
+    if (pc) {
+      pc.ontrack = pc.onconnectionstatechange = pc.oniceconnectionstatechange = pc.onicecandidate = null;
       try {
-        this.pc.close();
-      } catch {
-        /* ignore */
-      }
-    }
-    if (this.sessionId) {
-      try {
-        await this.api.endSession(this.sessionId, { keepalive: options.keepalive });
+        pc.close();
       } catch {
         /* ignore */
       }
@@ -763,15 +822,18 @@ export class WebRtcClient {
     this.remoteStream = new MediaStream();
     this.pendingRemoteCandidates = [];
     this.pendingLocalCandidates = [];
-    this.pc = undefined;
-    this.sessionId = undefined;
-    this.inputChannel = undefined;
     this.pendingInput = [];
     this.statsState = {};
     this.videoJitterTargetMs = undefined;
     this.statsFastUntilMs = undefined;
     this.statsConnectedAtMs = undefined;
-    this.disconnecting = false;
+    if (sessionId) {
+      try {
+        await this.api.endSession(sessionId, { keepalive: options.keepalive });
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   setAudioLatencyTargets(targetMs: number, playoutDelayHintMs?: number): void {
@@ -836,21 +898,24 @@ export class WebRtcClient {
     }
   }
 
-  private startStatsPolling(callbacks: WebRtcClientCallbacks): void {
+  private startStatsPolling(callbacks: WebRtcClientCallbacks, generation: number): void {
     if (!this.pc) return;
     if (this.statsTimer) return;
+    const pc = this.pc;
+    const isCurrent = () => generation === this.generation && this.pc === pc;
     const poll = async () => {
-      if (!this.pc) return;
+      if (!isCurrent()) return;
       let snapshot: WebRtcStatsSnapshot | null = null;
       try {
-        const stats = await this.pc.getStats();
+        const stats = await pc.getStats();
+        if (!isCurrent()) return;
         snapshot = this.extractStats(stats);
         callbacks.onStats?.(snapshot);
       } catch {
         /* ignore */
       }
 
-      if (!this.pc) return;
+      if (!isCurrent()) return;
       const now = Date.now();
       const jitter = snapshot?.videoPlayoutDelayMs ?? snapshot?.videoJitterBufferMs;
       if (typeof jitter === 'number' && Number.isFinite(jitter) && jitter >= STATS_POLL_FAST_JITTER_THRESHOLD_MS) {
@@ -860,6 +925,7 @@ export class WebRtcClient {
         (this.statsConnectedAtMs != null && now - this.statsConnectedAtMs <= STATS_POLL_FAST_BOOT_MS);
       const delay = shouldFast ? STATS_POLL_FAST_MS : STATS_POLL_SLOW_MS;
       this.statsTimer = window.setTimeout(() => {
+        if (!isCurrent()) return;
         this.statsTimer = undefined;
         void poll();
       }, delay);
@@ -867,12 +933,13 @@ export class WebRtcClient {
     void poll();
   }
 
-  private async flushPendingCandidates(): Promise<void> {
+  private async flushPendingCandidates(generation: number): Promise<void> {
     if (!this.pc || !this.pc.remoteDescription || !this.pendingRemoteCandidates.length) return;
     const pc = this.pc;
     const pending = this.pendingRemoteCandidates;
     this.pendingRemoteCandidates = [];
     for (const candidate of pending) {
+      if (generation !== this.generation || pc !== this.pc) return;
       try {
         await pc.addIceCandidate(candidate);
       } catch {
@@ -888,14 +955,16 @@ export class WebRtcClient {
     }
   }
 
-  private scheduleAutoDisconnect(delayMs: number): void {
-    if (this.disconnecting || !this.sessionId) return;
+  private scheduleAutoDisconnect(delayMs: number, generation: number): void {
+    if (generation !== this.generation || !this.sessionId) return;
+    const pc = this.pc;
     this.clearAutoDisconnectTimer();
     if (delayMs <= 0) {
       void this.disconnect();
       return;
     }
     this.autoDisconnectTimer = window.setTimeout(() => {
+      if (generation !== this.generation || pc !== this.pc) return;
       this.autoDisconnectTimer = undefined;
       void this.disconnect();
     }, delayMs);

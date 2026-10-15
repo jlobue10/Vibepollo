@@ -148,7 +148,7 @@ jobs:
           node-version: '24'
       - name: Check browser signaling, view lifetime and controller inventory
         run: |
-          node --experimental-strip-types --test src_assets/common/assets/web/scripts/webrtc-ice-lifetime.test.ts src_assets/common/assets/web/scripts/browser-stream-lifetime.test.ts src_assets/common/assets/web/scripts/browser-gamepad-inventory.test.ts
+          node --experimental-strip-types --test src_assets/common/assets/web/scripts/webrtc-ice-lifetime.test.ts src_assets/common/assets/web/scripts/browser-stream-lifetime.test.ts src_assets/common/assets/web/scripts/browser-gamepad-inventory.test.ts src_assets/common/assets/web/scripts/legacy-webrtc-lifetime.test.ts src_assets/common/assets/web/scripts/legacy-browser-stream-lifetime.test.ts
       - name: Check PyroWave fence import and conversion timeout ordering
         run: python3 tests/input/test_pyrowave_sync.py
 
