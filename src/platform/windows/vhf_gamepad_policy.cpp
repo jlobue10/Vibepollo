@@ -342,16 +342,37 @@ namespace platf::vhf_gamepad {
       return static_cast<std::uint16_t>(std::lround(65535.0 * std::pow(10.0, gain_db / 20.0)));
     }
 
-    // The firmware numbers the sides 1 = left, 0 = right. Returns the side touched.
-    std::uint8_t set_side(synthesized_rumble_t &rumble, const std::uint8_t side, const std::uint16_t magnitude, const std::uint32_t hold_ms) noexcept {
-      if (side == 1) {
+    // The pads a report's side byte names depend on the report, and the two conventions are
+    // opposite (captured from Steam driving the real unit over USB and BLE; the client's
+    // SteamControllerBle.isLeftPad applies the same table to the reports it replays):
+    //   0x81 pulse:   side 1 = left, 0 = right
+    //   0x82 command: side 0 = left, 1 = right
+    //   side 2:       both pads, for either report (the stop key in common.h reads it as mask 3)
+    // Steam's tick (82 <side> 01 FD) and click (82 <side> 02 F2) therefore land on the motor
+    // the pad is on only when 0x82 is read with its own numbering. Returns 0 for a side byte
+    // the firmware has no pad for.
+    std::uint8_t sides_of(const std::uint8_t report_id, const std::uint8_t side) noexcept {
+      if (side == 2) {
+        return STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT;
+      }
+      if (side > 2) {
+        return 0;
+      }
+      const bool left = report_id == 0x82 ? side == 0 : side == 1;
+      return left ? STEAM_HAPTIC_LEFT : STEAM_HAPTIC_RIGHT;
+    }
+
+    // Applies a magnitude and hold to every side in the mask. Returns the sides touched.
+    std::uint8_t set_sides(synthesized_rumble_t &rumble, const std::uint8_t sides, const std::uint16_t magnitude, const std::uint32_t hold_ms) noexcept {
+      if (sides & STEAM_HAPTIC_LEFT) {
         rumble.left = magnitude;
         rumble.left_hold_ms = hold_ms;
-        return STEAM_HAPTIC_LEFT;
       }
-      rumble.right = magnitude;
-      rumble.right_hold_ms = hold_ms;
-      return STEAM_HAPTIC_RIGHT;
+      if (sides & STEAM_HAPTIC_RIGHT) {
+        rumble.right = magnitude;
+        rumble.right_hold_ms = hold_ms;
+      }
+      return sides;
     }
   }  // namespace
 
@@ -390,7 +411,7 @@ namespace platf::vhf_gamepad {
           const std::uint64_t train_ms = (repeat * period_us + 999) / 1000;
           hold_ms = static_cast<std::uint32_t>(std::clamp<std::uint64_t>(train_ms, STEAM_HAPTIC_MIN_HOLD_MS, 10'000));
         }
-        return set_side(rumble, report[1], magnitude, hold_ms);
+        return set_sides(rumble, sides_of(0x81, report[1]), magnitude, hold_ms);
       }
       case 0x82: {
         // Command: side u8, command u8 (0 off, 1 tick, 2 click, 3 tone, 4 rumble, 5 noise,
@@ -403,7 +424,7 @@ namespace platf::vhf_gamepad {
         const std::uint8_t command = report[2];
         const std::uint16_t magnitude = command == 0 ? 0 : magnitude_from_db(static_cast<std::int8_t>(report[3]));
         const std::uint32_t hold_ms = (command == 1 || command == 2) ? STEAM_HAPTIC_CLICK_HOLD_MS : 0;
-        return set_side(rumble, report[1], magnitude, hold_ms);
+        return set_sides(rumble, sides_of(0x82, report[1]), magnitude, hold_ms);
       }
       default:
         // LFO tone, log sweep, script: nothing a rumble motor can stand in for.

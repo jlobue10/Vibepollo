@@ -654,20 +654,102 @@ namespace {
 
   TEST_F(VhfGamepadPolicyTest, SteamHapticClickBecomesTimedRumbleFromItsGain) {
     synthesized_rumble_t rumble {};
-    // Steam's test screen: a click at -14 dB on side 0 (right), every 100 ms.
-    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x00, 0x02, 0xf2}), rumble), STEAM_HAPTIC_RIGHT);
+    // Steam's test screen: a click at -14 dB on 0x82 side 0 (the left pad), every 100 ms.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x00, 0x02, 0xf2}), rumble), STEAM_HAPTIC_LEFT);
+    EXPECT_NEAR(rumble.left, 65535 * 0.1995, 64);
+    EXPECT_EQ(rumble.left_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
+    EXPECT_EQ(rumble.right, 0);
+
+    // A tone at +3 dB clips to full scale and runs until its off.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x01, 0x03, 0x03}), rumble), STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.right, 65535);
+    EXPECT_EQ(rumble.right_hold_ms, 0u);
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x01, 0x00, 0x00}), rumble), STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.right, 0);
+
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x00}), rumble), 0);
+  }
+
+  // The two report families number their sides the opposite way round (measured on the real
+  // unit): a 0x81 pulse's side 1 is the left pad, a 0x82 command's side 0 is. Side 2 is both.
+  TEST_F(VhfGamepadPolicyTest, SteamHapticPulseSideByteIsOneForLeftZeroForRightTwoForBoth) {
+    synthesized_rumble_t rumble {};
+    // Side 1: left only.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x01, 0x10, 0x27, 0x10, 0x27, 0x0a, 0x00}), rumble),
+              STEAM_HAPTIC_LEFT);
+    EXPECT_EQ(rumble.left, 32767);
+    EXPECT_EQ(rumble.left_hold_ms, 200u);
+    EXPECT_EQ(rumble.right, 0);
+    EXPECT_EQ(rumble.right_hold_ms, 0u);
+
+    // Side 0: right only; the left side keeps what it had.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x00, 0x10, 0x27, 0x10, 0x27, 0x0a, 0x00}), rumble),
+              STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.right, 32767);
+    EXPECT_EQ(rumble.right_hold_ms, 200u);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.left_hold_ms, 0u);
+
+    // Side 2: both pads, the mask the stop key in common.h derives for it.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x02, 0x10, 0x27, 0x10, 0x27, 0x0a, 0x00}), rumble),
+              STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.left, 32767);
+    EXPECT_EQ(rumble.right, 32767);
+    EXPECT_EQ(rumble.left_hold_ms, 200u);
+    EXPECT_EQ(rumble.right_hold_ms, 200u);
+
+    // A zero-repeat pulse on side 2 stops both.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x02, 0, 0, 0, 0, 0, 0}), rumble),
+              STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.right, 0);
+
+    // A side the firmware has no pad for renders nothing.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x03, 0x10, 0x27, 0x10, 0x27, 0x0a, 0x00}), rumble), 0);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.right, 0);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticCommandSideByteIsZeroForLeftOneForRightTwoForBoth) {
+    synthesized_rumble_t rumble {};
+    // Steam's tick (82 <side> 01 FD): side 0 is the LEFT pad.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x00, 0x01, 0xfd}), rumble), STEAM_HAPTIC_LEFT);
+    EXPECT_GT(rumble.left, 0);
+    EXPECT_EQ(rumble.left_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
+    EXPECT_EQ(rumble.right, 0);
+    EXPECT_EQ(rumble.right_hold_ms, 0u);
+
+    // Steam's click (82 <side> 02 F2): side 1 is the RIGHT pad.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x01, 0x02, 0xf2}), rumble), STEAM_HAPTIC_RIGHT);
     EXPECT_NEAR(rumble.right, 65535 * 0.1995, 64);
     EXPECT_EQ(rumble.right_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
     EXPECT_EQ(rumble.left, 0);
-
-    // A tone at +3 dB clips to full scale and runs until its off.
-    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x01, 0x03, 0x03}), rumble), STEAM_HAPTIC_LEFT);
-    EXPECT_EQ(rumble.left, 65535);
     EXPECT_EQ(rumble.left_hold_ms, 0u);
-    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x01, 0x00, 0x00}), rumble), STEAM_HAPTIC_LEFT);
-    EXPECT_EQ(rumble.left, 0);
 
-    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x00}), rumble), 0);
+    // Side 2: both pads.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x02, 0x02, 0xf2}), rumble),
+              STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
+    EXPECT_NEAR(rumble.left, 65535 * 0.1995, 64);
+    EXPECT_NEAR(rumble.right, 65535 * 0.1995, 64);
+    EXPECT_EQ(rumble.left_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
+    EXPECT_EQ(rumble.right_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
+
+    // An off on side 2 silences both.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x02, 0x00, 0x00}), rumble),
+              STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.right, 0);
+
+    // A side the firmware has no pad for renders nothing.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x03, 0x02, 0xf2}), rumble), 0);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.right, 0);
   }
 
   TEST_F(VhfGamepadPolicyTest, SteamHapticEffectsWithoutARumbleEquivalentAreNotRendered) {
