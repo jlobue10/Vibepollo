@@ -84,15 +84,49 @@ int main(){int failures=0;
  bool ordered=order.size()==5 && order[0]==0 && order[1]==-0x81 && order[2]==9 && order[3]==18 && order[4]==-0x82;
  check(ordered,"chunked settings write stays whole and in order; the repeated stop coalesced behind it");
  check(gamepad_feedback_state_key(gamepad_feedback_msg_t::make_steam_settings(0,0x87,1,{}))==0,"settings writes carry no state key");
+ settings(0,0x87,1,42);for(int i=0;i<40;i++)haptic(0,0x81,0,false);
+ auto first=queue->pop(0ms);
+ check(first && first->type==gamepad_feedback_e::steam_settings && first->data.steam_settings.triples[0]==42,
+       "a haptic burst cannot evict a queued settings chunk");
+ while(queue->pop(0ms)){}
+ settings(0,0x87,9,0);haptic(0,0x82,0,true);settings(0,0x87,9,9);
+ for(int i=0;i<40;i++)haptic(0,0x81,0,false);
+ settings(0,0x87,2,18);order.clear();int pulses=0,stops=0;
+ while(auto x=queue->pop(0ms)){
+   if(x->type==gamepad_feedback_e::steam_settings)order.push_back(x->data.steam_settings.triples[0]);
+   else if(x->data.steam_haptic.report[0]==0x82)++stops;
+   else ++pulses;
+ }
+ check(order==std::vector<int>({0,9,18}) && pulses==32 && stops==1,
+       "all settings chunks and the pending stop survive a burst; haptic events keep their own bound");
  for(int i=0;i<1000;i++)settings(3,0x87,1,i&0x7F);
- int total=0;while(queue->pop(0ms))++total;
- check(total<=32,"a flood of settings writes is bounded like other events");
+ int total=0,last=-1;while(auto x=queue->pop(0ms)){++total;last=x->data.steam_settings.triples[0];}
+ check(total==16 && last==(999&0x7F),"settings floods keep the newest 16 chunks in a separate bounded class");
+ // Even total capacity pressure cannot turn an ordinary pulse into a settings eviction.
+ safe::queue_t<gamepad_feedback_msg_t> tiny(2);
+ auto chunk=gamepad_feedback_msg_t::make_steam_settings(0,0x87,1,{});
+ check(raise_gamepad_feedback(tiny,chunk) && raise_gamepad_feedback(tiny,chunk),"a small queue accepts two distinct settings events");
+ std::array<std::uint8_t,12> pulse {0x81,0,1,0,1,0,1,0};
+ bool admitted=raise_gamepad_feedback(tiny,gamepad_feedback_msg_t::make_steam_haptic(0,8,pulse));
+ auto a=tiny.pop(0ms),b=tiny.pop(0ms);
+ check(!admitted && a && b && a->type==gamepad_feedback_e::steam_settings && b->type==gamepad_feedback_e::steam_settings,
+       "an ordinary pulse is refused when a full queue contains only reserved settings");
  auto w=queue->pop(0ms);
  vhf_gamepad::steam_settings_t full {};full.command=0x87;full.count=9;for(int i=0;i<27;i++)full.triples[i]=i;
  raise_steam_settings(5,full);w=queue->pop(0ms);
  bool verbatim=w && w->id==5 && w->data.steam_settings.count==9;
  for(int i=0;verbatim && i<27;i++)verbatim=w->data.steam_settings.triples[i]==i;
  check(verbatim,"all nine triples reach the client byte for byte");
+ // Existing two-argument users can carry move-only snapshots and opt out of eviction.
+ safe::queue_t<std::unique_ptr<int>> snapshots(1);
+ bool initial=snapshots.raise_latest(std::make_unique<int>(1),[](const auto &){return false;});
+ bool overflow=snapshots.raise_latest(std::make_unique<int>(2),[](const auto &){return false;});
+ auto snapshot=snapshots.pop(0ms);
+ check(initial && !overflow && snapshot && *snapshot==1,"the existing move-only snapshot API still refuses unrelated overflow");
+ snapshots.raise_latest(std::make_unique<int>(3),[](const auto &){return false;});
+ bool replaced=snapshots.raise_latest(std::make_unique<int>(4),[](const auto &){return true;});
+ snapshot=snapshots.pop(0ms);
+ check(replaced && snapshot && *snapshot==4 && !snapshots.pop(0ms),"the existing snapshot API still coalesces its matching value");
  return failures!=0;
 }
 """.replace('@TYPES@',types).replace('@PARSER@',parser).replace('@HELPERS@',helpers).replace('@HAPTIC_BODY@',haptic_body).replace('@SETTINGS_BODY@',settings_body)

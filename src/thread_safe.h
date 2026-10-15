@@ -346,15 +346,37 @@ namespace safe {
     /// bounded key space and enough capacity for every distinct priority key.
     template<class Predicate, class Priority>
     bool raise_latest(T value, Predicate matches, Priority priority, std::uint32_t event_limit = UINT32_MAX) {
+      return raise_latest_classed(std::move(value), std::move(matches), std::move(priority),
+        event_limit, [](const T &) { return false; }, UINT32_MAX);
+    }
+
+    /// Reserved events have their own bound and cannot be evicted by ordinary
+    /// events. At total capacity, priority/reserved arrivals evict an ordinary
+    /// event first, then a reserved one; priority snapshots remain protected.
+    template<class Predicate, class Priority, class Reserved>
+    bool raise_latest_classed(T value, Predicate matches, Priority priority,
+        std::uint32_t event_limit, Reserved reserved, std::uint32_t reserved_limit) {
       std::lock_guard ul {_lock};
       if (!_poll_state.running()) return false;
       _queue.erase(std::remove_if(_queue.begin(), _queue.end(), matches), _queue.end());
       const bool important = priority(value);
-      const bool events_full = !important && event_limit != UINT32_MAX &&
-          std::count_if(_queue.begin(), _queue.end(), [&](const T &pending) { return !priority(pending); }) >= event_limit;
+      const bool is_reserved = !important && reserved(value);
+      const auto class_limit = is_reserved ? reserved_limit : event_limit;
+      const auto same_class = [&](const T &pending) {
+        return !priority(pending) && reserved(pending) == is_reserved;
+      };
+      const auto ordinary = [&](const T &pending) { return !priority(pending) && !reserved(pending); };
+      const bool events_full = !important && class_limit != UINT32_MAX &&
+          std::count_if(_queue.begin(), _queue.end(), same_class) >= class_limit;
       if (_queue.size() >= _max_elements || events_full) {
-        if (!important && event_limit == UINT32_MAX) return false;
-        auto victim = std::find_if(_queue.begin(), _queue.end(), [&](const T &pending) { return !priority(pending); });
+        if (!important && class_limit == UINT32_MAX) return false;
+        auto victim = events_full ? std::find_if(_queue.begin(), _queue.end(), same_class) :
+            std::find_if(_queue.begin(), _queue.end(), ordinary);
+        if (victim == _queue.end() && !events_full && (important || is_reserved)) {
+          victim = std::find_if(_queue.begin(), _queue.end(), [&](const T &pending) {
+            return !priority(pending) && reserved(pending);
+          });
+        }
         if (victim == _queue.end()) return false;
         _queue.erase(victim);
       }
