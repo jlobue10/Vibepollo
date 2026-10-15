@@ -1431,7 +1431,10 @@ namespace input {
     }
 
     std::uint16_t bf = packet->buttonFlags;
-    std::uint32_t bf2 = packet->buttonFlags2;
+    // buttonFlags2 is a `short` on the wire; the client masks the upper flags to 16 bits
+    // (LE16((short)(buttonFlags >> 16))), so a flag at bit 15 of it (0x80000000 overall)
+    // must not sign-extend into the lower half here.
+    std::uint32_t bf2 = static_cast<std::uint16_t>(packet->buttonFlags2);
     platf::gamepad_state_t gamepad_state {
       bf | (bf2 << 16),
       packet->leftTrigger,
