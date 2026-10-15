@@ -876,8 +876,12 @@ namespace nvhttp {
 
     // The idle encoder probe runs on this worker, never on a discovery request.
     // nvhttp::start() publishes the pool for its lifetime and clears it before
-    // the pool joins, so a late request simply answers from the cache.
+    // the pool stops, so a late request simply answers from the cache. The
+    // mutex orders a schedule against that unpublication: a probe is pushed
+    // only while the pointer is published, never into a pool that is draining
+    // or already destroyed.
     std::atomic<thread_pool_util::ThreadPool *> http_capability_probe_pool {nullptr};
+    std::mutex http_capability_probe_pool_mutex;
     single_flight::admission_t http_capability_probe_admission;
     // Bumped when a background probe ends, filled or skipped, so a request that
     // is waiting for it can tell "still running" from "ended without a cache".
@@ -920,6 +924,9 @@ namespace nvhttp {
     // on its own worker: validate_config() allows a minute per codec attempt and
     // ensure_display() may restart or reinstall the virtual display driver.
     void run_idle_http_capability_probe() {
+      // Declared first so it runs last: the counter bumps only after the gate
+      // below is released and the hint lease cleared. A request that observes
+      // the bump may therefore re-read the cache with its own hint at once.
       auto finished_guard = util::fail_guard([] {
         http_capability_probe_finished.fetch_add(1, std::memory_order_acq_rel);
       });
@@ -928,17 +935,40 @@ namespace nvhttp {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
       };
 
+      if (!http_capability_probe_pool.load(std::memory_order_acquire)) {
+        // Queued before nvhttp::start() unpublished the pool and drained on
+        // its way out; the probe display and driver work are not worth it.
+        BOOST_LOG(info) << "Background encoder capability probe skipped: the HTTP server is shutting down.";
+        return;
+      }
+
       // Session starts publish their pending owner while holding this gate.
       // Acquire it before publishing a hint as well: a refused worker must not
       // replace and then clear the current owner's adapter expectation.
-      std::unique_lock<std::mutex> lifecycle_lock(
+      // A discovery sample owns the gate only for an adapter enumeration
+      // (milliseconds), so wait that out rather than giving up the single
+      // probe this request cycle gets; a session start, which owns it far
+      // longer, still makes the worker yield. The teardown counter is not
+      // part of this gate: the session check below covers stopping sessions
+      // without spinning on them.
+      auto lifecycle_gate = stream_start_gate::acquire(
         stream_lifecycle_mutex(),
-        std::try_to_lock
+        [] {
+          return 0u;
+        },
+        std::chrono::steady_clock::now() + http_capability_probe::kHttpCapabilityProbeGateWait,
+        [] {
+          return std::chrono::steady_clock::now();
+        },
+        [] {
+          std::this_thread::sleep_for(http_capability_probe::kHttpCapabilityProbeGatePoll);
+        }
       );
-      if (!lifecycle_lock.owns_lock()) {
+      if (!lifecycle_gate.acquired()) {
         BOOST_LOG(info) << "Background encoder capability probe skipped: stream lifecycle work owns the gate.";
         return;
       }
+      std::unique_lock<std::mutex> lifecycle_lock = std::move(lifecycle_gate.lock);
       if (has_active_or_stopping_stream_session()) {
         BOOST_LOG(info) << "Background encoder capability probe skipped: a streaming session is active or stopping.";
         return;
@@ -981,6 +1011,10 @@ namespace nvhttp {
 
     // Single-flight: one probe in flight; later requests reuse the cache once filled.
     idle_probe_schedule_e schedule_idle_http_capability_probe() {
+      // Held across the push: nvhttp::start() unpublishes the pool under this
+      // mutex before stopping it, so the push never races the pool's teardown.
+      // The push only enqueues, so the mutex is never held for long.
+      std::lock_guard pool_lock {http_capability_probe_pool_mutex};
       auto *pool = http_capability_probe_pool.load(std::memory_order_acquire);
       if (!pool) {
         return idle_probe_schedule_e::unavailable;
@@ -996,7 +1030,7 @@ namespace nvhttp {
       return submitted ? idle_probe_schedule_e::started : idle_probe_schedule_e::already_running;
     }
 
-    http_encoder_capabilities_t advertised_encoder_capabilities_for_http() {
+    http_encoder_capabilities_t advertised_encoder_capabilities_for_http(const std::chrono::steady_clock::time_point request_arrived) {
       const auto publish = [](
                              video::advertised_encoder_capabilities_t caps,
                              const bool probe_complete,
@@ -1017,11 +1051,40 @@ namespace nvhttp {
       };
 
       bool probe_complete = false;
-      const auto read_cached_capabilities = [&] {
+      // How a cache sample obtains the idle adapter hint it reads under.
+      enum class hint_e {
+        // Sample without a hint: a pending probe worker owns it.
+        none,
+        // Publish one if the lifecycle gate is free right now.
+        try_gate,
+        // Publish one after a bounded wait for the gate (the final re-read).
+        wait_gate,
+      };
+      const auto read_cached_capabilities = [&](const hint_e hint) {
         // A running flag alone cannot protect the check-to-publication window.
-        // Share the lifecycle gate with probes and session starts, but never
-        // wait for it: a busy owner supplies the current adapter expectation.
-        std::unique_lock<std::mutex> lifecycle_lock(stream_lifecycle_mutex(), std::try_to_lock);
+        // Share the lifecycle gate with probes and session starts, and never
+        // wait long for it: a busy owner supplies the current adapter
+        // expectation, and a sample never replaces a hint a worker or a
+        // session start owns.
+        std::unique_lock<std::mutex> lifecycle_lock(stream_lifecycle_mutex(), std::defer_lock);
+        if (hint == hint_e::wait_gate) {
+          auto lifecycle_gate = stream_start_gate::acquire(
+            stream_lifecycle_mutex(),
+            [] {
+              return 0u;
+            },
+            std::chrono::steady_clock::now() + http_capability_probe::kHttpCapabilityProbeGateWait,
+            [] {
+              return std::chrono::steady_clock::now();
+            },
+            [] {
+              std::this_thread::sleep_for(http_capability_probe::kHttpCapabilityProbeGatePoll);
+            }
+          );
+          lifecycle_lock = std::move(lifecycle_gate.lock);
+        } else if (hint == hint_e::try_gate) {
+          (void) lifecycle_lock.try_lock();
+        }
         idle_virtual_adapter_hint_t idle_virtual_adapter_hint;
         if (lifecycle_lock.owns_lock()) {
           idle_virtual_adapter_hint = publish_idle_virtual_adapter_hint();
@@ -1031,7 +1094,7 @@ namespace nvhttp {
         });
         return video::advertised_encoder_capabilities(false, &probe_complete);
       };
-      auto caps = read_cached_capabilities();
+      auto caps = read_cached_capabilities(hint_e::try_gate);
       if (probe_complete) {
         return publish(std::move(caps), true, "matching-cache");
       }
@@ -1061,17 +1124,29 @@ namespace nvhttp {
         const auto waited_ms = [wait_started] {
           return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_started).count();
         };
+        const auto since_arrival_ms = [request_arrived] {
+          return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - request_arrived).count();
+        };
+        // The probe this request scheduled or observed is pending until the
+        // worker bumps the counter past the value sampled before scheduling.
+        const auto probe_pending = [finished_before] {
+          return http_capability_probe_finished.load(std::memory_order_acquire) == finished_before;
+        };
         const auto outcome = http_capability_probe::wait_for_probe(
           [&] {
-            // The worker clears its lease before announcing completion. Reapply
-            // the idle expectation for this sample if the gate is free again.
-            caps = read_cached_capabilities();
+            // While the probe is pending its worker owns the adapter hint:
+            // sample without one and let the next poll retry, so this request
+            // never takes the gate out from under the worker's acquisition.
+            // Once the worker has ended (it clears its lease and releases the
+            // gate before bumping the counter), reapply the idle expectation
+            // for this sample if the gate is free.
+            caps = read_cached_capabilities(probe_pending() ? hint_e::none : hint_e::try_gate);
             return probe_complete;
           },
-          [&] {
-            return http_capability_probe_finished.load(std::memory_order_acquire) == finished_before;
-          },
-          wait_started + http_capability_probe::kHttpCapabilityProbeWait,
+          probe_pending,
+          // From arrival, not from this sample: time spent queued behind
+          // another discovery handler counts against the client's timeout.
+          http_capability_probe::wait_deadline(request_arrived),
           [] {
             return std::chrono::steady_clock::now();
           },
@@ -1083,9 +1158,23 @@ namespace nvhttp {
           BOOST_LOG(info) << "HTTP capability discovery waited " << waited_ms() << " ms for the background encoder probe.";
           return publish(std::move(caps), true, "background-probe-finished");
         }
+        if (outcome == http_capability_probe::wait_outcome_e::probe_not_running) {
+          // The sample that preceded the bump was taken without a hint, so a
+          // cache the worker had just filled looked incomplete. Read it once
+          // more with this request's own hint; the worker is done, so the
+          // only gate owners left are a session start or a peer discovery
+          // sample, and the bounded wait outlasts the latter.
+          caps = read_cached_capabilities(hint_e::wait_gate);
+          if (probe_complete) {
+            BOOST_LOG(info) << "HTTP capability discovery waited " << waited_ms()
+                            << " ms for the background encoder probe; its result matched on re-read.";
+            return publish(std::move(caps), true, "background-probe-finished");
+          }
+        }
         reason = outcome == http_capability_probe::wait_outcome_e::expired ? "background-probe-wait-expired" : "background-probe-skipped";
         BOOST_LOG(info) << "HTTP capability discovery answered without a fresh encoder probe after " << waited_ms()
-                        << " ms: " << http_capability_probe::wait_outcome_name(outcome) << '.';
+                        << " ms (" << since_arrival_ms() << " ms after the request arrived): "
+                        << http_capability_probe::wait_outcome_name(outcome) << '.';
       }
       return publish(std::move(caps), false, reason);
     }
@@ -2123,7 +2212,7 @@ namespace nvhttp {
 
 #ifndef _WIN32
   namespace {
-    http_encoder_capabilities_t advertised_encoder_capabilities_for_http() {
+    http_encoder_capabilities_t advertised_encoder_capabilities_for_http([[maybe_unused]] const std::chrono::steady_clock::time_point request_arrived) {
       const auto publish = [](video::advertised_encoder_capabilities_t caps, const std::string_view reason) {
         const bool probe_complete = video::has_successful_encoder_probe();
         BOOST_LOG(debug)
@@ -2163,7 +2252,7 @@ namespace nvhttp {
 #endif
 
   web_stream_capabilities_t get_web_stream_capabilities() {
-    const auto snapshot = advertised_encoder_capabilities_for_http();
+    const auto snapshot = advertised_encoder_capabilities_for_http(std::chrono::steady_clock::now());
     const auto &caps = snapshot.advertised;
     const bool probe_complete = snapshot.probe_complete;
     return {
@@ -4059,7 +4148,11 @@ namespace nvhttp {
     }
 
     template<class T>
-    void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    void serverinfo(
+      std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
+      std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request,
+      [[maybe_unused]] const std::chrono::steady_clock::time_point request_arrived
+    ) {
       print_req<T>(request);
 
       int pair_status = 0;
@@ -4172,7 +4265,7 @@ namespace nvhttp {
       }
 
 #ifdef _WIN32
-      const auto advertised_video = advertised_encoder_capabilities_for_http().advertised;
+      const auto advertised_video = advertised_encoder_capabilities_for_http(request_arrived).advertised;
 #else
       const auto advertised_video = video::advertised_encoder_capabilities(true);
 #endif
@@ -4436,7 +4529,7 @@ namespace nvhttp {
       }
     }
 
-    void applist(resp_https_t response, req_https_t request) {
+    void applist(resp_https_t response, req_https_t request, [[maybe_unused]] const std::chrono::steady_clock::time_point request_arrived) {
       print_req<SunshineHTTPS>(request);
 
       pt::ptree tree;
@@ -4537,7 +4630,7 @@ namespace nvhttp {
         }
 
 #ifdef _WIN32
-        const auto advertised_video = advertised_encoder_capabilities_for_http().advertised;
+        const auto advertised_video = advertised_encoder_capabilities_for_http(request_arrived).advertised;
 #else
         const auto advertised_video = video::advertised_encoder_capabilities(true);
 #endif
@@ -6878,19 +6971,36 @@ namespace nvhttp {
     // The idle encoder probe behind /serverinfo and /applist gets its own worker
     // so discovery answers immediately. Declared before the discovery pool so it
     // is still alive (and its pointer still published) while discovery handlers
-    // can enqueue; the guard unpublishes it before the pool stops and joins.
+    // can enqueue; stop_capability_probe_pool() unpublishes it before the pool
+    // stops and joins.
     thread_pool_util::ThreadPool capability_probe_pool;
     capability_probe_pool.start(1);
-    http_capability_probe_pool.store(&capability_probe_pool, std::memory_order_release);
-    auto unpublish_capability_probe_pool = util::fail_guard([] {
-      http_capability_probe_pool.store(nullptr, std::memory_order_release);
-    });
+    {
+      std::lock_guard pool_lock {http_capability_probe_pool_mutex};
+      http_capability_probe_pool.store(&capability_probe_pool, std::memory_order_release);
+    }
+    // Unpublish under the schedule mutex, then drain: a queued worker finds
+    // the pointer gone and returns at once. Called explicitly before the
+    // servers stop (below); the guard covers only the early-return paths.
+    auto stop_capability_probe_pool = [&capability_probe_pool] {
+      {
+        std::lock_guard pool_lock {http_capability_probe_pool_mutex};
+        http_capability_probe_pool.store(nullptr, std::memory_order_release);
+      }
+      capability_probe_pool.stop();
+      capability_probe_pool.join();
+    };
+    auto unpublish_capability_probe_pool = util::fail_guard(stop_capability_probe_pool);
 #endif
     // Discovery routes are observation-only, so they must not queue behind the mutating
     // routes. A launch/resume/cancel handler can hold the lifecycle gate across unbounded
     // work, and on a single FIFO worker that made the host undiscoverable until restart.
+    // Two workers: a request may wait up to kHttpCapabilityProbeWait for the
+    // background encoder probe, and the next client's discovery must not spend
+    // its own read timeout queued behind that wait. The handlers only observe
+    // state under that state's own locks; the probe itself is single-flight.
     thread_pool_util::ThreadPool discovery_route_pool;
-    discovery_route_pool.start(1);
+    discovery_route_pool.start(2);
 
     // Verify certificates after establishing connection
     https_server.verify = [](req_https_t req, SSL *ssl) {
@@ -7023,8 +7133,9 @@ namespace nvhttp {
     https_server.default_resource["GET"] = not_found<SunshineHTTPS>;
     https_server.default_resource["POST"] = not_found<SunshineHTTPS>;
     https_server.resource["^/serverinfo$"]["GET"] = [run_discovery_nvhttp](auto resp, auto req) {
-      run_discovery_nvhttp([resp = std::move(resp), req = std::move(req)]() mutable {
-        serverinfo<SunshineHTTPS>(std::move(resp), std::move(req));
+      const auto request_arrived = std::chrono::steady_clock::now();
+      run_discovery_nvhttp([resp = std::move(resp), req = std::move(req), request_arrived]() mutable {
+        serverinfo<SunshineHTTPS>(std::move(resp), std::move(req), request_arrived);
       });
     };
     https_server.resource["^/pair/?$"]["GET"] = pair<SunshineHTTPS>;
@@ -7032,8 +7143,9 @@ namespace nvhttp {
     https_server.resource["^/unpair/?$"]["GET"] = unpair<SunshineHTTPS>;
     https_server.resource["^/unpair/?$"]["POST"] = unpair<SunshineHTTPS>;
     https_server.resource["^/applist$"]["GET"] = [run_discovery_nvhttp](auto resp, auto req) {
-      run_discovery_nvhttp([resp = std::move(resp), req = std::move(req)]() mutable {
-        applist(std::move(resp), std::move(req));
+      const auto request_arrived = std::chrono::steady_clock::now();
+      run_discovery_nvhttp([resp = std::move(resp), req = std::move(req), request_arrived]() mutable {
+        applist(std::move(resp), std::move(req), request_arrived);
       });
     };
     https_server.resource["^/appasset$"]["GET"] = appasset;
@@ -7121,8 +7233,9 @@ namespace nvhttp {
     http_server.default_resource["GET"] = not_found<SimpleWeb::HTTP>;
     http_server.default_resource["POST"] = not_found<SimpleWeb::HTTP>;
     http_server.resource["^/serverinfo$"]["GET"] = [run_discovery_nvhttp](auto resp, auto req) {
-      run_discovery_nvhttp([resp = std::move(resp), req = std::move(req)]() mutable {
-        serverinfo<SimpleWeb::HTTP>(std::move(resp), std::move(req));
+      const auto request_arrived = std::chrono::steady_clock::now();
+      run_discovery_nvhttp([resp = std::move(resp), req = std::move(req), request_arrived]() mutable {
+        serverinfo<SimpleWeb::HTTP>(std::move(resp), std::move(req), request_arrived);
       });
     };
     http_server.resource["^/pair/?$"]["GET"] = pair<SimpleWeb::HTTP>;
@@ -7155,6 +7268,18 @@ namespace nvhttp {
     std::thread ssl {accept_and_run, &https_server};
     std::thread tcp {accept_and_run, &http_server};
 
+#ifdef _WIN32
+    // Warm the capability cache before the first discovery request: on a
+    // headless or virtual-display host the first /serverinfo after service
+    // start was otherwise always a cold probe. Everything the worker needs
+    // (the lifecycle gate, VDISPLAY, the video cache) was initialised before
+    // main() started this thread; scheduling once the listeners are up puts
+    // the warm-up in the same place a client's first request would be.
+    if (schedule_idle_http_capability_probe() == idle_probe_schedule_e::started) {
+      BOOST_LOG(info) << "Startup encoder capability probe scheduled for HTTP discovery.";
+    }
+#endif
+
     std::jthread pairing_expiry_worker([](std::stop_token stop_token) {
       platf::set_thread_name("pair_expiry");
       while (!stop_token.stop_requested()) {
@@ -7186,6 +7311,13 @@ namespace nvhttp {
       std::lock_guard pairing_lock {pairing_sessions_mutex};
       map_id_sess.clear();
     }
+#ifdef _WIN32
+    // Before the servers stop: discovery handlers and the web UI's
+    // get_web_stream_capabilities() can schedule a probe until their own
+    // pools join, and the probe pool must not be stopping underneath them.
+    stop_capability_probe_pool();
+    unpublish_capability_probe_pool.disable();
+#endif
     https_server.stop();
     http_server.stop();
 
