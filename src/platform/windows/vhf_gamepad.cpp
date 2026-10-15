@@ -253,6 +253,32 @@ namespace platf {
           return "an unsupported gamepad profile"sv;
       }
     }
+
+    // Logged when a slot is torn down (controller detached or the session ended): the
+    // driver counts what it had to discard for the slot, and nothing else distinguishes a
+    // quiet controller from one whose haptics, settings or input transitions were thrown
+    // away. The counters reset with the slot, so each line covers exactly one session.
+    void log_feedback_counters(lvg::client &client, const int nr, const lvg::profile profile) {
+      lvg::feedback_counters counters {};
+      const DWORD status = client.query_feedback_counters(static_cast<std::uint32_t>(nr), &counters);
+      if (status == ERROR_REVISION_MISMATCH) {
+        BOOST_LOG(debug) << "VHF gamepad "sv << nr << " feedback-drop counters unavailable: the driver predates them"sv;
+        return;
+      }
+      if (status != ERROR_SUCCESS) {
+        BOOST_LOG(debug) << "VHF gamepad "sv << nr << " feedback-drop counters query failed ["sv
+                         << util::hex(status).to_string_view() << ']';
+        return;
+      }
+      if (vhf_gamepad::feedback_counters_notable(counters)) {
+        BOOST_LOG(warning) << "VHF gamepad "sv << nr << " ("sv << describe_profile(profile)
+                           << ") feedback the driver discarded this session: "sv
+                           << vhf_gamepad::describe_feedback_counters(counters);
+        return;
+      }
+      BOOST_LOG(info) << "VHF gamepad "sv << nr << " ("sv << describe_profile(profile)
+                      << ") feedback discarded by the driver this session: none"sv;
+    }
   }  // namespace
 
   struct vhf_gamepad_t::impl_t {
@@ -603,6 +629,7 @@ namespace platf {
       // them explicitly keeps removal ordered while the driver is still responsive.
       for (int nr = 0; nr < MAX_GAMEPADS; ++nr) {
         if (impl->slots[nr].active) {
+          log_feedback_counters(impl->client, nr, impl->slots[nr].profile);
           std::ignore = impl->client.destroy_controller(static_cast<std::uint32_t>(nr));
           dualsense_audio::set_slot(nr, false);
           impl->slots[nr].reset();
@@ -773,6 +800,7 @@ namespace platf {
       return;
     }
 
+    log_feedback_counters(impl->client, nr, slot.profile);
     const DWORD status = impl->client.destroy_controller(static_cast<std::uint32_t>(nr));
     if (status != ERROR_SUCCESS) {
       BOOST_LOG(warning) << "Couldn't destroy VHF gamepad "sv << nr << " ["sv

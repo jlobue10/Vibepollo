@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <string_view>
 
 // lib includes
@@ -333,5 +334,23 @@ namespace platf::vhf_gamepad {
    * @return The value scaled by 1000 and clamped to the protocol's range.
    */
   [[nodiscard]] std::int32_t to_milli_units(float value) noexcept;
+
+  /**
+   * @brief Whether the driver discarded anything for a slot.
+   * @details A quiet controller and one whose output the driver is throwing away look the
+   * same from the client; `lvg::feedback_counters` is the only tell, so a slot with any
+   * non-zero counter is worth a warning when it is torn down.
+   * @param counters The slot's counters from `lvg::client::query_feedback_counters`.
+   * @return True when any counter is non-zero.
+   */
+  [[nodiscard]] bool feedback_counters_notable(const lvg::feedback_counters &counters) noexcept;
+
+  /**
+   * @brief Renders a slot's feedback-drop counters for the log.
+   * @details Each counter saturates at 255 on the wire, so that value is shown as "255+".
+   * @param counters The slot's counters.
+   * @return `haptic_evicted=N settings_evicted=N transitions_dropped=N unknown_commands=N`.
+   */
+  [[nodiscard]] std::string describe_feedback_counters(const lvg::feedback_counters &counters);
 
 }  // namespace platf::vhf_gamepad
