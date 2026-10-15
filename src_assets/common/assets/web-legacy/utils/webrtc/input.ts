@@ -1032,6 +1032,7 @@ export function attachInputCapture(
     const pads = getGamepads();
     let activeMask = 0;
     const seen = new Set<number>();
+    const connectedPads: Array<{ index: number; pad: Gamepad }> = [];
     for (const [padIndex, pad] of pads.entries()) {
       if (!pad) continue;
       if (!isGamepadConnected(pad)) continue;
@@ -1039,6 +1040,11 @@ export function attachInputCapture(
       if (index < 0 || index >= MAX_GAMEPADS) continue;
       activeMask |= 1 << index;
       seen.add(index);
+      connectedPads.push({ index, pad });
+    }
+    // Every state packet carries the full inventory. Sending a prefix while
+    // enumerating tells the host to remove controllers later in the list.
+    for (const { index, pad } of connectedPads) {
       activeGamepads.set(index, pad);
       const meta = ensureGamepadMeta(pad);
       if (!meta.connected) {
