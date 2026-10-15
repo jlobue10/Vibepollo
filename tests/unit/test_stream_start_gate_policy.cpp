@@ -218,7 +218,47 @@ TEST(HttpCapabilityProbeWaitPolicy, ExpiresWhileProbeStillRunning) {
   );
   EXPECT_EQ(outcome, wait_outcome_e::expired);
   EXPECT_GE(clock.now, deadline);
-  EXPECT_EQ(clock.sleeps, 80u);
+  EXPECT_EQ(clock.sleeps, static_cast<unsigned>(http_capability_probe::kHttpCapabilityProbeWait / 100ms));
+}
+
+TEST(HttpCapabilityProbeWaitPolicy, WaitFitsInsideMoonlightReadTimeout) {
+  // moonlight-android NvHTTP.java READ_TIMEOUT = 7000 ms per read, and the
+  // host writes nothing until the wait ends. The request-side re-read after
+  // the worker ends may add one gate wait on top.
+  EXPECT_LT(http_capability_probe::kHttpCapabilityProbeWait + http_capability_probe::kHttpCapabilityProbeGateWait, 7s);
+  EXPECT_LT(http_capability_probe::kHttpCapabilityProbeGatePoll, http_capability_probe::kHttpCapabilityProbeGateWait);
+}
+
+TEST(HttpCapabilityProbeWaitPolicy, DeadlineCountsFromRequestArrival) {
+  fake_clock_t clock;
+  // Queued 3 s behind another discovery handler before being picked up.
+  const auto arrived = clock.now - 3s;
+  const auto deadline = http_capability_probe::wait_deadline(arrived);
+  EXPECT_EQ(deadline, arrived + http_capability_probe::kHttpCapabilityProbeWait);
+  const auto outcome = http_capability_probe::wait_for_probe(
+    [] { return false; },
+    [] { return true; },
+    deadline,
+    clock.now_fn(),
+    clock.sleep_fn(100ms)
+  );
+  EXPECT_EQ(outcome, wait_outcome_e::expired);
+  EXPECT_EQ(clock.sleeps, static_cast<unsigned>((http_capability_probe::kHttpCapabilityProbeWait - 3s) / 100ms));
+}
+
+TEST(HttpCapabilityProbeWaitPolicy, ArrivalPastDeadlineStillSamplesOnce) {
+  fake_clock_t clock;
+  unsigned samples = 0;
+  const auto outcome = http_capability_probe::wait_for_probe(
+    [&] { ++samples; return false; },
+    [] { return true; },
+    http_capability_probe::wait_deadline(clock.now - 10s),
+    clock.now_fn(),
+    clock.sleep_fn(100ms)
+  );
+  EXPECT_EQ(outcome, wait_outcome_e::expired);
+  EXPECT_EQ(samples, 1u);
+  EXPECT_EQ(clock.sleeps, 0u);
 }
 
 TEST(HttpCapabilityProbeWaitPolicy, StopsEarlyWhenProbeEndsWithoutCache) {

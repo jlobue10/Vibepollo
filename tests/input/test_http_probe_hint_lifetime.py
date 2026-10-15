@@ -36,11 +36,12 @@ functions = '\n'.join(block(source, marker) for marker in [
     '    idle_virtual_adapter_hint_t publish_idle_virtual_adapter_hint()',
     '    void clear_idle_virtual_adapter_hint(',
     '    void run_idle_http_capability_probe()',
-    '    http_encoder_capabilities_t advertised_encoder_capabilities_for_http()',
+    '    http_encoder_capabilities_t advertised_encoder_capabilities_for_http(const std::chrono::steady_clock::time_point request_arrived)',
 ])
-# Keep the real bounded-wait policy, with a fake clock at the timing boundary.
+# Keep the real bounded-wait and gate policies, with a fake clock at the timing boundary.
 functions = functions.replace('std::chrono::steady_clock::now()', 'clock_now()')
 functions = functions.replace('std::this_thread::sleep_for(kHttpCapabilityProbePoll)', 'clock_sleep(kHttpCapabilityProbePoll)')
+functions = functions.replace('std::this_thread::sleep_for(http_capability_probe::kHttpCapabilityProbeGatePoll)', 'gate_poll_sleep()')
 hint_type = block(source, '    struct idle_virtual_adapter_hint_t') + ';'
 leases = '\n'.join(block(video, marker) for marker in [
     '  encoder_probe_adapter_hint_lease_t set_pending_virtual_display_adapter_hint(',
@@ -62,10 +63,13 @@ code = r'''
 #include <thread>
 #include <utility>
 #include "http_capability_probe_policy.h"
+#include "stream_start_gate_policy.h"
 using namespace std::chrono_literals;
 std::atomic<std::int64_t> clock_ms{0};
 auto clock_now() { return std::chrono::steady_clock::time_point{} + std::chrono::milliseconds(clock_ms.load()); }
-void clock_sleep(std::chrono::milliseconds delay) { clock_ms.fetch_add(delay.count()); std::this_thread::yield(); }
+// A scenario may park a waiting discovery request at its poll boundary.
+std::function<void()> on_poll;
+void clock_sleep(std::chrono::milliseconds delay) { if (on_poll) on_poll(); clock_ms.fetch_add(delay.count()); std::this_thread::yield(); }
 struct silent_log { template<class T> silent_log& operator<<(const T&) { return *this; } };
 #define BOOST_LOG(level) silent_log{}
 namespace util {
@@ -81,6 +85,15 @@ struct signal_t {
     if (!cv.wait_for(lock, 3s, [&] { return ready; })) throw std::runtime_error("thread rendezvous timed out");
   }
 };
+// The bounded gate acquisition sleeps here after a refused try_lock. With no
+// rendezvous set it only advances the fake clock, so a held gate is refused
+// after kHttpCapabilityProbeGateWait without any real waiting.
+signal_t *gate_poll_entered=nullptr, *release_gate_poll=nullptr;
+void gate_poll_sleep() {
+  if (gate_poll_entered) gate_poll_entered->set();
+  if (release_gate_poll) release_gate_poll->wait();
+  clock_ms.fetch_add(1); std::this_thread::yield();
+}
 using LUID = int;
 std::string luid_cache_identity(LUID id) { return std::to_string(id); }
 namespace config {
@@ -120,10 +133,14 @@ std::atomic_uint probes{0};
 std::atomic_bool cache_ready{false};
 std::uint64_t expected_probe_lease=0;
 bool probe_kept_hint=true;
+// A scenario may interpose on a cache sample (the worker's result landing).
+std::function<void()> on_cache_read;
 advertised_encoder_capabilities_t advertised_encoder_capabilities(bool probe, bool* complete) {
   if (probe) {
     ++probes; probe_kept_hint=current_lease()==expected_probe_lease && expected_probe_lease!=0;
     cache_ready=probe_kept_hint;
+  } else if (on_cache_read) {
+    on_cache_read();
   }
   // Only a hint for the expected adapter can reuse its cached positive result.
   std::lock_guard lock(cache.mutex);
@@ -146,6 +163,10 @@ void cleanup_ensure_display(result_t&) {}
 }
 struct http_encoder_capabilities_t { video::advertised_encoder_capabilities_t advertised; bool probe_complete; };
 // The executor is stubbed: each scenario explicitly dispatches the real worker function.
+// The worker only checks that the pool is still published.
+namespace thread_pool_util { struct ThreadPool {}; }
+thread_pool_util::ThreadPool probe_pool_stub;
+std::atomic<thread_pool_util::ThreadPool*> http_capability_probe_pool{&probe_pool_stub};
 enum class idle_probe_schedule_e { started, already_running, unavailable };
 bool scheduled_with_gate_held=false;
 idle_probe_schedule_e schedule_result=idle_probe_schedule_e::unavailable;
@@ -172,7 +193,7 @@ int main() {
   signal_t entered, resume, worker_progress, finish_probe;
   resolver_entered=&entered; release_resolver=&resume;
   probe_reached=&worker_progress; release_probe=&finish_probe;
-  std::thread discovery([] { slow_resolver=true; advertised_encoder_capabilities_for_http(); });
+  std::thread discovery([] { slow_resolver=true; advertised_encoder_capabilities_for_http(clock_now()); });
   entered.wait();
   std::thread worker([&] { run_idle_http_capability_probe(); worker_progress.set(); });
   worker_progress.wait();
@@ -187,7 +208,7 @@ int main() {
   check(video::current_lease()==0, "idle hint ownership is released after both operations finish");
   // No other gate owner remains: scheduling must happen outside discovery's own lease.
   scheduled_with_gate_held=false;
-  advertised_encoder_capabilities_for_http();
+  advertised_encoder_capabilities_for_http(clock_now());
   check(!scheduled_with_gate_held, "discovery releases the lifecycle gate before scheduling the worker");
 
   // The inverse ordering must keep discovery responsive while the GPU stalls.
@@ -197,7 +218,7 @@ int main() {
   std::thread worker2([] { run_idle_http_capability_probe(); });
   reached2.wait(); const auto running_lease=video::current_lease();
   signal_t answered;
-  std::thread discovery2([&] { advertised_encoder_capabilities_for_http(); answered.set(); });
+  std::thread discovery2([&] { advertised_encoder_capabilities_for_http(clock_now()); answered.set(); });
   answered.wait(); discovery2.join();
   check(video::current_lease()==running_lease && running_lease!=0,
         "discovery answers during a stalled GPU probe without mutating its hint");
@@ -226,10 +247,66 @@ int main() {
   video::cache_ready=false; schedule_result=idle_probe_schedule_e::started;
   scheduled_with_gate_held=false;
   on_schedule=[] { std::thread completed([] { run_idle_http_capability_probe(); }); completed.join(); };
-  auto answer=advertised_encoder_capabilities_for_http();
+  auto answer=advertised_encoder_capabilities_for_http(clock_now());
   check(answer.probe_complete, "a probe completed before the next poll returns the cached codec capabilities");
   check(!scheduled_with_gate_held && video::current_lease()==0,
         "waiting discovery releases its hint before scheduling and cleans up every cache sample");
+  on_schedule=nullptr;
+
+  // The worker reaches the gate while a discovery sample owns it for its
+  // adapter enumeration. It must outwait that sample, not give up, and the
+  // waiting request must answer from the probe it then runs. While the probe
+  // is pending the request samples without a hint, so it never takes the gate
+  // out from under the worker.
+  video::cache_ready=false; probe_entered=false; schedule_result=idle_probe_schedule_e::already_running;
+  const auto probes_before_gate_wait=video::probes.load();
+  signal_t entered5, resume5, at_gate, past_gate, request_waiting, worker_done;
+  resolver_entered=&entered5; release_resolver=&resume5;
+  gate_poll_entered=&at_gate; release_gate_poll=&past_gate;
+  http_encoder_capabilities_t gate_wait_answer{};
+  std::thread discovery5([&] { slow_resolver=true; gate_wait_answer=advertised_encoder_capabilities_for_http(clock_now()); });
+  entered5.wait();
+  std::thread worker5([&] { run_idle_http_capability_probe(); worker_done.set(); });
+  at_gate.wait();
+  const bool worker_refused_while_sampling=!probe_entered.load();
+  on_poll=[&] { request_waiting.set(); worker_done.wait(); };
+  resume5.set();
+  request_waiting.wait();
+  past_gate.set();
+  discovery5.join(); worker5.join();
+  on_poll=nullptr; gate_poll_entered=nullptr; release_gate_poll=nullptr;
+  check(worker_refused_while_sampling && probe_entered.load() && video::probes==probes_before_gate_wait+1,
+        "a worker refused the gate by a discovery sample waits it out and still probes");
+  check(gate_wait_answer.probe_complete, "the request waiting on that worker answers from its probe");
+  check(video::probe_kept_hint && video::current_lease()==0,
+        "the probe kept its adapter hint through the waiting request's samples and released it");
+
+  // The worker releases the gate and clears its hint before it bumps the
+  // finished counter. A sample taken in that gap carries no hint (the probe
+  // is still pending) and cannot see the fresh cache; the bump then ends the
+  // wait, and the request must re-read with its own hint instead of
+  // answering the baseline. The fake cache lands the worker's result inside
+  // the request's first wait-loop sample.
+  video::cache_ready=false; schedule_result=idle_probe_schedule_e::already_running;
+  unsigned cache_reads=0;
+  video::on_cache_read=[&] {
+    if (++cache_reads==2) { video::cache_ready=true; http_capability_probe_finished.fetch_add(1); }
+  };
+  auto gap_answer=advertised_encoder_capabilities_for_http(clock_now());
+  video::on_cache_read=nullptr;
+  check(gap_answer.probe_complete && cache_reads==3,
+        "a cache filled just before the finish counter bumped is re-read with the idle hint");
+  check(video::current_lease()==0, "the re-read releases its hint");
+
+  // The wait budget counts from request arrival: a request that queued behind
+  // another discovery handler for 4 s waits at most the remaining second.
+  video::cache_ready=false; schedule_result=idle_probe_schedule_e::already_running;
+  unsigned polls=0;
+  on_poll=[&] { ++polls; };
+  auto queued_answer=advertised_encoder_capabilities_for_http(clock_now()-4s);
+  on_poll=nullptr;
+  check(!queued_answer.probe_complete && polls*kHttpCapabilityProbePoll==1s,
+        "a request queued for 4 s waits only the remaining second of its budget");
   std::cout<<checks<<" checks, "<<failures<<" failures\n";
   return failures!=0;
 }

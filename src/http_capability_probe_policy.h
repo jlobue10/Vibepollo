@@ -14,10 +14,31 @@
 #include <optional>
 
 namespace http_capability_probe {
-  // Moonlight gives a /serverinfo request well over this before giving up,
-  // and a healthy probe finishes within it; a stuck driver must not hold
-  // discovery longer than this.
-  inline constexpr auto kHttpCapabilityProbeWait = std::chrono::seconds(8);
+  // Moonlight's /serverinfo read timeout is 7 s (moonlight-android
+  // NvHTTP.java READ_TIMEOUT = 7000, applied per read), and the host writes
+  // nothing until this wait ends, so the wait plus one gate wait below must
+  // end with margin inside it: a slow probe degrades the answer to the
+  // baseline instead of failing the client's request. A healthy probe
+  // finishes well within it; a stuck driver must not hold discovery longer.
+  inline constexpr auto kHttpCapabilityProbeWait = std::chrono::seconds(5);
+  // The probe worker, and the one request-side re-read after the worker ends,
+  // take the stream lifecycle gate with this bounded wait. A discovery sample
+  // owns the gate for a DXGI adapter enumeration (milliseconds), which the
+  // worker must outwait; a session start can own it far longer, and the
+  // worker yields to that instead of blocking its single-flight slot.
+  inline constexpr auto kHttpCapabilityProbeGateWait = std::chrono::milliseconds(500);
+  inline constexpr auto kHttpCapabilityProbeGatePoll = std::chrono::milliseconds(1);
+
+  /**
+   * @brief The wait deadline for a discovery request that arrived at
+   *        `request_arrived`. The budget counts from arrival on the server,
+   *        not from when a discovery worker picked the request up: time
+   *        queued behind another handler is spent from the client's read
+   *        timeout as well.
+   */
+  constexpr std::chrono::steady_clock::time_point wait_deadline(const std::chrono::steady_clock::time_point request_arrived) {
+    return request_arrived + kHttpCapabilityProbeWait;
+  }
 
   enum class wait_outcome_e {
     // The cache matched before the deadline; answer with the probe result.
