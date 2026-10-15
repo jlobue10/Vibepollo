@@ -146,8 +146,9 @@ jobs:
         uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238  # v6.2.0
         with:
           node-version: '24'
-      - name: Check browser ICE polling across reconnects
-        run: node --experimental-strip-types --test src_assets/common/assets/web/scripts/webrtc-ice-lifetime.test.ts
+      - name: Check browser signaling and view state across reconnects
+        run: |
+          node --experimental-strip-types --test src_assets/common/assets/web/scripts/webrtc-ice-lifetime.test.ts src_assets/common/assets/web/scripts/browser-stream-lifetime.test.ts
       - name: Check PyroWave fence import and conversion timeout ordering
         run: python3 tests/input/test_pyrowave_sync.py
 

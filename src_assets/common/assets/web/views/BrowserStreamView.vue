@@ -211,6 +211,7 @@ let videoLatencyResetAt: number | null = null;
 let videoPlaybackStream: MediaStream | null = null;
 let gamepadCapture: BrowserGamepadCapture | null = null;
 let autoFullscreenAttempt = 0;
+let connectionAttempt = 0;
 let preserveAutoFullscreenDuringRestart = false;
 let streamSurfaceFocusedBeforeCollapse = false;
 
@@ -902,6 +903,7 @@ async function connect(resume: boolean): Promise<void> {
     return;
   }
 
+  const attempt = ++connectionAttempt;
   stopSessionStatusPolling();
   sessionActionError.value = '';
   streamError.value = '';
@@ -957,6 +959,9 @@ async function connect(resume: boolean): Promise<void> {
       onVideoPlayoutDelay: handleVideoPlayoutDelay,
     });
   } catch (error) {
+    // Cancel/reconnect (or unmount) can finish while signaling is pending.
+    // The old service call still cleans up its session, but no longer owns UI state.
+    if (attempt !== connectionAttempt) return;
     if (error instanceof WebRtcConnectionCanceledError) {
       cancelAutoFullscreen();
       connectionState.value = 'idle';
@@ -966,8 +971,10 @@ async function connect(resume: boolean): Promise<void> {
     connectionState.value = 'failed';
     streamError.value = messageFromError(error, t('ui.browser_stream.errors.connect'));
   } finally {
-    isConnecting.value = false;
-    if (!isConnected.value) startSessionStatusPolling();
+    if (attempt === connectionAttempt) {
+      isConnecting.value = false;
+      if (!isConnected.value) startSessionStatusPolling();
+    }
   }
 }
 
@@ -1030,6 +1037,7 @@ async function confirmTerminate(): Promise<void> {
 }
 
 async function disconnect(restartStatusPolling = true): Promise<void> {
+  const attempt = ++connectionAttempt;
   cancelAutoFullscreen();
   releaseForwardedInput();
   stopGamepadCapture();
@@ -1039,6 +1047,9 @@ async function disconnect(restartStatusPolling = true): Promise<void> {
   isConnecting.value = false;
   inputChannelState.value = 'closed';
   await browserSession.disconnect();
+  // A repeated Cancel can complete first and allow a new stream to start
+  // while this call is still waiting for its server-side DELETE response.
+  if (attempt !== connectionAttempt) return;
   if (videoEl.value) videoEl.value.srcObject = null;
   if (audioEl.value) audioEl.value.srcObject = null;
   videoPlaybackStream = null;
