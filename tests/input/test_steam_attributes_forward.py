@@ -256,13 +256,47 @@ int main() {
   passthrough(input, &arrival4);
   check(platf::forwarded.size() == 1 && !input->gamepads[4].pending_steam_attributes, "a held packet is dropped when the arrival is not a Steam Controller");
 
+  // A failed arrival ends the lifetime of any attributes held before it. Retrying
+  // that controller number must not identify the new virtual device as the old one.
+  reset();
+  input = std::make_shared<input_t>();
+  auto arrival6 = arrival_packet(6, LI_CTYPE_STEAM, LI_CCAP_STEAM_ATTRIBUTES);
+  auto attrs6 = attributes_packet(6);
+  passthrough(input, &attrs6);
+  platf::alloc_result = -1;
+  passthrough(input, &arrival6);
+  check(input->gamepads[6].alloc_failed && !input->gamepads[6].pending_steam_attributes,
+        "a platform allocation failure discards attributes held before arrival");
+  platf::alloc_result = 0;
+  passthrough(input, &arrival6);
+  check(input->gamepads[6].id >= 0 && platf::forwarded.empty(),
+        "retrying after platform allocation failure cannot replay the failed arrival's attributes");
+  const auto before_retry_attributes = platf::forwarded.size();
+  passthrough(input, &attrs6);
+  check(platf::forwarded.size() == before_retry_attributes + 1, "the successful retry accepts its own attribute reading");
+
+  // Global controller IDs can be occupied by other streaming sessions. This is
+  // an allocation failure too, rather than an arrival that has not happened yet.
+  reset();
+  input = std::make_shared<input_t>();
+  passthrough(input, &attrs6);
+  gamepadMask.set();
+  passthrough(input, &arrival6);
+  check(input->gamepads[6].alloc_failed && !input->gamepads[6].pending_steam_attributes && platf::alloc_calls == 0,
+        "exhausting global controller IDs discards pre-arrival attributes and records failure");
+  passthrough(input, &attrs6);
+  check(!input->gamepads[6].pending_steam_attributes && platf::forwarded.empty(),
+        "attributes following an arrival rejected for exhausted IDs are dropped");
+  gamepadMask.reset(9);
+  passthrough(input, &arrival6);
+  check(input->gamepads[6].id == 9 && !input->gamepads[6].alloc_failed && platf::forwarded.empty(),
+        "a later arrival after capacity returns cannot inherit the failed controller's attributes");
+
   // Nothing to hold for a slot whose allocation failed; nothing at all when controllers are off or the number is out of range.
   reset();
   input = std::make_shared<input_t>();
   platf::alloc_result = -1;
-  auto arrival6 = arrival_packet(6, LI_CTYPE_STEAM, LI_CCAP_STEAM_ATTRIBUTES);
   passthrough(input, &arrival6);
-  auto attrs6 = attributes_packet(6);
   passthrough(input, &attrs6);
   check(input->gamepads[6].alloc_failed && !input->gamepads[6].pending_steam_attributes && platf::forwarded.empty(), "a packet for a slot whose allocation failed is dropped, not held");
   platf::alloc_result = 0;

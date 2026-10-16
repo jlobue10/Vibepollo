@@ -1172,6 +1172,10 @@ namespace input {
 
     auto id = alloc_id(gamepadMask);
     if (id < 0) {
+      // This arrival failed too: later packets are not pre-arrival attributes,
+      // and any held reading must not carry over to the next allocation attempt.
+      gamepad.alloc_failed = true;
+      gamepad.pending_steam_attributes.reset();
       return;
     }
 
@@ -1179,6 +1183,7 @@ namespace input {
     if (platf::alloc_gamepad(platf_input, {id, packet->controllerNumber}, arrival, input->feedback_queue)) {
       free_id(gamepadMask, id);
       gamepad.alloc_failed = true;
+      gamepad.pending_steam_attributes.reset();
       return;
     }
 
@@ -1509,7 +1514,8 @@ namespace input {
     // may never send another packet under its own controller number.
     for (std::size_t i = 0; i < input->gamepads.size(); ++i) {
       if (!(packet->activeGamepadMask & (1 << i)) &&
-          (input->gamepads[i].id >= 0 || input->gamepads[i].back_timeout_id || input->gamepads[i].alloc_failed)) {
+          (input->gamepads[i].id >= 0 || input->gamepads[i].back_timeout_id || input->gamepads[i].alloc_failed ||
+           input->gamepads[i].pending_steam_attributes)) {
         reset_gamepad(input->gamepads[i]);
         input->allocated_gamepads.fetch_and(~(1u << i), std::memory_order_relaxed);
       }
@@ -1522,6 +1528,8 @@ namespace input {
     if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0 && !gamepad.alloc_failed) {
       auto id = alloc_id(gamepadMask);
       if (id < 0) {
+        gamepad.alloc_failed = true;
+        gamepad.pending_steam_attributes.reset();
         return;
       }
 
@@ -1530,6 +1538,7 @@ namespace input {
         // Every state packet would otherwise repeat the attempt (a driver connect, enumeration
         // and handshake on the single input worker) and its error lines.
         gamepad.alloc_failed = true;
+        gamepad.pending_steam_attributes.reset();
         BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber
                            << "] could not be allocated; ignoring its input until the client removes and re-adds it"sv;
         return;
