@@ -31,6 +31,7 @@ PRELUDE = r'''
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <deque>
 #include <functional>
 #include <iostream>
@@ -117,6 +118,9 @@ void free_id(std::bitset<16> &mask, int id) { mask[id] = false; }
 enum class button_state_e { NONE, DOWN, UP };
 struct gamepad_t {
   int id = -1;
+  std::uint8_t arrival_type = 0;
+  std::uint16_t arrival_capabilities = 0;
+  std::optional<int> pending_steam_attributes;
   worker_t::task_id_t back_timeout_id = nullptr;
   platf::gamepad_state_t gamepad_state;
   button_state_e back_button_state = button_state_e::NONE;

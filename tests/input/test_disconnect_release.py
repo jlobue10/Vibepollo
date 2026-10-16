@@ -43,7 +43,7 @@ constexpr int MULTI_CONTROLLER_MAGIC_GEN5 = 0x0c;
 constexpr int SS_HSCROLL_MAGIC = 0x55000001, SS_TOUCH_MAGIC = 0x55000002;
 constexpr int SS_PEN_MAGIC = 0x55000003, SS_CONTROLLER_ARRIVAL_MAGIC = 0x55000004;
 constexpr int SS_CONTROLLER_TOUCH_MAGIC = 0x55000005, SS_CONTROLLER_MOTION_MAGIC = 0x55000006;
-constexpr int SS_CONTROLLER_BATTERY_MAGIC = 0x55000007;
+constexpr int SS_CONTROLLER_BATTERY_MAGIC = 0x55000007, SS_STEAM_CONTROLLER_ATTRIBUTES_MAGIC = 0x55000008;
 // Models validation success; this suite tests enqueue permissions/lifetime, not wire parsing.
 struct validated_input_packet_t { uint32_t magic; };
 std::optional<validated_input_packet_t> validate_packet(const std::vector<uint8_t> &data) {

@@ -29,10 +29,11 @@ jobs:
           python3 tests/input/test_steam_settings_forward.py
           python3 tests/input/test_vhf_feedback_retirement.py
           python3 tests/input/test_vhf_fallback.py
-      - name: Check SC2026 client-to-driver click fidelity
+      - name: Check SC2026 client-to-driver click fidelity and the firmware attribute relay
         run: |
           git submodule update --init --depth 1 third-party/moonlight-common-c third-party/libvirtualgamepad
           python3 tests/input/test_sc26_buttons.py
+          python3 tests/input/test_steam_attributes_forward.py
 
   windows:
     uses: ./.github/workflows/ci-windows.yml
