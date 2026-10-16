@@ -553,16 +553,6 @@ namespace platf {
   }
 
   /**
-   * @brief Reports whether the configured VHF controller definitely has no touchpad.
-   * @return `true` when the selection always yields an Xbox controller.
-   */
-  static bool vhf_gamepad_is_xbox() {
-    return config::input.gamepad == "vhf_xbox"sv ||
-           config::input.gamepad == "vhf_xbox_one"sv ||
-           config::input.gamepad == "vhf_switch"sv;
-  }
-
-  /**
    * @brief Chooses which controller the VHF driver should present.
    * @param metadata The client's reported gamepad capabilities.
    * @return The profile to request.
@@ -2171,15 +2161,14 @@ namespace platf {
   platform_caps::caps_t get_capabilities() {
     platform_caps::caps_t caps = 0;
 
-    // We support controller touchpad input as long as we're not emulating X360, which has no
-    // touchpad. On the VHF driver it depends on the controller: plain `vhf` selects a
-    // pad-bearing profile from the client's controller type (Steam Controller, PlayStation)
-    // whatever motion_as_ds4/touchpad_as_ds4 say, so only the explicit Xbox and Switch
+    // Controller touch depends on which controller the client will get (see
+    // vhf_gamepad::supports_controller_touch): plain `vhf` selects a pad-bearing profile
+    // from the client's controller type (Steam Controller, PlayStation) whatever
+    // motion_as_ds4/touchpad_as_ds4 say, so only x360 and the explicit Xbox and Switch
     // selections rule a touchpad out. Withholding the flag silences both Steam Controller
     // trackpads: the client never sends a touch packet without it.
-    const bool vhf_without_touchpad = vhf_gamepad_selected() && vhf_gamepad_is_xbox();
     const bool composite_dualsense = config::input.gamepad == "usbip_ds5"sv || dualsense_usbip_gamepad::enabled();
-    if (composite_dualsense || (config::input.gamepad != "x360"sv && !vhf_without_touchpad)) {
+    if (vhf_gamepad::supports_controller_touch(config::input.gamepad, composite_dualsense)) {
       caps |= platform_caps::controller_touch;
     }
 

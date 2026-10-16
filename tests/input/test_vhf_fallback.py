@@ -48,7 +48,8 @@ namespace platf {
 namespace platform_caps {typedef std::uint32_t caps_t;constexpr caps_t pen_touch=0x01,controller_touch=0x02;}
 PROFILE_ENUM;
 namespace vhf_gamepad {BACKEND_ENUM; BACKEND_SELECT
-SELECT_DESIRED}
+SELECT_DESIRED
+SUPPORTS_TOUCH}
 namespace dualsense_usbip_gamepad {bool enabled(){return false;} bool select_composite_dualsense(std::string_view,vhf_profile_e,bool,bool){return false;}}
 struct gamepad_id_t {int globalIndex,clientRelativeIndex;};
 struct gamepad_arrival_t {int type;std::uint16_t capabilities=0;};
@@ -84,6 +85,9 @@ prefix=prefix.replace('BACKEND_SELECT',block(policy,'[[nodiscard]] constexpr bac
 # The production profile-selection policy (upstream moved it out of input.cpp).
 policy_cpp=(ROOT/'src/platform/windows/vhf_gamepad_policy.cpp').read_text()
 prefix=prefix.replace('SELECT_DESIRED',block(policy_cpp,'vhf_profile_e select_desired_profile('))
+# get_capabilities() asks the policy whether the selection can yield a touchpad (upstream
+# moved that decision out of input.cpp too); use the production function.
+prefix=prefix.replace('SUPPORTS_TOUCH',block(policy_cpp,'bool supports_controller_touch('))
 suffix = r'''
 }
 int main(){
@@ -137,7 +141,7 @@ int main(){
 }
 '''
 code=prefix+'\n'.join(block(source,m) for m in [
-    'static bool vhf_gamepad_selected(', 'static bool vhf_gamepad_is_xbox(', 'static vhf_profile_e vhf_desired_profile(',
+    'static bool vhf_gamepad_selected(', 'static vhf_profile_e vhf_desired_profile(',
     'int alloc_gamepad(input_t &', 'platform_caps::caps_t get_capabilities('])+suffix
 with tempfile.TemporaryDirectory(prefix='vhf-fallback-') as directory:
     work=Path(directory)

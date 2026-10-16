@@ -257,6 +257,10 @@ namespace platf::dxgi {
     _secdesc_builder = std::move(builder);
   }
 
+  void NamedPipeFactory::set_client_identification_only() {
+    _client_security_flags = SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
+  }
+
   std::unique_ptr<INamedPipe> NamedPipeFactory::create_client(const std::string &pipeName) {
     auto wPipeBase = utf8_to_wide(pipeName);
     std::wstring fullPipeName = (wPipeBase.find(LR"(\\.\pipe\)") == 0) ? wPipeBase : LR"(\\.\pipe\)" + wPipeBase;
@@ -283,8 +287,10 @@ namespace platf::dxgi {
       winrt::file_handle pipe {
         // SECURITY_IDENTIFICATION: the server (possibly a squatter on a user-creatable pipe
         // name) may identify this client but never impersonate it; the host runs as SYSTEM.
+        // Every client connection gets it here; upstream's set_client_identification_only()
+        // (Playnite) requests the same flags per factory and so stays a subset of these.
         CreateFileW(fullPipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                    FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr)
+                    FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION | _client_security_flags, nullptr)
       };
 
       if (pipe) {
@@ -374,6 +380,10 @@ namespace platf::dxgi {
 
   void AnonymousPipeFactory::set_security_descriptor_builder(NamedPipeFactory::SecurityDescriptorBuilder builder) {
     _pipe_factory.set_security_descriptor_builder(std::move(builder));
+  }
+
+  void AnonymousPipeFactory::set_client_identification_only() {
+    _pipe_factory.set_client_identification_only();
   }
 
   class PrefetchedPipe: public INamedPipe {
