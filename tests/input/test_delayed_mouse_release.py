@@ -118,6 +118,7 @@ void free_id(std::bitset<16> &mask, int id) { mask[id] = false; }
 enum class button_state_e { NONE, DOWN, UP };
 struct gamepad_t {
   int id = -1;
+  bool alloc_failed = false;
   std::uint8_t arrival_type = 0;
   std::uint16_t arrival_capabilities = 0;
   std::optional<int> pending_steam_attributes;

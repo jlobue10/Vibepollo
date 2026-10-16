@@ -171,6 +171,7 @@ namespace input {
     thread_pool_util::ThreadPool::task_id_t back_timeout_id;
 
     int id;
+    bool alloc_failed {};
 
     // What the client's arrival event said this controller is (both 0 for a controller that
     // arrived through a legacy state packet). They gate the Steam Controller attribute packet.
@@ -198,6 +199,7 @@ namespace input {
       free_gamepad(platf_input, gamepad.id);
       gamepad.id = -1;
     }
+    gamepad.alloc_failed = false;
     gamepad.arrival_type = 0;
     gamepad.arrival_capabilities = 0;
     gamepad.pending_steam_attributes.reset();
@@ -1130,6 +1132,8 @@ namespace input {
       BOOST_LOG(warning) << "ControllerNumber already allocated ["sv << packet->controllerNumber << ']';
       return;
     }
+    // A new arrival is a new attempt, whatever an earlier one did.
+    gamepad.alloc_failed = false;
     gamepad.arrival_type = packet->type;
     gamepad.arrival_capabilities = util::endian::little(packet->capabilities);
 
@@ -1142,12 +1146,18 @@ namespace input {
 
     auto id = alloc_id(gamepadMask);
     if (id < 0) {
+      // This arrival failed too: later packets are not pre-arrival attributes,
+      // and any held reading must not carry over to the next allocation attempt.
+      gamepad.alloc_failed = true;
+      gamepad.pending_steam_attributes.reset();
       return;
     }
 
     // Allocate a new gamepad
     if (platf::alloc_gamepad(platf_input, {id, packet->controllerNumber}, arrival, input->feedback_queue)) {
       free_id(gamepadMask, id);
+      gamepad.alloc_failed = true;
+      gamepad.pending_steam_attributes.reset();
       return;
     }
 
@@ -1211,9 +1221,11 @@ namespace input {
     copy_steam_attribute_string(attributes.board_serial, packet->boardSerial);
 
     if (gamepad.id < 0) {
-      // Before the arrival event nothing says what this controller is: hold the packet until
-      // the arrival allocates the slot (reset_gamepad drops it if the client removes the slot).
-      gamepad.pending_steam_attributes = attributes;
+      // Before the arrival event nothing says what this controller is; after a failed
+      // allocation there is nothing to apply them to.
+      if (!gamepad.alloc_failed) {
+        gamepad.pending_steam_attributes = attributes;
+      }
       return;
     }
 
@@ -1471,7 +1483,8 @@ namespace input {
     // may never send another packet under its own controller number.
     for (std::size_t i = 0; i < input->gamepads.size(); ++i) {
       if (!(packet->activeGamepadMask & (1 << i)) &&
-          (input->gamepads[i].id >= 0 || input->gamepads[i].back_timeout_id)) {
+          (input->gamepads[i].id >= 0 || input->gamepads[i].back_timeout_id || input->gamepads[i].alloc_failed ||
+           input->gamepads[i].pending_steam_attributes)) {
         reset_gamepad(input->gamepads[i]);
         input->allocated_gamepads.fetch_and(~(1u << i), std::memory_order_relaxed);
       }
@@ -1481,14 +1494,20 @@ namespace input {
 
     // If this is an event for a new gamepad, create the gamepad now. Ideally, the client would
     // send a controller arrival instead of this but it's still supported for legacy clients.
-    if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0) {
+    if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0 && !gamepad.alloc_failed) {
       auto id = alloc_id(gamepadMask);
       if (id < 0) {
+        gamepad.alloc_failed = true;
+        gamepad.pending_steam_attributes.reset();
         return;
       }
 
       if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, {0, 0, 0, input->persist_gamepads}, input->feedback_queue)) {
         free_id(gamepadMask, id);
+        gamepad.alloc_failed = true;
+        gamepad.pending_steam_attributes.reset();
+        BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber
+                           << "] could not be allocated; ignoring its input until the client removes and re-adds it"sv;
         return;
       }
 
@@ -1499,7 +1518,9 @@ namespace input {
     // If this gamepad has not been initialized, ignore it.
     // This could happen when platf::alloc_gamepad fails
     if (gamepad.id < 0) {
-      BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber << "] not allocated"sv;
+      if (!gamepad.alloc_failed && (packet->activeGamepadMask & (1 << packet->controllerNumber))) {
+        BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber << "] not allocated"sv;
+      }
       return;
     }
 
