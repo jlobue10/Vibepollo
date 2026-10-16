@@ -799,6 +799,14 @@ namespace platf {
     }
 
     dualsense_audio::set_slot(nr, false);
+    // The mailbox belongs to the stream and outlives this controller. The
+    // exclusive lifetime lock has stopped its feedback producer; remove its
+    // queued output before the client-relative index can be reused.
+    if (slot.feedback_queue) {
+      slot.feedback_queue->discard_if([index = slot.client_relative_index](const gamepad_feedback_msg_t &msg) {
+        return msg.id == index;
+      });
+    }
     slot.reset();
     if (impl->active_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
       BOOST_LOG(debug) << "Disconnecting from the Vibepollo virtual gamepad driver"sv;
