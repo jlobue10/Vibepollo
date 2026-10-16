@@ -4,33 +4,45 @@
  */
 #include "../../../tests_common.h"
 
+#include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <cstring>
 #include <limits>
-
-extern "C" {
-#include <moonlight-common-c/src/Limelight.h>
-}
+#include <string_view>
+#include <utility>
 
 #include <src/platform/windows/vhf_gamepad_policy.h>
+#include <src/steam_controller_protocol.h>
 
 namespace {
 
   using platf::vhf_gamepad::backend_e;
   using platf::vhf_gamepad::decode_rumble_rgb;
+  using platf::vhf_gamepad::decode_steam_haptic;
+  using platf::vhf_gamepad::decode_steam_settings;
+  using platf::vhf_gamepad::steam_settings_t;
+  using platf::vhf_gamepad::steam_haptic_t;
+  using platf::vhf_gamepad::synthesize_steam_rumble;
+  using platf::vhf_gamepad::synthesized_rumble_t;
+  using platf::vhf_gamepad::STEAM_HAPTIC_CLICK_HOLD_MS;
+  using platf::vhf_gamepad::STEAM_HAPTIC_RUMBLE_TIMEOUT_MS;
+  using platf::vhf_gamepad::STEAM_HAPTIC_LEFT;
+  using platf::vhf_gamepad::STEAM_HAPTIC_MIN_HOLD_MS;
+  using platf::vhf_gamepad::STEAM_HAPTIC_RIGHT;
   using platf::vhf_gamepad::make_input_state;
   using platf::vhf_gamepad::normalized_state_t;
   using platf::vhf_gamepad::rumble_rgb_t;
   using platf::vhf_gamepad::select_automatic_backend;
   using platf::vhf_gamepad::select_automatic_profile;
   using platf::vhf_gamepad::select_desired_profile;
+  using platf::vhf_profile_e;
   using platf::vhf_gamepad::supported_button_mask;
   using platf::vhf_gamepad::to_milli_units;
   using platf::vhf_gamepad::to_normalized_touch;
   using platf::vhf_gamepad::to_protocol_battery_state;
   using platf::vhf_gamepad::to_protocol_motion_kind;
   using platf::vhf_gamepad::to_protocol_touch_event;
-  using platf::vhf_profile_e;
 
   lvg::feedback_event make_rumble_event(
     const lvg::generic_rumble_rgb_feedback &payload,
@@ -52,6 +64,19 @@ namespace {
     EXPECT_EQ(select_automatic_backend(true, false), backend_e::vigem);
     EXPECT_EQ(select_automatic_backend(false, true), backend_e::vhf);
     EXPECT_EQ(select_automatic_backend(false, false), backend_e::unavailable);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, UnsupportedTouchEventsAreDroppedNotCancelAll) {
+    using platf::vhf_gamepad::PROTOCOL_TOUCH_EVENT_UNSUPPORTED;
+    EXPECT_EQ(to_protocol_touch_event(LI_TOUCH_EVENT_HOVER_LEAVE), PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+    EXPECT_EQ(to_protocol_touch_event(LI_TOUCH_EVENT_BUTTON_ONLY), PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+    EXPECT_EQ(to_protocol_touch_event(0x42), PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+    EXPECT_NE(to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL_ALL), PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+    EXPECT_NE(to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL), to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL_ALL));
+    for (std::uint8_t event : {LI_TOUCH_EVENT_HOVER, LI_TOUCH_EVENT_DOWN, LI_TOUCH_EVENT_UP, LI_TOUCH_EVENT_MOVE, LI_TOUCH_EVENT_CANCEL}) {
+      EXPECT_NE(to_protocol_touch_event(event), PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+      EXPECT_NE(to_protocol_touch_event(event), to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL_ALL));
+    }
   }
 
   TEST_F(VhfGamepadPolicyTest, AutomaticProfilePrefersXinputThenPlaystation) {
@@ -102,6 +127,8 @@ namespace {
         SCOPED_TRACE(preferences);
         EXPECT_EQ(select_desired_profile(setting, LI_CTYPE_PS, 0, preferences, preferences), vhf_profile_e::dualsense);
         EXPECT_EQ(select_desired_profile(setting, LI_CTYPE_NINTENDO, LI_CCAP_GYRO | LI_CCAP_TOUCHPAD, preferences, preferences), vhf_profile_e::switch_pro);
+        // A client that identifies a Steam Controller gets the real thing, whatever the DS4 preferences say.
+        EXPECT_EQ(select_desired_profile(setting, LI_CTYPE_STEAM, LI_CCAP_GYRO | LI_CCAP_TOUCHPAD, preferences, preferences), vhf_profile_e::steam_controller);
       }
     }
   }
@@ -133,6 +160,17 @@ namespace {
     }
   }
 
+  TEST_F(VhfGamepadPolicyTest, SteamControllerSelectionsAdvertiseControllerTouch) {
+    // Both Steam Controller pads are trackpads: the explicit profile, and a plain `vhf` that
+    // selects it for a Steam client, keep controller touch on whatever the DS4 preferences say.
+    EXPECT_TRUE(platf::vhf_gamepad::supports_controller_touch("vhf_steam", false));
+    for (const bool preferences : {false, true}) {
+      SCOPED_TRACE(preferences);
+      EXPECT_EQ(select_desired_profile("vhf", LI_CTYPE_STEAM, LI_CCAP_TOUCHPAD, preferences, preferences), vhf_profile_e::steam_controller);
+    }
+    EXPECT_TRUE(platf::vhf_gamepad::supports_controller_touch("vhf", false));
+  }
+
   TEST_F(VhfGamepadPolicyTest, UnknownClientUsesEnabledMotionPreference) {
     for (const auto capabilities : {LI_CCAP_ACCEL, LI_CCAP_GYRO}) {
       SCOPED_TRACE(capabilities);
@@ -153,10 +191,11 @@ namespace {
       {"vhf_xbox_one", vhf_profile_e::xbox_one},
       {"vhf_ds4", vhf_profile_e::dualshock4},
       {"vhf_ds5", vhf_profile_e::dualsense},
-      {"vhf_switch", vhf_profile_e::switch_pro}
+      {"vhf_switch", vhf_profile_e::switch_pro},
+      {"vhf_steam", vhf_profile_e::steam_controller}
     };
     for (const auto &[setting, expected] : overrides) {
-      for (const auto type : {LI_CTYPE_XBOX, LI_CTYPE_PS, LI_CTYPE_NINTENDO, LI_CTYPE_UNKNOWN}) {
+      for (const auto type : {LI_CTYPE_XBOX, LI_CTYPE_PS, LI_CTYPE_NINTENDO, LI_CTYPE_UNKNOWN, LI_CTYPE_STEAM}) {
         SCOPED_TRACE(setting);
         SCOPED_TRACE(type);
         EXPECT_EQ(select_desired_profile(setting, type, LI_CCAP_ACCEL | LI_CCAP_GYRO | LI_CCAP_TOUCHPAD, true, true), expected);
@@ -182,6 +221,39 @@ namespace {
     state.button_flags = supported_button_mask;
 
     EXPECT_EQ(make_input_state(0, state).buttons, supported_button_mask);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, GripSenseBitsSurviveTheMask) {
+    // Moonlight's LI_CCAP_GRIP_SENSE bits ride in the button word; the Steam Controller
+    // profile follows the client's grips for good once it has seen one of them.
+    normalized_state_t state {};
+    state.button_flags = lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch;
+
+    EXPECT_EQ(make_input_state(0, state).buttons,
+              lvg::button_mask::left_grip_touch | lvg::button_mask::right_grip_touch);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, StickTouchBitsSurviveTheMask) {
+    normalized_state_t state {};
+    state.button_flags = lvg::button_mask::left_stick_touch | lvg::button_mask::right_stick_touch;
+
+    EXPECT_EQ(make_input_state(0, state).buttons,
+              lvg::button_mask::left_stick_touch | lvg::button_mask::right_stick_touch);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, ExplicitSc26ClicksRequireCapabilityAndProfile) {
+    normalized_state_t state {};
+    state.button_flags = lvg::button_mask::left_pad_click | lvg::button_mask::right_trigger_click |
+                         lvg::button_mask::sc26_buttons_explicit;
+    const auto clicks = lvg::button_mask::left_pad_click | lvg::button_mask::right_trigger_click;
+    EXPECT_EQ(make_input_state(0, state).buttons, clicks);
+    EXPECT_EQ(make_input_state(0, state, lvg::profile::steam_controller, 0).buttons, clicks);
+    EXPECT_EQ(make_input_state(0, state, lvg::profile::dualsense, 0x1000).buttons, clicks);
+    EXPECT_EQ(make_input_state(0, state, lvg::profile::steam_controller, 0x1000).buttons,
+              clicks | lvg::button_mask::sc26_buttons_explicit);
+    state.button_flags = 0;
+    EXPECT_EQ(make_input_state(0, state, lvg::profile::steam_controller, 0x1000).buttons,
+              static_cast<std::uint32_t>(lvg::button_mask::sc26_buttons_explicit));
   }
 
   TEST_F(VhfGamepadPolicyTest, UnknownButtonBitsAreDropped) {
@@ -431,8 +503,10 @@ namespace {
               static_cast<std::uint8_t>(lvg::touch_event::move));
     EXPECT_EQ(to_protocol_touch_event(LI_TOUCH_EVENT_UP),
               static_cast<std::uint8_t>(lvg::touch_event::up));
-    // An unmapped event releases everything rather than inventing a contact.
+    // Unmapped events are ignored; only explicit cancel-all releases every contact.
     EXPECT_EQ(to_protocol_touch_event(0xEE),
+              platf::vhf_gamepad::PROTOCOL_TOUCH_EVENT_UNSUPPORTED);
+    EXPECT_EQ(to_protocol_touch_event(LI_TOUCH_EVENT_CANCEL_ALL),
               static_cast<std::uint8_t>(lvg::touch_event::cancel_all));
   }
 
@@ -486,4 +560,297 @@ namespace {
     EXPECT_FALSE(decode_rumble_rgb(event, feedback));
   }
 
+  lvg::feedback_event make_steam_haptic_event(std::initializer_list<std::uint8_t> report) {
+    lvg::steam_haptic_feedback payload {};
+    payload.length = static_cast<std::uint8_t>(report.size());
+    std::copy(report.begin(), report.end(), payload.report);
+
+    lvg::feedback_event event {};
+    event.header.size = sizeof(event);
+    event.header.version = lvg::k_protocol_version;
+    event.controller_id = 3;
+    event.type = lvg::feedback_type::steam_haptic;
+    event.payload_size = sizeof(payload);
+    std::memcpy(event.payload, &payload, sizeof(payload));
+    return event;
+  }
+
+  steam_haptic_t make_steam_haptic(std::initializer_list<std::uint8_t> report) {
+    steam_haptic_t haptic {};
+    haptic.length = static_cast<std::uint8_t>(report.size());
+    std::copy(report.begin(), report.end(), haptic.report.begin());
+    return haptic;
+  }
+
+  lvg::feedback_event make_steam_settings_event(const std::uint8_t command, const std::uint8_t count, std::initializer_list<std::uint8_t> triples) {
+    lvg::steam_settings_feedback payload {};
+    payload.command = command;
+    payload.count = count;
+    std::copy(triples.begin(), triples.end(), payload.triples);
+    lvg::feedback_event event {};
+    event.header.size = sizeof(event);
+    event.header.version = lvg::k_protocol_version;
+    event.type = lvg::feedback_type::steam_settings;
+    event.payload_size = sizeof(payload);
+    std::memcpy(event.payload, &payload, sizeof(payload));
+    return event;
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamSettingsWriteIsDecodedVerbatim) {
+    steam_settings_t settings {};
+    ASSERT_TRUE(decode_steam_settings(
+      make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, 2, {48, 0x18, 0x00, 7, 0x07, 0x00}), settings));
+    EXPECT_EQ(settings.command, STEAM_SETTINGS_SET_VALUES);
+    EXPECT_EQ(settings.count, 2);
+    EXPECT_EQ(settings.triples[0], 48);
+    EXPECT_EQ(settings.triples[1], 0x18);
+    EXPECT_EQ(settings.triples[3], 7);
+    EXPECT_EQ(settings.triples[4], 0x07);
+    EXPECT_EQ(settings.triples[6], 0);
+
+    ASSERT_TRUE(decode_steam_settings(make_steam_settings_event(STEAM_SETTINGS_LOAD_DEFAULTS, 0, {}), settings));
+    EXPECT_EQ(settings.command, STEAM_SETTINGS_LOAD_DEFAULTS);
+    EXPECT_EQ(settings.count, 0);
+
+    // A settings event is nothing else, and a haptic event is not a settings write.
+    steam_haptic_t haptic {};
+    EXPECT_FALSE(decode_steam_haptic(make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, 1, {9, 0, 0}), haptic));
+    rumble_rgb_t rumble {};
+    EXPECT_FALSE(decode_rumble_rgb(make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, 1, {9, 0, 0}), rumble));
+    EXPECT_FALSE(decode_steam_settings(make_steam_haptic_event({0x82, 0x01, 0x02, 0xf2}), settings));
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamSettingsWriteWithAnImpossibleShapeIsRefused) {
+    steam_settings_t settings {};
+    EXPECT_FALSE(decode_steam_settings(make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, 0, {}), settings));
+    EXPECT_FALSE(decode_steam_settings(
+      make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, STEAM_SETTINGS_TRIPLES_MAX + 1, {}), settings));
+    EXPECT_FALSE(decode_steam_settings(make_steam_settings_event(STEAM_SETTINGS_LOAD_DEFAULTS, 1, {9, 0, 0}), settings));
+    EXPECT_FALSE(decode_steam_settings(make_steam_settings_event(0x89, 1, {9, 0, 0}), settings));
+    auto truncated = make_steam_settings_event(STEAM_SETTINGS_SET_VALUES, 1, {9, 0, 0});
+    truncated.payload_size = sizeof(lvg::steam_settings_feedback) - 1;
+    EXPECT_FALSE(decode_steam_settings(truncated, settings));
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticEventIsDecodedVerbatim) {
+    steam_haptic_t haptic {};
+    ASSERT_TRUE(decode_steam_haptic(make_steam_haptic_event({0x82, 0x01, 0x02, 0xf2}), haptic));
+    EXPECT_EQ(haptic.length, 4);
+    EXPECT_EQ(haptic.report[0], 0x82);
+    EXPECT_EQ(haptic.report[1], 0x01);
+    EXPECT_EQ(haptic.report[2], 0x02);
+    EXPECT_EQ(haptic.report[3], 0xf2);
+
+    rumble_rgb_t rumble {};
+    EXPECT_FALSE(decode_rumble_rgb(make_steam_haptic_event({0x82, 0x01, 0x02, 0xf2}), rumble));
+
+    auto truncated = make_steam_haptic_event({0x82, 0x01, 0x02, 0xf2});
+    truncated.payload_size = sizeof(lvg::steam_haptic_feedback) - 1;
+    EXPECT_FALSE(decode_steam_haptic(truncated, haptic));
+    EXPECT_FALSE(decode_steam_haptic(make_steam_haptic_event({0x82}), haptic));
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticRumbleReportBecomesMotorSpeeds) {
+    synthesized_rumble_t rumble {};
+    EXPECT_EQ(synthesize_steam_rumble(
+                make_steam_haptic({0x80, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0xff, 0x3f, 0x00}), rumble),
+              STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.left, 0x8000);
+    EXPECT_EQ(rumble.right, 0x3fff);
+    EXPECT_EQ(rumble.left_hold_ms, STEAM_HAPTIC_RUMBLE_TIMEOUT_MS);
+    EXPECT_EQ(rumble.right_hold_ms, STEAM_HAPTIC_RUMBLE_TIMEOUT_MS);
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x80, 0x00, 0x00}), rumble), 0);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticPulseBecomesDutyCycleForTheTrainsLength) {
+    synthesized_rumble_t rumble {};
+    // 10 ms on, 10 ms off, ten times, on the left pad: half magnitude for 200 ms.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x01, 0x10, 0x27, 0x10, 0x27, 0x0a, 0x00}), rumble),
+              STEAM_HAPTIC_LEFT);
+    EXPECT_EQ(rumble.left, 32767);
+    EXPECT_EQ(rumble.left_hold_ms, 200u);
+    EXPECT_EQ(rumble.right, 0);
+
+    // Steam's UI click: one 400 us pulse at full magnitude, held long enough to be felt.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x00, 0x90, 0x01, 0x00, 0x00, 0x01, 0x00}), rumble),
+              STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.right, 65535);
+    EXPECT_EQ(rumble.right_hold_ms, STEAM_HAPTIC_MIN_HOLD_MS);
+    EXPECT_EQ(rumble.left, 32767);
+
+    // A long train does not overflow 32-bit microseconds and is capped.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}), rumble),
+              STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.right_hold_ms, 10'000u);
+
+    // A zero-repeat pulse is Steam's per-side stop.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x01, 0, 0, 0, 0, 0, 0}), rumble), STEAM_HAPTIC_LEFT);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.left_hold_ms, 0u);
+    EXPECT_EQ(rumble.right, 32767);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticClickBecomesTimedRumbleFromItsGain) {
+    synthesized_rumble_t rumble {};
+    // Steam's test screen: a click at -14 dB on 0x82 side 0 (the left pad), every 100 ms.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x00, 0x02, 0xf2}), rumble), STEAM_HAPTIC_LEFT);
+    EXPECT_NEAR(rumble.left, 65535 * 0.1995, 64);
+    EXPECT_EQ(rumble.left_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
+    EXPECT_EQ(rumble.right, 0);
+
+    // A tone at +3 dB clips to full scale and runs until its off.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x01, 0x03, 0x03}), rumble), STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.right, 65535);
+    EXPECT_EQ(rumble.right_hold_ms, 0u);
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x01, 0x00, 0x00}), rumble), STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.right, 0);
+
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x00}), rumble), 0);
+  }
+
+  // The two report families number their sides the opposite way round (measured on the real
+  // unit): a 0x81 pulse's side 1 is the left pad, a 0x82 command's side 0 is. Side 2 is both.
+  TEST_F(VhfGamepadPolicyTest, SteamHapticPulseSideByteIsOneForLeftZeroForRightTwoForBoth) {
+    synthesized_rumble_t rumble {};
+    // Side 1: left only.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x01, 0x10, 0x27, 0x10, 0x27, 0x0a, 0x00}), rumble),
+              STEAM_HAPTIC_LEFT);
+    EXPECT_EQ(rumble.left, 32767);
+    EXPECT_EQ(rumble.left_hold_ms, 200u);
+    EXPECT_EQ(rumble.right, 0);
+    EXPECT_EQ(rumble.right_hold_ms, 0u);
+
+    // Side 0: right only; the left side keeps what it had.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x00, 0x10, 0x27, 0x10, 0x27, 0x0a, 0x00}), rumble),
+              STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.right, 32767);
+    EXPECT_EQ(rumble.right_hold_ms, 200u);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.left_hold_ms, 0u);
+
+    // Side 2: both pads, the mask the stop key in common.h derives for it.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x02, 0x10, 0x27, 0x10, 0x27, 0x0a, 0x00}), rumble),
+              STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.left, 32767);
+    EXPECT_EQ(rumble.right, 32767);
+    EXPECT_EQ(rumble.left_hold_ms, 200u);
+    EXPECT_EQ(rumble.right_hold_ms, 200u);
+
+    // A zero-repeat pulse on side 2 stops both.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x02, 0, 0, 0, 0, 0, 0}), rumble),
+              STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.right, 0);
+
+    // A side the firmware has no pad for renders nothing.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x81, 0x03, 0x10, 0x27, 0x10, 0x27, 0x0a, 0x00}), rumble), 0);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.right, 0);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticCommandSideByteIsZeroForLeftOneForRightTwoForBoth) {
+    synthesized_rumble_t rumble {};
+    // Steam's tick (82 <side> 01 FD): side 0 is the LEFT pad.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x00, 0x01, 0xfd}), rumble), STEAM_HAPTIC_LEFT);
+    EXPECT_GT(rumble.left, 0);
+    EXPECT_EQ(rumble.left_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
+    EXPECT_EQ(rumble.right, 0);
+    EXPECT_EQ(rumble.right_hold_ms, 0u);
+
+    // Steam's click (82 <side> 02 F2): side 1 is the RIGHT pad.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x01, 0x02, 0xf2}), rumble), STEAM_HAPTIC_RIGHT);
+    EXPECT_NEAR(rumble.right, 65535 * 0.1995, 64);
+    EXPECT_EQ(rumble.right_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.left_hold_ms, 0u);
+
+    // Side 2: both pads.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x02, 0x02, 0xf2}), rumble),
+              STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
+    EXPECT_NEAR(rumble.left, 65535 * 0.1995, 64);
+    EXPECT_NEAR(rumble.right, 65535 * 0.1995, 64);
+    EXPECT_EQ(rumble.left_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
+    EXPECT_EQ(rumble.right_hold_ms, STEAM_HAPTIC_CLICK_HOLD_MS);
+
+    // An off on side 2 silences both.
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x02, 0x00, 0x00}), rumble),
+              STEAM_HAPTIC_LEFT | STEAM_HAPTIC_RIGHT);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.right, 0);
+
+    // A side the firmware has no pad for renders nothing.
+    rumble = {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x82, 0x03, 0x02, 0xf2}), rumble), 0);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.right, 0);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamHapticEffectsWithoutARumbleEquivalentAreNotRendered) {
+    synthesized_rumble_t rumble {};
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x83, 0, 0, 0, 0, 0, 0, 0, 0, 0}), rumble), 0);
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x84, 0, 0, 0, 0, 0, 0, 0, 0}), rumble), 0);
+    EXPECT_EQ(synthesize_steam_rumble(make_steam_haptic({0x85, 0, 0, 0}), rumble), 0);
+    EXPECT_EQ(rumble.left, 0);
+    EXPECT_EQ(rumble.right, 0);
+  }
+
+
+  TEST_F(VhfGamepadPolicyTest, TouchPointerKeysSeparatePadsSharingAPointerId) {
+    using platf::vhf_gamepad::touch_pointer_key;
+    EXPECT_NE(touch_pointer_key(0, 0), touch_pointer_key(1, 0));
+    EXPECT_EQ(touch_pointer_key(0, 5), 5u);
+    EXPECT_NE(touch_pointer_key(1, 0), touch_pointer_key(0, 1));
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamSplitPadsKeepExactlyOneOwnerPerHalf) {
+    std::map<std::uint64_t, std::uint8_t> pointers;
+    const auto send = [&](lvg::touch_event event, std::uint32_t pointer, float x) {
+      return platf::vhf_gamepad::map_steam_touch(pointers, static_cast<std::uint8_t>(event), pointer, x);
+    };
+    EXPECT_EQ(send(lvg::touch_event::down, 10, .2f), 0);
+    EXPECT_EQ(send(lvg::touch_event::down, 20, .8f), 1);
+    for (std::uint32_t i = 100; i < 10000; ++i) {
+      EXPECT_FALSE(send(lvg::touch_event::down, i, .1f));
+      EXPECT_FALSE(send(lvg::touch_event::up, i, 0));
+    }
+    EXPECT_EQ(pointers.size(), 2);
+    EXPECT_EQ(send(lvg::touch_event::move, 10, .9f), 0);
+    EXPECT_EQ(send(lvg::touch_event::down, 10, .9f), 0);
+    EXPECT_EQ(send(lvg::touch_event::up, 20, 0), 1);
+    EXPECT_FALSE(send(lvg::touch_event::move, 20, 0));
+    EXPECT_EQ(pointers.size(), 1);
+    EXPECT_EQ(send(lvg::touch_event::down, 30, .9f), 1);
+    EXPECT_EQ(send(lvg::touch_event::cancel_all, 0, 0), 0);
+    EXPECT_TRUE(pointers.empty());
+    EXPECT_FALSE(send(lvg::touch_event::down, 1, std::numeric_limits<float>::quiet_NaN()));
+  }
+
+  TEST_F(VhfGamepadPolicyTest, FeedbackCountersAreNotableOnlyWhenSomethingWasDropped) {
+    using platf::vhf_gamepad::feedback_counters_notable;
+    const auto counters = [](std::uint8_t haptic, std::uint8_t settings, std::uint8_t transitions, std::uint8_t unknown) {
+      return lvg::feedback_counters {haptic, settings, transitions, unknown};
+    };
+    EXPECT_FALSE(feedback_counters_notable(counters(0, 0, 0, 0)));
+    EXPECT_TRUE(feedback_counters_notable(counters(1, 0, 0, 0)));
+    EXPECT_TRUE(feedback_counters_notable(counters(0, 1, 0, 0)));
+    EXPECT_TRUE(feedback_counters_notable(counters(0, 0, 1, 0)));
+    EXPECT_TRUE(feedback_counters_notable(counters(0, 0, 0, 1)));
+  }
+
+  TEST_F(VhfGamepadPolicyTest, FeedbackCountersDescribeEveryFieldAndMarkWireSaturation) {
+    using platf::vhf_gamepad::describe_feedback_counters;
+    EXPECT_EQ(
+      describe_feedback_counters(lvg::feedback_counters {0, 0, 0, 0}),
+      "haptic_evicted=0 settings_evicted=0 transitions_dropped=0 unknown_commands=0"
+    );
+    EXPECT_EQ(
+      describe_feedback_counters(lvg::feedback_counters {3, 0xFF, 254, 1}),
+      "haptic_evicted=3 settings_evicted=255+ transitions_dropped=254 unknown_commands=1"
+    );
+  }
 }  // namespace
