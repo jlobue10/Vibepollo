@@ -484,6 +484,9 @@ namespace platf::dxgi {
     // If not set, defaults to existing behavior (SYSTEM-only SD, otherwise default security).
     void set_security_descriptor_builder(SecurityDescriptorBuilder builder);
 
+    // Permit peer identity checks without granting the server impersonation rights.
+    void set_client_identification_only();
+
   private:
     /**
      * @brief Creates a security descriptor for the pipe.
@@ -534,6 +537,10 @@ namespace platf::dxgi {
      */
     winrt::file_handle create_client_pipe(const std::wstring &fullPipeName) const;
 
+    // SECURITY_IDENTIFICATION by default: the server (possibly a squatter on a
+    // user-creatable pipe name) may identify this client but never impersonate it; the
+    // host runs as SYSTEM. set_client_identification_only() requests the same flags.
+    DWORD _client_security_flags = SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
     SecurityDescriptorBuilder _secdesc_builder;  // optional custom SD builder (Playnite can override)
   };
 
@@ -575,6 +582,7 @@ namespace platf::dxgi {
 
     // Forward a custom SD builder into the underlying NamedPipeFactory
     void set_security_descriptor_builder(NamedPipeFactory::SecurityDescriptorBuilder builder);
+    void set_client_identification_only();
 
   private:
     std::unique_ptr<INamedPipe> handshake_server(std::unique_ptr<INamedPipe> pipe);

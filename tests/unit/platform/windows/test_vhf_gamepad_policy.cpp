@@ -133,6 +133,44 @@ namespace {
     }
   }
 
+  TEST_F(VhfGamepadPolicyTest, AutomaticPlaystationTouchSurvivesDisabledSelectionHeuristics) {
+    for (const auto setting : {"vhf", "auto"}) {
+      for (const bool motion : {false, true}) {
+        for (const bool touchpad : {false, true}) {
+          SCOPED_TRACE(setting);
+          EXPECT_EQ(select_desired_profile(setting, LI_CTYPE_PS, 0, motion, touchpad), vhf_profile_e::dualsense);
+          EXPECT_TRUE(platf::vhf_gamepad::supports_controller_touch(setting, false));
+        }
+      }
+    }
+  }
+
+  TEST_F(VhfGamepadPolicyTest, FixedTouchlessProfilesDoNotAdvertiseControllerTouch) {
+    for (const auto setting : {"x360", "vhf_xbox", "vhf_xbox_one", "vhf_switch"}) {
+      SCOPED_TRACE(setting);
+      EXPECT_FALSE(platf::vhf_gamepad::supports_controller_touch(setting, false));
+      EXPECT_TRUE(platf::vhf_gamepad::supports_controller_touch(setting, true));
+    }
+  }
+
+  TEST_F(VhfGamepadPolicyTest, ExplicitPlaystationProfilesAdvertiseControllerTouch) {
+    for (const auto setting : {"ds4", "vhf_ds4", "vhf_ds5", "usbip_ds5"}) {
+      SCOPED_TRACE(setting);
+      EXPECT_TRUE(platf::vhf_gamepad::supports_controller_touch(setting, false));
+    }
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamControllerSelectionsAdvertiseControllerTouch) {
+    // Both Steam Controller pads are trackpads: the explicit profile, and a plain `vhf` that
+    // selects it for a Steam client, keep controller touch on whatever the DS4 preferences say.
+    EXPECT_TRUE(platf::vhf_gamepad::supports_controller_touch("vhf_steam", false));
+    for (const bool preferences : {false, true}) {
+      SCOPED_TRACE(preferences);
+      EXPECT_EQ(select_desired_profile("vhf", LI_CTYPE_STEAM, LI_CCAP_TOUCHPAD, preferences, preferences), vhf_profile_e::steam_controller);
+    }
+    EXPECT_TRUE(platf::vhf_gamepad::supports_controller_touch("vhf", false));
+  }
+
   TEST_F(VhfGamepadPolicyTest, UnknownClientUsesEnabledMotionPreference) {
     for (const auto capabilities : {LI_CCAP_ACCEL, LI_CCAP_GYRO}) {
       SCOPED_TRACE(capabilities);

@@ -24,6 +24,7 @@
 
 #ifdef _WIN32
   #include <windows.h>
+  #include "platform/windows/steam_discovery.h"
 #elif defined(__APPLE__)
   #include <fcntl.h>
   #include <sys/types.h>
@@ -812,12 +813,9 @@ namespace platf::steam {
   std::vector<fs::path> default_library_roots() {
     std::vector<fs::path> roots;
 #ifdef _WIN32
-    DWORD steam_path_size = 0;
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath", RRF_RT_REG_SZ, nullptr, nullptr, &steam_path_size) == ERROR_SUCCESS && steam_path_size > sizeof(wchar_t)) {
-      std::vector<wchar_t> steam_path(steam_path_size / sizeof(wchar_t));
-      if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath", RRF_RT_REG_SZ, nullptr, steam_path.data(), &steam_path_size) == ERROR_SUCCESS) {
-        add_root(roots, fs::path(steam_path.data()));
-      }
+    windows_discovery::discovery_scope scope;
+    for (auto &root : windows_discovery::registry_roots(scope)) {
+      add_root(roots, std::move(root));
     }
     if (!env("PROGRAMFILES(X86)").empty()) {
       add_root(roots, fs::path(env("PROGRAMFILES(X86)")) / "Steam");
@@ -873,6 +871,9 @@ namespace platf::steam {
   }
 
   std::vector<game_t> discover(const std::vector<fs::path> &requested_roots) {
+#ifdef _WIN32
+    windows_discovery::discovery_scope scope;
+#endif
 #if defined(__linux__)
     if (machine_host_mode()) {
       const auto catalog = machine_steam_catalog();
@@ -1045,6 +1046,9 @@ namespace platf::steam {
   }
 
   std::vector<game_t> discover_catalog(const std::vector<fs::path> &requested_roots) {
+#ifdef _WIN32
+    windows_discovery::discovery_scope scope;
+#endif
 #if defined(__linux__)
     if (machine_host_mode()) {
       const auto catalog = machine_steam_catalog();
