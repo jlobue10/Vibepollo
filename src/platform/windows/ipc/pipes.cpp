@@ -285,12 +285,10 @@ namespace platf::dxgi {
 
     while (GetTickCount64() < deadline) {
       winrt::file_handle pipe {
-        // SECURITY_IDENTIFICATION: the server (possibly a squatter on a user-creatable pipe
-        // name) may identify this client but never impersonate it; the host runs as SYSTEM.
-        // Every client connection gets it here; upstream's set_client_identification_only()
-        // (Playnite) requests the same flags per factory and so stays a subset of these.
+        // _client_security_flags defaults to identification-only (see pipes.h): every
+        // client connection gets it, Playnite's set_client_identification_only() included.
         CreateFileW(fullPipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                    FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION | _client_security_flags, nullptr)
+                    FILE_FLAG_OVERLAPPED | _client_security_flags, nullptr)
       };
 
       if (pipe) {

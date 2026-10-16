@@ -537,7 +537,10 @@ namespace platf::dxgi {
      */
     winrt::file_handle create_client_pipe(const std::wstring &fullPipeName) const;
 
-    DWORD _client_security_flags = 0;
+    // SECURITY_IDENTIFICATION by default: the server (possibly a squatter on a
+    // user-creatable pipe name) may identify this client but never impersonate it; the
+    // host runs as SYSTEM. set_client_identification_only() requests the same flags.
+    DWORD _client_security_flags = SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
     SecurityDescriptorBuilder _secdesc_builder;  // optional custom SD builder (Playnite can override)
   };
 

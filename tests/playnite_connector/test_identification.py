@@ -82,18 +82,19 @@ CONNECT
 int main() {
     platf::dxgi::NamedPipeFactory other;
     assert(other.create_client_pipe(L"other"));
-    assert(opens.back() == FILE_FLAG_OVERLAPPED);
+    // The fork hardens every client open to identification-only, not just Playnite's.
+    assert(opens.back() == (FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION));
     IpcClient playnite;
     assert(playnite.connect_to_plugin());
     assert(opens.size() == 3);
     assert(opens[1] == (FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION));
     assert(opens[2] == opens[1]);
     assert(other.create_client_pipe(L"other-again"));
-    assert(opens.back() == FILE_FLAG_OVERLAPPED);
+    assert(opens.back() == (FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION));
     failure = 5;
     assert(!playnite.connect_to_plugin());
     assert(opens.back() == (FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION));
-    std::cout << "\nPASS: Playnite control/data identification-only, helper default preserved, open failure rejected\n";
+    std::cout << "\nPASS: Playnite control/data identification-only, helper default hardened too, open failure rejected\n";
 }
 '''
 for marker, value in [('FIELD', field), ('NAMED_SETTER', named_setter),

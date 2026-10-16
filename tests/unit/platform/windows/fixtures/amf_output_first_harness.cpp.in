@@ -23,6 +23,13 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+// The fork routes packets through a shared per-channel state (src/stream_packet.h);
+// deliver_amf_frames() and encode_amf() take it instead of upstream's void *.
+namespace stream {
+  struct packet_channel_state_t {};
+  using packet_channel_t = std::shared_ptr<packet_channel_state_t>;
+}  // namespace stream
 using namespace std::chrono_literals;
 using namespace std::string_view_literals;
 
@@ -360,7 +367,7 @@ struct packet_raw_generic {
   std::vector<uint8_t> data;
   uint64_t index;
   bool idr;
-  void *channel_data = nullptr;
+  stream::packet_channel_t channel_data;
   bool after_ref_frame_invalidation = false;
   std::optional<model_clock::time_point> frame_timestamp, capture_timestamp, host_processing_timestamp;
   model_clock::time_point packet_enqueue_timestamp;
@@ -449,7 +456,7 @@ profile_result profile(int count, std::chrono::nanoseconds convert = 1ms) {
   s.device = std::make_unique<amf_encode_session_t::device_t>(&r.encoder);
   auto *native_session = &s;
   auto packets = std::make_shared<safe::mail_raw_t::queue<packet_t>>();
-  void *channel_data = nullptr;
+  stream::packet_channel_t channel_data;
   uint64_t frame_nr = 1;
   bool native_amf_runtime_failed = false;
   auto deliver_ready_amf_output = [&]() {
