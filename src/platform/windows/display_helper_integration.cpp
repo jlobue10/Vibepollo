@@ -33,6 +33,7 @@
   #include <display_device/windows/win_api_utils.h>
   #include <display_device/windows/win_display_device.h>
   #include <nlohmann/json.hpp>
+  #include "src/platform/windows/display_restore_policy.h"
 
   // sunshine
   #include "display_helper_integration.h"
@@ -1725,6 +1726,8 @@ namespace {
     std::wstring helper_args = legacy_engine ? L"--engine=legacy" : L"--engine=v2";
     helper_args += L" --log-level=";
     helper_args += std::to_wstring(std::clamp(config::sunshine.min_log_level, 0, 6));
+    helper_args += L" " + display_helper::restore_state_file_argument(
+      std::filesystem::path(platf::from_utf8(config::nvhttp.vibeshine_file_state)));
     statefile::save_display_helper_engine(legacy_engine ? "legacy" : "v2");
     BOOST_LOG(debug) << "Starting display helper: " << platf::to_utf8(helper.wstring())
                      << " " << platf::to_utf8(helper_args);
@@ -2081,6 +2084,9 @@ namespace {
         topo.push_back(std::move(group));
       }
       j["sunshine_topology"] = std::move(topo);
+      if (request.topology.refresh_settings_baseline) {
+        j["sunshine_refresh_settings_baseline"] = true;
+      }
     }
 
     if (!request.topology.monitor_positions.empty()) {

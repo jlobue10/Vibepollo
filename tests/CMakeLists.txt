@@ -204,6 +204,7 @@ if(NOT TARGET Boost::algorithm OR
    NOT TARGET Boost::log OR
    NOT TARGET Boost::log_setup OR
    NOT TARGET Boost::property_tree OR
+   NOT TARGET Boost::process OR
    NOT TARGET Boost::system)
     find_package(Boost CONFIG REQUIRED COMPONENTS
         algorithm
@@ -214,6 +215,7 @@ if(NOT TARGET Boost::algorithm OR
         log
         log_setup
         property_tree
+        process
         system)
 endif()
 find_package(OpenSSL REQUIRED)
@@ -588,6 +590,9 @@ sunshine_register_component(NAME test_component_display_device_policy TEST_SOURC
 sunshine_register_component(NAME test_component_process_policy TEST_SOURCE unit/test_process.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/app_catalog_policy.cpp"
     LINK_LIBRARIES Boost::crc)
+sunshine_register_component(NAME test_component_builtin_virtual_display TEST_SOURCE unit/test_builtin_virtual_display.cpp
+    INCLUDE_DIRECTORIES "${OPENSSL_INCLUDE_DIR}"
+    LINK_LIBRARIES nlohmann_json::nlohmann_json Boost::process sunshine_test_moonlight_headers)
 sunshine_register_component(NAME test_component_process_framegen_json TEST_SOURCE unit/test_process_framegen_json.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/app_framegen_config.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
@@ -694,6 +699,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                 "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_restore_task.py" "${CMAKE_CXX_COMPILER}")
         set_tests_properties(test_component_display_restore_task PROPERTIES LABELS "component")
+        add_test(NAME test_component_display_restore_policy
+            COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_restore_policy.py" "${CMAKE_CXX_COMPILER}")
+        set_tests_properties(test_component_display_restore_policy PROPERTIES LABELS "component")
         add_test(NAME test_component_display_helper_recovery
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                 "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_helper_recovery.py"
@@ -811,6 +820,8 @@ sunshine_register_component(NAME test_component_http_pairing_policy TEST_SOURCE 
 sunshine_register_component(NAME test_component_video_policy TEST_SOURCE unit/test_video.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/video_policy.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
+sunshine_register_component(NAME test_component_video_capture_source TEST_SOURCE unit/test_video_capture_source.cpp
+    LINK_LIBRARIES nlohmann_json::nlohmann_json)
 sunshine_register_component(NAME test_component_video_colorspace TEST_SOURCE unit/test_video_colorspace.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/video_colorspace.cpp"
                     "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/logging.cpp"
@@ -824,6 +835,11 @@ sunshine_register_component(NAME test_component_screen_saver_state TEST_SOURCE u
 if(SUNSHINE_TEST_ENABLE_COMPONENT AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     find_program(SUNSHINE_TEST_WGC_PYTHON_EXECUTABLE NAMES python3)
     if(SUNSHINE_TEST_WGC_PYTHON_EXECUTABLE)
+        add_test(NAME test_component_wgc_gpu_priority
+            COMMAND "${SUNSHINE_TEST_WGC_PYTHON_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/platform/windows/test_wgc_gpu_priority.py"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}" "${CMAKE_CXX_COMPILER}")
+        set_tests_properties(test_component_wgc_gpu_priority PROPERTIES LABELS "component" TIMEOUT 30)
         add_test(NAME test_component_wgc_capture_stop
             COMMAND "${SUNSHINE_TEST_WGC_PYTHON_EXECUTABLE}"
                 "${CMAKE_CURRENT_LIST_DIR}/unit/platform/windows/test_wgc_capture_stop.py"
@@ -888,6 +904,27 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND SUNSHINE_TEST_ENABLE_COMPONENT)
     target_link_libraries(test_linux_session_exec_policy PRIVATE "${LIBCAP_LIBRARIES}")
     add_test(NAME test_component_linux_session_exec_policy COMMAND test_linux_session_exec_policy)
     set_tests_properties(test_component_linux_session_exec_policy PROPERTIES LABELS "component")
+
+    add_executable(test_linux_touch_map_wait
+        "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_touch_map_wait.cpp")
+    target_link_libraries(test_linux_touch_map_wait PRIVATE PkgConfig::TEST_GIO Threads::Threads)
+    add_test(NAME test_component_linux_touch_map_wait COMMAND test_linux_touch_map_wait)
+    set_tests_properties(test_component_linux_touch_map_wait PROPERTIES LABELS "component" TIMEOUT 5)
+
+    pkg_check_modules(TEST_TOUCH_WAYLAND IMPORTED_TARGET wayland-client wayland-server)
+    if(TEST_TOUCH_WAYLAND_FOUND)
+        add_executable(test_linux_touch_output
+            "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_touch_output.c")
+        target_link_libraries(test_linux_touch_output PRIVATE PkgConfig::TEST_TOUCH_WAYLAND PkgConfig::TEST_GIO Threads::Threads)
+        add_test(NAME test_component_linux_touch_output COMMAND test_linux_touch_output)
+        set_tests_properties(test_component_linux_touch_output PROPERTIES LABELS "component" TIMEOUT 5)
+    endif()
+
+    add_executable(test_linux_touch_map
+        "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_touch_map.c")
+    target_link_libraries(test_linux_touch_map PRIVATE PkgConfig::TEST_GIO)
+    add_test(NAME test_component_linux_touch_map COMMAND test_linux_touch_map)
+    set_tests_properties(test_component_linux_touch_map PROPERTIES LABELS "component" TIMEOUT 15)
 
     add_executable(test_linux_display_power
         "${CMAKE_CURRENT_LIST_DIR}/unit/platform/linux/test_display_power.c")

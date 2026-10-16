@@ -60,6 +60,8 @@
   #endif
 
   #include "src/platform/windows/display_restore_task.h"
+  #include "src/platform/windows/display_restore_policy.h"
+  #include "tools/display_helper_paths.h"
   #include "src/platform/windows/legacy_restore_event_policy.h"
   #include "src/platform/windows/recovery_status.h"
 
@@ -5268,7 +5270,7 @@ namespace {
     }
 
     exec_action->put_Path(_bstr_t(exe_path));
-    exec_action->put_Arguments(_bstr_t(L"--restore"));
+    exec_action->put_Arguments(_bstr_t(display_helper_paths::restore_task_arguments().c_str()));
     exec_action->Release();
 
     // Without an interactive user (helper launched as SYSTEM after sign-out or
@@ -5611,6 +5613,7 @@ namespace {
     std::string json(reinterpret_cast<const char *>(payload.data()), payload.size());
     auto apply_deadline = std::chrono::steady_clock::time_point::max();
     bool wa_hdr_toggle = false;
+    bool refresh_settings_baseline = false;
     std::optional<std::string> requested_virtual_layout;
     std::vector<std::pair<std::string, display_device::Point>> monitor_position_overrides;
     std::vector<std::pair<std::string, std::pair<unsigned int, unsigned int>>> refresh_rate_overrides;
@@ -5662,6 +5665,12 @@ namespace {
         if (j.contains("sunshine_snapshot_exclude_devices")) {
           snapshot_exclude_devices = parse_snapshot_exclude_json_node(j["sunshine_snapshot_exclude_devices"]);
           j.erase("sunshine_snapshot_exclude_devices");
+        }
+        if (j.contains("sunshine_refresh_settings_baseline")) {
+          refresh_settings_baseline =
+            j["sunshine_refresh_settings_baseline"].is_boolean() &&
+            j["sunshine_refresh_settings_baseline"].get<bool>();
+          j.erase("sunshine_refresh_settings_baseline");
         }
         if (j.contains("sunshine_topology") && j["sunshine_topology"].is_array()) {
           display_device::ActiveTopology topo;
@@ -5767,6 +5776,12 @@ namespace {
       const bool task_created = create_restore_scheduled_task();
       BOOST_LOG(info) << "Scheduled task creation result: " << (task_created ? "SUCCESS" : "FAILED");
 
+      if (refresh_settings_baseline && sunshine_topology &&
+          cfg.m_device_prep != display_device::SingleDisplayConfiguration::DevicePreparation::EnsureOnlyDisplay &&
+          !state.controller.reset_persistence()) {
+        error_msg = "Helper failed to refresh the enlarged physical settings baseline";
+        return false;
+      }
       if (!state.controller.apply(cfg, sunshine_topology)) {
         error_msg = "Helper failed to apply requested display configuration";
         return false;
@@ -6163,6 +6178,10 @@ int run_legacy_helper(int argc, char *argv[]) {
     BOOST_LOG(info) << "Display helper started in restore mode (--restore flag)";
     dd_log_bridge().install();
     ServiceState state;
+    state.always_restore_from_golden.store(
+      display_helper::load_boot_restore_prefer_golden(
+        executable_config_search_roots(), search_roots, display_helper_paths::restore_state_file_from_command_line()),
+      std::memory_order_release);
     state.golden_path = active_snapshots.golden;
     state.golden_status_path = active_snapshots.golden_status;
     state.session_current_path = active_snapshots.session_current;
