@@ -14,7 +14,7 @@ function(sunshine_vhf_is_fixed_length_hex output_variable value expected_length)
 endfunction()
 
 # The virtual-gamepad package is independently versioned and released from
-# Nonary/libvirtualgamepad. The application consumes its immutable archive; it
+# jlobue10/libvirtualgamepad. The application consumes its immutable archive; it
 # must never build the UMDF driver while assembling a consumer MSI.
 #
 # The producer archive is intentionally unsigned. Production signing remains
@@ -43,16 +43,16 @@ set(SUNSHINE_VHF_GAMEPAD_REQUIRED_FILES
     manifest.json
     release-lock.json)
 set(SUNSHINE_VHF_GAMEPAD_DRIVER_DESTINATION "drivers/vhf-gamepad")
-set(SUNSHINE_VHF_GAMEPAD_REPOSITORY "Nonary/libvirtualgamepad")
-set(SUNSHINE_VHF_GAMEPAD_RELEASE_TAG "v0.1.0-beta.8" CACHE STRING
+set(SUNSHINE_VHF_GAMEPAD_REPOSITORY "jlobue10/libvirtualgamepad")
+set(SUNSHINE_VHF_GAMEPAD_RELEASE_TAG "v0.1.0-beta.152" CACHE STRING
     "Pinned immutable libvirtualgamepad release tag.")
 set(SUNSHINE_VHF_GAMEPAD_RELEASE_ASSET_SHA256
-    "f60953d69ec3e0ffdc193b9c19b5866ce3c020986947698466d83d9943d8a7d8" CACHE STRING
+    "c1b919654c7a6aef2d922bdd74b4fe15df0a2c0c1dcf6499f3aa927cd742a856" CACHE STRING
     "SHA-256 of the pinned libvirtualgamepad Windows x64 release archive.")
 set(SUNSHINE_VHF_GAMEPAD_SOURCE_REVISION
-    "cc8ee144d47c2a9944f65017fa4ca0f4d6023942" CACHE STRING
+    "3855de3750e293d05d30454c7b842d3b35be4f7c" CACHE STRING
     "Commit targeted by the pinned lightweight libvirtualgamepad release tag.")
-set(SUNSHINE_VHF_GAMEPAD_DRIVER_VER "10/16/2026,0.1.0.52" CACHE STRING
+set(SUNSHINE_VHF_GAMEPAD_DRIVER_VER "10/16/2026,0.1.0.222" CACHE STRING
     "DriverVer recorded by the pinned libvirtualgamepad release.")
 set(SUNSHINE_VHF_GAMEPAD_PROTOCOL_VERSION 2 CACHE STRING
     "Protocol version recorded by the pinned libvirtualgamepad release.")
