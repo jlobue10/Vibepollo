@@ -172,6 +172,15 @@ namespace input {
 
     int id;
 
+    // What the client's arrival event said this controller is (both 0 for a controller that
+    // arrived through a legacy state packet). They gate the Steam Controller attribute packet.
+    std::uint8_t arrival_type {};
+    std::uint16_t arrival_capabilities {};
+    // A Steam Controller attribute packet that arrived before the slot existed. The client sends
+    // it after the arrival event on the same reliable channel, so this should stay empty; holding
+    // one packet until the arrival says whether it is wanted costs nothing.
+    std::optional<platf::steam_controller_attributes_t> pending_steam_attributes;
+
     // When emulating the HOME button, we may need to artificially release the back button.
     // Afterwards, the gamepad state on sunshine won't match the state on Moonlight.
     // To prevent Sunshine from sending erroneous input data to the active application,
@@ -189,6 +198,9 @@ namespace input {
       free_gamepad(platf_input, gamepad.id);
       gamepad.id = -1;
     }
+    gamepad.arrival_type = 0;
+    gamepad.arrival_capabilities = 0;
+    gamepad.pending_steam_attributes.reset();
     gamepad.gamepad_state = {};
     gamepad.back_button_state = button_state_e::NONE;
   }
@@ -289,6 +301,8 @@ namespace input {
         return packet_size_bounds_t {sizeof(SS_CONTROLLER_MOTION_PACKET), sizeof(SS_CONTROLLER_MOTION_PACKET)};
       case SS_CONTROLLER_BATTERY_MAGIC:
         return packet_size_bounds_t {sizeof(SS_CONTROLLER_BATTERY_PACKET), sizeof(SS_CONTROLLER_BATTERY_PACKET)};
+      case SS_STEAM_CONTROLLER_ATTRIBUTES_MAGIC:
+        return packet_size_bounds_t {sizeof(SS_STEAM_CONTROLLER_ATTRIBUTES_PACKET), sizeof(SS_STEAM_CONTROLLER_ATTRIBUTES_PACKET)};
       default:
         return std::nullopt;
     }
@@ -527,6 +541,25 @@ namespace input {
       << "--end controller battery packet--"sv;
   }
 
+  /**
+   * @brief Prints a Steam Controller attributes packet.
+   * @param packet The attributes packet.
+   */
+  void print(PSS_STEAM_CONTROLLER_ATTRIBUTES_PACKET packet) {
+    BOOST_LOG(verbose)
+      << "--begin steam controller attributes packet--"sv << std::endl
+      << "controllerNumber ["sv << util::hex(packet->controllerNumber).to_string_view() << ']' << std::endl
+      << "transport ["sv << util::hex(packet->transport).to_string_view() << ']' << std::endl
+      << "validMask ["sv << util::hex(packet->validMask).to_string_view() << ']' << std::endl
+      << "firmwareBuildTime ["sv << util::hex(util::endian::little(packet->firmwareBuildTime)).to_string_view() << ']' << std::endl
+      << "bootloaderBuildTime ["sv << util::hex(util::endian::little(packet->bootloaderBuildTime)).to_string_view() << ']' << std::endl
+      << "boardRevision ["sv << util::hex(util::endian::little(packet->boardRevision)).to_string_view() << ']' << std::endl
+      << "capabilities ["sv << util::hex(util::endian::little(packet->capabilities)).to_string_view() << ']' << std::endl
+      << "radioFirmwareBuildTime ["sv << util::hex(util::endian::little(packet->radioFirmwareBuildTime)).to_string_view() << ']' << std::endl
+      << "dongleFirmwareBuildTime ["sv << util::hex(util::endian::little(packet->dongleFirmwareBuildTime)).to_string_view() << ']' << std::endl
+      << "--end steam controller attributes packet--"sv;
+  }
+
   void print(void *payload) {
     auto header = (PNV_INPUT_HEADER) payload;
 
@@ -574,6 +607,9 @@ namespace input {
         break;
       case SS_CONTROLLER_BATTERY_MAGIC:
         print((PSS_CONTROLLER_BATTERY_PACKET) payload);
+        break;
+      case SS_STEAM_CONTROLLER_ATTRIBUTES_MAGIC:
+        print((PSS_STEAM_CONTROLLER_ATTRIBUTES_PACKET) payload);
         break;
     }
   }
@@ -1060,6 +1096,21 @@ namespace input {
   }
 
   /**
+   * @brief Hands decoded Steam Controller attributes to the platform when the arrival allows it.
+   * @param gamepad The allocated slot the packet named.
+   * @param attributes The decoded packet; its global index is filled in here.
+   */
+  void forward_steam_attributes(const gamepad_t &gamepad, platf::steam_controller_attributes_t attributes) {
+    if (gamepad.arrival_type != LI_CTYPE_STEAM || !(gamepad.arrival_capabilities & LI_CCAP_STEAM_ATTRIBUTES)) {
+      BOOST_LOG(debug) << "Ignoring Steam Controller attributes for controller ["sv << (std::uint32_t) attributes.id.clientRelativeIndex
+                       << "]: not announced as a Steam Controller with LI_CCAP_STEAM_ATTRIBUTES"sv;
+      return;
+    }
+    attributes.id.globalIndex = gamepad.id;
+    platf::gamepad_attributes(platf_input, attributes);
+  }
+
+  /**
    * @brief Called to pass a controller arrival message to the platform backend.
    * @param input The input context pointer.
    * @param packet The controller arrival packet.
@@ -1074,10 +1125,13 @@ namespace input {
       return;
     }
 
-    if (input->gamepads[packet->controllerNumber].id >= 0) {
+    auto &gamepad = input->gamepads[packet->controllerNumber];
+    if (gamepad.id >= 0) {
       BOOST_LOG(warning) << "ControllerNumber already allocated ["sv << packet->controllerNumber << ']';
       return;
     }
+    gamepad.arrival_type = packet->type;
+    gamepad.arrival_capabilities = util::endian::little(packet->capabilities);
 
     platf::gamepad_arrival_t arrival {
       packet->type,
@@ -1097,8 +1151,73 @@ namespace input {
       return;
     }
 
-    input->gamepads[packet->controllerNumber].id = id;
+    gamepad.id = id;
     input->allocated_gamepads.fetch_or(1u << packet->controllerNumber, std::memory_order_relaxed);
+
+    if (gamepad.pending_steam_attributes) {
+      auto attributes = *gamepad.pending_steam_attributes;
+      gamepad.pending_steam_attributes.reset();
+      forward_steam_attributes(gamepad, attributes);
+    }
+  }
+
+  /**
+   * @brief Copies a NUL-padded attribute string out of a packet, keeping only printable ASCII.
+   * @details At most 15 characters are kept and the result is always NUL terminated; anything
+   *          outside 0x20..0x7E becomes '?'. The driver applies the same rule, so what reaches
+   *          the virtual device is exactly what is logged here.
+   */
+  void copy_steam_attribute_string(std::array<char, 16> &dst, const char (&src)[16]) {
+    dst.fill('\0');
+    for (std::size_t i = 0; i < dst.size() - 1 && src[i] != '\0'; ++i) {
+      const auto c = static_cast<unsigned char>(src[i]);
+      dst[i] = (c >= 0x20 && c <= 0x7E) ? static_cast<char>(c) : '?';
+    }
+  }
+
+  /**
+   * @brief Called to pass a Steam Controller attributes packet to the platform backend.
+   * @details The packet carries what the client read from the real controller at link setup
+   *          (firmware/bootloader build times, board revision, build id, serials). It is only
+   *          honoured for a controller the arrival event announced as LI_CTYPE_STEAM with
+   *          LI_CCAP_STEAM_ATTRIBUTES; a packet for anything else is dropped.
+   * @param input The input context pointer.
+   * @param packet The attributes packet.
+   */
+  void passthrough(std::shared_ptr<input_t> &input, PSS_STEAM_CONTROLLER_ATTRIBUTES_PACKET packet) {
+    if (!config::input.controller) {
+      return;
+    }
+
+    if (packet->controllerNumber >= input->gamepads.size()) {
+      BOOST_LOG(warning) << "ControllerNumber out of range ["sv << (std::uint32_t) packet->controllerNumber << ']';
+      return;
+    }
+
+    auto &gamepad = input->gamepads[packet->controllerNumber];
+
+    platf::steam_controller_attributes_t attributes {};
+    attributes.id = {gamepad.id, packet->controllerNumber};
+    attributes.transport = packet->transport;
+    attributes.valid_mask = packet->validMask;
+    attributes.firmware_build_time = util::endian::little(packet->firmwareBuildTime);
+    attributes.bootloader_build_time = util::endian::little(packet->bootloaderBuildTime);
+    attributes.board_revision = util::endian::little(packet->boardRevision);
+    attributes.capabilities = util::endian::little(packet->capabilities);
+    attributes.radio_firmware_build_time = util::endian::little(packet->radioFirmwareBuildTime);
+    attributes.dongle_firmware_build_time = util::endian::little(packet->dongleFirmwareBuildTime);
+    copy_steam_attribute_string(attributes.build_id, packet->buildId);
+    copy_steam_attribute_string(attributes.unit_serial, packet->unitSerial);
+    copy_steam_attribute_string(attributes.board_serial, packet->boardSerial);
+
+    if (gamepad.id < 0) {
+      // Before the arrival event nothing says what this controller is: hold the packet until
+      // the arrival allocates the slot (reset_gamepad drops it if the client removes the slot).
+      gamepad.pending_steam_attributes = attributes;
+      return;
+    }
+
+    forward_steam_attributes(gamepad, attributes);
   }
 
   /**
@@ -1848,6 +1967,9 @@ namespace input {
       case SS_CONTROLLER_BATTERY_MAGIC:
         passthrough(input, (PSS_CONTROLLER_BATTERY_PACKET) payload);
         break;
+      case SS_STEAM_CONTROLLER_ATTRIBUTES_MAGIC:
+        passthrough(input, (PSS_STEAM_CONTROLLER_ATTRIBUTES_PACKET) payload);
+        break;
     }
 
     bool schedule_next = false;
@@ -1891,6 +2013,7 @@ namespace input {
         case SS_CONTROLLER_TOUCH_MAGIC:
         case SS_CONTROLLER_MOTION_MAGIC:
         case SS_CONTROLLER_BATTERY_MAGIC:
+        case SS_STEAM_CONTROLLER_ATTRIBUTES_MAGIC:
           if (!(permission & crypto::PERM::input_controller)) {
             return;
           } else {
