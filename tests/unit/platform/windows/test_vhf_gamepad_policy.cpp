@@ -21,6 +21,13 @@ namespace {
   using platf::vhf_gamepad::decode_rumble_rgb;
   using platf::vhf_gamepad::decode_steam_haptic;
   using platf::vhf_gamepad::decode_steam_settings;
+  using platf::vhf_gamepad::accepts_steam_attributes;
+  using platf::vhf_gamepad::describe_steam_attributes;
+  using platf::vhf_gamepad::format_unix_time_utc;
+  using platf::vhf_gamepad::make_steam_attributes_request;
+  using platf::vhf_gamepad::steam_attributes_driver_mask;
+  using platf::vhf_gamepad::steam_attributes_request_t;
+  using platf::vhf_gamepad::steam_attributes_t;
   using platf::vhf_gamepad::steam_settings_t;
   using platf::vhf_gamepad::steam_haptic_t;
   using platf::vhf_gamepad::synthesize_steam_rumble;
@@ -851,6 +858,130 @@ namespace {
     EXPECT_EQ(
       describe_feedback_counters(lvg::feedback_counters {3, 0xFF, 254, 1}),
       "haptic_evicted=3 settings_evicted=255+ transitions_dropped=254 unknown_commands=1"
+    );
+  }
+
+  // The attributes one wired unit reported on 2026-10-05 (sc26_usb.h captures the same values as
+  // the virtual device's defaults, bar the build id the capture left as a placeholder).
+  steam_attributes_t captured_steam_attributes(std::uint8_t valid_mask = 0xFF) {
+    steam_attributes_t attributes {};
+    attributes.transport = LI_SCATTR_TRANSPORT_USB;
+    attributes.valid_mask = valid_mask;
+    attributes.firmware_build_time = 0x6A4D85E3;
+    attributes.bootloader_build_time = 0x68D2F92E;
+    attributes.board_revision = 0x4A;
+    attributes.capabilities = 0x0003;
+    attributes.radio_firmware_build_time = 0x6A4D0000;
+    attributes.dongle_firmware_build_time = 0x6A4E0000;
+    std::strcpy(attributes.build_id.data(), "26e1f7ef1955");
+    std::strcpy(attributes.unit_serial.data(), "FXA1234567890");
+    std::strcpy(attributes.board_serial.data(), "MXA0987654321");
+    return attributes;
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamAttributesPacketKeepsTheClientForksLayout) {
+    EXPECT_EQ(sizeof(SS_STEAM_CONTROLLER_ATTRIBUTES_PACKET), 84u);
+    EXPECT_EQ(sizeof(LI_STEAM_CONTROLLER_ATTRIBUTES), 76u);
+    EXPECT_EQ(steam_attributes_driver_mask, 0xCFu);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamAttributesAreAcceptedOnlyBySteamSlotsWhoseClientSendsThem) {
+    EXPECT_TRUE(accepts_steam_attributes(lvg::profile::steam_controller, LI_CCAP_STEAM_ATTRIBUTES));
+    EXPECT_TRUE(accepts_steam_attributes(lvg::profile::steam_controller, LI_CCAP_STEAM_ATTRIBUTES | LI_CCAP_STEAM_SETTINGS | LI_CCAP_GYRO));
+    EXPECT_FALSE(accepts_steam_attributes(lvg::profile::steam_controller, 0));
+    EXPECT_FALSE(accepts_steam_attributes(lvg::profile::steam_controller, LI_CCAP_STEAM_SETTINGS | LI_CCAP_STEAM_HAPTIC));
+    EXPECT_FALSE(accepts_steam_attributes(lvg::profile::dualsense, LI_CCAP_STEAM_ATTRIBUTES));
+    EXPECT_FALSE(accepts_steam_attributes(lvg::profile::xbox_series, LI_CCAP_STEAM_ATTRIBUTES));
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamAttributesRequestPassesTheDriverFieldsFlagsAndAllThrough) {
+    const auto request = make_steam_attributes_request(captured_steam_attributes());
+    // Radio and dongle build times are logged, never sent: the virtual device is wired.
+    EXPECT_EQ(request.flags, 0xCFu);
+    EXPECT_EQ(request.firmware_build_time, 0x6A4D85E3u);
+    EXPECT_EQ(request.bootloader_build_time, 0x68D2F92Eu);
+    EXPECT_EQ(request.board_revision, 0x4Au);
+    EXPECT_EQ(request.capabilities, 0x0003u);
+    EXPECT_STREQ(request.build_id.data(), "26e1f7ef1955");
+    EXPECT_STREQ(request.unit_serial.data(), "FXA1234567890");
+    EXPECT_STREQ(request.board_serial.data(), "MXA0987654321");
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamAttributesRequestZeroesEveryFieldTheClientDidNotRead) {
+    const auto request = make_steam_attributes_request(
+      captured_steam_attributes(LI_SCATTR_FIRMWARE_BUILD_TIME | LI_SCATTR_RADIO_FW_BUILD_TIME));
+    steam_attributes_request_t expected {};
+    expected.flags = LI_SCATTR_FIRMWARE_BUILD_TIME;
+    expected.firmware_build_time = 0x6A4D85E3;
+    EXPECT_EQ(request, expected);
+
+    // The serials flag without a readable serial reaches the driver as an empty string, which it
+    // answers by keeping its synthetic per-slot serial; the build id stays out entirely.
+    auto attributes = captured_steam_attributes(LI_SCATTR_SERIALS);
+    attributes.unit_serial.fill('\0');
+    attributes.board_serial.fill('\0');
+    const auto serials_only = make_steam_attributes_request(attributes);
+    EXPECT_EQ(serials_only.flags, static_cast<std::uint32_t>(LI_SCATTR_SERIALS));
+    EXPECT_EQ(serials_only.unit_serial[0], '\0');
+    EXPECT_EQ(serials_only.board_serial[0], '\0');
+    EXPECT_EQ(serials_only.build_id[0], '\0');
+    EXPECT_EQ(serials_only.firmware_build_time, 0u);
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamAttributesStringsKeepFifteenPrintableAsciiCharacters) {
+    auto attributes = captured_steam_attributes();
+    // No terminator in the whole field: the request still ends in one.
+    std::memcpy(attributes.build_id.data(), "0123456789abcdef", 16);
+    // Control, DEL and high bytes become '?', the terminator is honoured.
+    const char odd[16] = {'F', 'X', '\t', 'A', static_cast<char>(0x7F), static_cast<char>(0xC3), 'Z', '\0', 'x', 'x', 'x', 'x', 'x', 'x', 'x', 'x'};
+    std::memcpy(attributes.unit_serial.data(), odd, 16);
+    attributes.board_serial.fill('\0');
+
+    const auto request = make_steam_attributes_request(attributes);
+    EXPECT_EQ(std::string(request.build_id.data()), "0123456789abcde");
+    EXPECT_EQ(request.build_id[15], '\0');
+    EXPECT_EQ(std::string(request.unit_serial.data()), "FX?A??Z");
+    EXPECT_EQ(request.board_serial[0], '\0');
+  }
+
+  TEST_F(VhfGamepadPolicyTest, UnixBuildTimesFormatAsUtcWithoutALocale) {
+    EXPECT_EQ(format_unix_time_utc(0x6A4D85E3), "2026-07-07 23:04:03 UTC");
+    EXPECT_EQ(format_unix_time_utc(0x68D2F92E), "2025-09-23 19:46:54 UTC");
+    EXPECT_EQ(format_unix_time_utc(0), "1970-01-01 00:00:00 UTC");
+    EXPECT_EQ(format_unix_time_utc(1000000000), "2001-09-09 01:46:40 UTC");
+    EXPECT_EQ(format_unix_time_utc(0xFFFFFFFF), "2106-02-07 06:28:15 UTC");
+  }
+
+  TEST_F(VhfGamepadPolicyTest, SteamAttributesDescribeWhatSteamWillSee) {
+    EXPECT_EQ(
+      describe_steam_attributes(captured_steam_attributes()),
+      "real controller firmware build 2026-07-07 23:04:03 UTC (0x6a4d85e3), bootloader 2025-09-23 19:46:54 UTC (0x68d2f92e), "
+      "board rev 74, build id 26e1f7ef1955, serial FXA1234567890, via usb, "
+      "radio firmware build 2026-07-07 13:32:48 UTC (0x6a4d0000), dongle firmware build 2026-07-08 07:45:04 UTC (0x6a4e0000)"
+    );
+
+    auto partial = captured_steam_attributes(LI_SCATTR_FIRMWARE_BUILD_TIME | LI_SCATTR_BUILD_ID);
+    partial.transport = LI_SCATTR_TRANSPORT_BLE;
+    EXPECT_EQ(
+      describe_steam_attributes(partial),
+      "real controller firmware build 2026-07-07 23:04:03 UTC (0x6a4d85e3), bootloader unknown, "
+      "board rev unknown, build id 26e1f7ef1955, serial unknown, via ble"
+    );
+
+    auto empty = captured_steam_attributes(0);
+    empty.transport = LI_SCATTR_TRANSPORT_PUCK;
+    EXPECT_EQ(
+      describe_steam_attributes(empty),
+      "real controller firmware build unknown, bootloader unknown, board rev unknown, build id unknown, serial unknown, via puck"
+    );
+
+    // A flagged but empty serial reads as unknown; an unknown transport is shown by number.
+    auto blank_serial = captured_steam_attributes(LI_SCATTR_SERIALS);
+    blank_serial.unit_serial.fill('\0');
+    blank_serial.transport = 7;
+    EXPECT_EQ(
+      describe_steam_attributes(blank_serial),
+      "real controller firmware build unknown, bootloader unknown, board rev unknown, build id unknown, serial unknown, via transport 7"
     );
   }
 }  // namespace
