@@ -4,6 +4,8 @@
 The producer callback and reinit admission block are extracted verbatim from
 video.cpp. Leases, queues and image events are real; GPU/display calls are faked.
 Requires C++23 and nlohmann/json (AUDIT_JSON_INCLUDE may override its location).
+Linux runs with ASan/UBSan; Windows runs the same assertions without sanitizers
+because the CI MinGW toolchain does not provide their runtime libraries.
 """
 import os
 from pathlib import Path
@@ -173,11 +175,12 @@ int main() {
 '''
 with tempfile.TemporaryDirectory(prefix='capture-consumer-handoff-') as temp:
     work = Path(temp)
+    binary = work / ('test.exe' if os.name == 'nt' else 'test')
     (work / 'test.cpp').write_text(program)
-    command = [os.environ.get('CXX', 'g++'), '-std=c++23', '-pthread',
-               '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-               '-I', str(ROOT)]
+    command = [os.environ.get('CXX', 'g++'), '-std=c++23', '-pthread', '-I', str(ROOT)]
+    if os.name != 'nt':
+        command += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
     if os.environ.get('AUDIT_JSON_INCLUDE'):
         command += ['-I', os.environ['AUDIT_JSON_INCLUDE']]
-    subprocess.run(command + [str(work / 'test.cpp'), '-o', str(work / 'test')], check=True)
-    raise SystemExit(subprocess.run([str(work / 'test')], timeout=10).returncode)
+    subprocess.run(command + [str(work / 'test.cpp'), '-o', str(binary)], check=True)
+    raise SystemExit(subprocess.run([str(binary)], timeout=10).returncode)
