@@ -3302,9 +3302,10 @@ namespace video {
           while (auto pending_context = capture_ctx_queue->pop(0ms)) {
             capture_ctxs.emplace_back(std::move(*pending_context));
           }
-        } else if (capture_ctxs.empty()) {
-          return false;
         }
+        // An arriving encoder can already hold the shared source lease without
+        // having queued its context yet. Only final lease release stops the
+        // producer queue; an empty consumer list is a temporary handoff gap.
 
         if (auto requested = switch_display_event->view_if_newer(switch_display_generation)) {
           pending_switch_output = video::policy::select_manual_display_output(
@@ -3403,13 +3404,25 @@ namespace video {
             }
 #endif
 
+            std::erase_if(capture_ctxs, [](const auto &ctx) {
+              return !ctx.images->running();
+            });
             while (auto pending_context = capture_ctx_queue->pop(0ms)) {
               if (pending_context->images->running()) {
                 capture_ctxs.emplace_back(std::move(*pending_context));
               }
             }
-            if (capture_ctxs.empty()) {
-              return;
+            // A shared source may have a new lease whose encoder has not
+            // submitted its context yet. Wait for that context or queue stop
+            // instead of terminating the source underneath the new session.
+            while (capture_ctxs.empty()) {
+              auto pending_context = capture_ctx_queue->pop();
+              if (!pending_context) {
+                return;
+              }
+              if (pending_context->images->running()) {
+                capture_ctxs.emplace_back(std::move(*pending_context));
+              }
             }
 
             std::size_t display_retry_failures = 0;
