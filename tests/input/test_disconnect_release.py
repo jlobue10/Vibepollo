@@ -265,6 +265,17 @@ int main(int argc, char **argv) {
     p.activeGamepadMask=0; passthrough(a, &p); assert(!has_gamepad(a));
     p.activeGamepadMask=2; passthrough(a, &p); assert(has_gamepad(a));
     disconnect(a); assert(!has_gamepad(a));
+  } else if (test == "pending_attributes_removed_with_mask") {
+    // Attributes may precede arrival, so a removed slot can have no platform ID
+    // and no failure flag yet. Another controller's inventory still retires it.
+    a->gamepads[1].pending_steam_attributes = 111;
+    a->gamepads[2].pending_steam_attributes = 222;
+    controller_packet p {0, 5}; passthrough(a, &p);
+    assert(!a->gamepads[1].pending_steam_attributes);
+    assert(a->gamepads[2].pending_steam_attributes == 222);
+    assert(platf::freed_gamepads.empty());
+    p.activeGamepadMask = 1; passthrough(a, &p);
+    assert(!a->gamepads[2].pending_steam_attributes);
   } else if (test == "home_hold_survives_input") {
     controller_packet p {0, 1, platf::BACK};passthrough(a,&p);task_pool.fire();
     p.leftStickX=1234;passthrough(a,&p);
@@ -318,10 +329,23 @@ int main(int argc, char **argv) {
     assert(!retained->client_context);
     assert(platf::touch_cancels == 1 && platf::pen_cancels == 1 && platf::client_input_t::destroyed == 1);
     disconnect(a); assert(platf::client_input_t::destroyed == 1);
+  } else if (test == "legacy_exhausted_ids_retire_attributes") {
+    a->gamepads[0].pending_steam_attributes = 123;
+    gamepadMask.set();
+    controller_packet p {0, 1}; passthrough(a, &p);
+    assert(a->gamepads[0].alloc_failed && !a->gamepads[0].pending_steam_attributes);
+    gamepadMask.reset(9); passthrough(a, &p);
+    assert(platf::alloc_calls == 0 && a->gamepads[0].id < 0);
+    p.activeGamepadMask = 0; passthrough(a, &p);
+    assert(!a->gamepads[0].alloc_failed);
+    p.activeGamepadMask = 1; passthrough(a, &p);
+    assert(platf::alloc_calls == 1 && a->gamepads[0].id == 9);
   } else if (test == "failed_allocation_not_retried_per_packet") {
+    a->gamepads[0].pending_steam_attributes = 123;
     platf::alloc_result = -1;
     controller_packet p {0, 1}; passthrough(a, &p); passthrough(a, &p); passthrough(a, &p);
     assert(platf::alloc_calls == 1 && a->gamepads[0].id == -1 && a->gamepads[0].alloc_failed);
+    assert(!a->gamepads[0].pending_steam_attributes);
     p.activeGamepadMask = 0; passthrough(a, &p);
     assert(!a->gamepads[0].alloc_failed && platf::alloc_calls == 1);
     platf::alloc_result = 0; p.activeGamepadMask = 1; passthrough(a, &p);
