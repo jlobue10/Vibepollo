@@ -1525,6 +1525,8 @@ namespace input {
     if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0 && !gamepad.alloc_failed) {
       auto id = alloc_id(gamepadMask);
       if (id < 0) {
+        gamepad.alloc_failed = true;
+        gamepad.pending_steam_attributes.reset();
         return;
       }
 
@@ -1533,6 +1535,7 @@ namespace input {
         // Every state packet would otherwise repeat the attempt (a driver connect, enumeration
         // and handshake on the single input worker) and its error lines.
         gamepad.alloc_failed = true;
+        gamepad.pending_steam_attributes.reset();
         BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber
                            << "] could not be allocated; ignoring its input until the client removes and re-adds it"sv;
         return;
