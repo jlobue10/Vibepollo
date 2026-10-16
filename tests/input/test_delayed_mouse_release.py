@@ -31,6 +31,7 @@ PRELUDE = r'''
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <deque>
 #include <functional>
 #include <iostream>
@@ -118,6 +119,9 @@ enum class button_state_e { NONE, DOWN, UP };
 struct gamepad_t {
   int id = -1;
   bool alloc_failed = false;
+  std::uint8_t arrival_type = 0;
+  std::uint16_t arrival_capabilities = 0;
+  std::optional<int> pending_steam_attributes;
   worker_t::task_id_t back_timeout_id = nullptr;
   worker_t::task_id_t home_timeout_id = nullptr;
   uint64_t home_generation = 0;

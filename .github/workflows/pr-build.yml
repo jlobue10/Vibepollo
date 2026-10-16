@@ -36,10 +36,11 @@ jobs:
           python3 tests/input/test_vhf_fallback.py
           python3 tests/input/test_netfloat_validation.py
           python3 tests/input/test_vigem_touch_pointers.py
-      - name: Check SC2026 client-to-driver click fidelity
+      - name: Check SC2026 client-to-driver click fidelity and the firmware attribute relay
         run: |
           git submodule update --init --depth 1 third-party/moonlight-common-c third-party/libvirtualgamepad
           python3 tests/input/test_sc26_buttons.py
+          python3 tests/input/test_steam_attributes_forward.py
       - name: Check video FEC wire counts and parity recovery
         run: |
           git submodule update --init --depth 1 third-party/nanors
