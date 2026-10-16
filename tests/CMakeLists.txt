@@ -716,6 +716,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                 "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_restore_policy.py" "${CMAKE_CXX_COMPILER}"
                 "${_display_restore_policy_include_file}")
         set_tests_properties(test_component_display_restore_policy PROPERTIES LABELS "component")
+        add_test(NAME test_component_legacy_boot_primary_restore
+            COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_legacy_boot_primary_restore.py"
+                --repo "${SUNSHINE_TEST_REPOSITORY_ROOT}" --compiler "${CMAKE_CXX_COMPILER}")
+        set_tests_properties(test_component_legacy_boot_primary_restore PROPERTIES LABELS "component")
         add_test(NAME test_component_display_helper_recovery
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                 "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_helper_recovery.py"
@@ -844,6 +849,7 @@ sunshine_register_component(NAME test_component_video_policy TEST_SOURCE unit/te
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/video_policy.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
 sunshine_register_component(NAME test_component_video_capture_source TEST_SOURCE unit/test_video_capture_source.cpp
+    PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/video_policy.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
 sunshine_register_component(NAME test_component_video_colorspace TEST_SOURCE unit/test_video_colorspace.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/video_colorspace.cpp"
@@ -858,6 +864,12 @@ sunshine_register_component(NAME test_component_screen_saver_state TEST_SOURCE u
 if(SUNSHINE_TEST_ENABLE_COMPONENT AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     find_program(SUNSHINE_TEST_WGC_PYTHON_EXECUTABLE NAMES python3)
     if(SUNSHINE_TEST_WGC_PYTHON_EXECUTABLE)
+        add_test(NAME test_component_video_capture_demand
+            COMMAND "${SUNSHINE_TEST_WGC_PYTHON_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_video_capture_demand.py"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}" "${CMAKE_CXX_COMPILER}"
+                --include-directory "$<TARGET_PROPERTY:nlohmann_json::nlohmann_json,INTERFACE_INCLUDE_DIRECTORIES>")
+        set_tests_properties(test_component_video_capture_demand PROPERTIES LABELS "component" TIMEOUT 60)
         add_test(NAME test_component_wgc_gpu_priority
             COMMAND "${SUNSHINE_TEST_WGC_PYTHON_EXECUTABLE}"
                 "${CMAKE_CURRENT_LIST_DIR}/unit/platform/windows/test_wgc_gpu_priority.py"
