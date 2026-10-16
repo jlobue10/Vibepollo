@@ -814,6 +814,12 @@ namespace platf::steam {
     std::vector<fs::path> roots;
 #ifdef _WIN32
     windows_discovery::discovery_scope scope;
+    // Machine registration and folder fallbacks still lead to user-controlled
+    // Steam metadata. Never inspect them using the service identity after a
+    // missing/ambiguous desktop or a failed token acquisition.
+    if (!scope.user_hive()) {
+      return roots;
+    }
     for (auto &root : windows_discovery::registry_roots(scope)) {
       add_root(roots, std::move(root));
     }
@@ -873,6 +879,9 @@ namespace platf::steam {
   std::vector<game_t> discover(const std::vector<fs::path> &requested_roots) {
 #ifdef _WIN32
     windows_discovery::discovery_scope scope;
+    if (!scope.user_hive()) {
+      return {};
+    }
 #endif
 #if defined(__linux__)
     if (machine_host_mode()) {
@@ -1048,6 +1057,9 @@ namespace platf::steam {
   std::vector<game_t> discover_catalog(const std::vector<fs::path> &requested_roots) {
 #ifdef _WIN32
     windows_discovery::discovery_scope scope;
+    if (!scope.user_hive()) {
+      return {};
+    }
 #endif
 #if defined(__linux__)
     if (machine_host_mode()) {

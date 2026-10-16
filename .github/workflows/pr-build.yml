@@ -68,6 +68,8 @@ jobs:
         run: python3 tests/input/test_ipc_pipe_contract.py
       - name: Check malformed app catalog entry recovery
         run: python3 tests/input/test_app_catalog_error.py
+      - name: Check Steam discovery refuses scans without a desktop identity
+        run: python3 tests/unit/platform/windows/test_steam_discovery_admission.py
       - name: Check mouse release ownership and Windows mouse mapping
         run: |
           python3 tests/input/test_delayed_mouse_release.py
