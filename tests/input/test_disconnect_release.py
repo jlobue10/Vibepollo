@@ -265,6 +265,17 @@ int main(int argc, char **argv) {
     p.activeGamepadMask=0; passthrough(a, &p); assert(!has_gamepad(a));
     p.activeGamepadMask=2; passthrough(a, &p); assert(has_gamepad(a));
     disconnect(a); assert(!has_gamepad(a));
+  } else if (test == "pending_attributes_removed_with_mask") {
+    // Attributes may precede arrival, so a removed slot can have no platform ID
+    // and no failure flag yet. Another controller's inventory still retires it.
+    a->gamepads[1].pending_steam_attributes = 111;
+    a->gamepads[2].pending_steam_attributes = 222;
+    controller_packet p {0, 5}; passthrough(a, &p);
+    assert(!a->gamepads[1].pending_steam_attributes);
+    assert(a->gamepads[2].pending_steam_attributes == 222);
+    assert(platf::freed_gamepads.empty());
+    p.activeGamepadMask = 1; passthrough(a, &p);
+    assert(!a->gamepads[2].pending_steam_attributes);
   } else if (test == "home_hold_survives_input") {
     controller_packet p {0, 1, platf::BACK};passthrough(a,&p);task_pool.fire();
     p.leftStickX=1234;passthrough(a,&p);
