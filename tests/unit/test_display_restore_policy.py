@@ -11,6 +11,13 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 compiler = sys.argv[1] if len(sys.argv) > 1 else "g++"
+# Optional: a file listing include directories (one per line), written by CMake from the
+# Boost include closure; a FetchContent Boost is not on the compiler's default path.
+include_arguments = []
+if len(sys.argv) > 2:
+    for include in Path(sys.argv[2]).read_text().splitlines():
+        if include:
+            include_arguments.extend(["-I", include])
 
 
 def function(source, signature):
@@ -192,6 +199,6 @@ int main(int argc, char **argv) {
 
 ''')
     binary = directory / "test"
-    subprocess.run([compiler, "-std=c++20", "-Wall", "-Wextra", "-Werror", "-I", str(root),
+    subprocess.run([compiler, "-std=c++20", "-Wall", "-Wextra", "-Werror", "-I", str(root), *include_arguments,
                     str(source), str(root / "src/state_storage_policy.cpp"), "-o", str(binary)], check=True)
     subprocess.run([str(binary), str(directory)], check=True)
