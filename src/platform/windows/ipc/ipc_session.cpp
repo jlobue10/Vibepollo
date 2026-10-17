@@ -170,9 +170,13 @@ namespace platf::dxgi {
         }
       }
 
-      if (_pipe) {
-        _pipe->stop();
-        _pipe.reset();
+      {
+        const std::scoped_lock lock(_pipe_mutex);
+        if (_pipe) {
+          BOOST_LOG(debug) << "WGC IPC teardown: host stopping control pipe";
+          _pipe->stop();
+          _pipe.reset();
+        }
       }
 
       if (_frame_metadata) {
@@ -246,10 +250,14 @@ namespace platf::dxgi {
 
     // Reset success flag before attempting
     _initialized = false;
+    _sent_cursor_visible.reset();
 
-    if (_pipe) {
-      _pipe->stop();
-      _pipe.reset();
+    {
+      const std::scoped_lock lock(_pipe_mutex);
+      if (_pipe) {
+        _pipe->stop();
+        _pipe.reset();
+      }
     }
     if (_frame_metadata) {
       UnmapViewOfFile(_frame_metadata);
@@ -354,6 +362,9 @@ namespace platf::dxgi {
     config_data.min_update_interval_100ns = wgc_min_update_interval_100ns(_config);
     config_data.target_fps = wgc_target_fps(_config);
     config_data.flags = wgc_ipc_flags(_config);
+    if (!_cursor_visible) {
+      config_data.flags |= WGC_IPC_FLAG_HIDE_CURSOR;
+    }
     config_data.initial_frame_buffer_size = wgc_initial_frame_buffer_size();
     config_data.max_frame_buffer_size = wgc_max_frame_buffer_size(_config);
     config_data.activity_admission_fps = _activity_admission_fps.load(std::memory_order_relaxed);
@@ -482,9 +493,12 @@ namespace platf::dxgi {
     }
 
     auto cleanup_on_failure = util::fail_guard([this]() {
-      if (_pipe) {
-        _pipe->stop();
-        _pipe.reset();
+      {
+        const std::scoped_lock lock(_pipe_mutex);
+        if (_pipe) {
+          _pipe->stop();
+          _pipe.reset();
+        }
       }
       if (_frame_metadata) {
         UnmapViewOfFile(_frame_metadata);
@@ -499,18 +513,56 @@ namespace platf::dxgi {
       }
     });
 
-    _pipe = std::make_unique<AsyncNamedPipe>(std::move(control_pipe));
-
-    if (!_pipe->start(on_message, on_error, on_broken_pipe)) {
-      BOOST_LOG(error) << "Failed to start AsyncNamedPipe for helper communication";
-      return;
+    {
+      const std::scoped_lock lock(_pipe_mutex);
+      _pipe = std::make_unique<AsyncNamedPipe>(std::move(control_pipe));
+      if (!_pipe->start(on_message, on_error, on_broken_pipe)) {
+        BOOST_LOG(error) << "Failed to start AsyncNamedPipe for helper communication";
+        return;
+      }
     }
 
     cleanup_on_failure.disable();
-    _initialized = true;
-    if (_activity_admission_fps.load(std::memory_order_relaxed) != config_data.activity_admission_fps) {
-      (void) set_activity_admission_fps(_activity_admission_fps.load(std::memory_order_relaxed));
+    _sent_cursor_visible = (config_data.flags & WGC_IPC_FLAG_HIDE_CURSOR) == 0;
+    {
+      const std::scoped_lock lock(_pipe_mutex);
+      _initialized = true;
+      const auto desired_fps = _activity_admission_fps.load(std::memory_order_relaxed);
+      if (desired_fps != config_data.activity_admission_fps) {
+        const activity_admission_data_t update {
+          .magic = WGC_ACTIVITY_ADMISSION_MESSAGE_MAGIC,
+          .admission_fps = desired_fps,
+        };
+        if (!_pipe || !_pipe->send(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&update), sizeof(update)))) {
+          _force_reinit = true;
+        }
+      }
     }
+  }
+
+  bool ipc_session_t::set_cursor_visible(const bool visible) {
+    _cursor_visible = visible;
+    if (stop_requested()) {
+      return false;
+    }
+    if (!_initialized) {
+      return true;  // initialize_if_needed() includes the latest state in config.
+    }
+    if (_sent_cursor_visible == visible) {
+      return true;
+    }
+
+    const cursor_visibility_data_t update {
+      .magic = WGC_CURSOR_VISIBILITY_MESSAGE_MAGIC,
+      .visible = visible ? 1u : 0u,
+    };
+    const std::scoped_lock lock(_pipe_mutex);
+    if (!_pipe || !_pipe->send(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&update), sizeof(update)))) {
+      _force_reinit = true;
+      return false;
+    }
+    _sent_cursor_visible = visible;
+    return true;
   }
 
   bool ipc_session_t::set_activity_admission_fps(const int fps) {
@@ -518,18 +570,23 @@ namespace platf::dxgi {
       return false;
     }
     _activity_admission_fps.store(fps, std::memory_order_relaxed);
-    if (!_pipe || !_initialized) {
-      return true;
-    }
-    if (!_pipe->is_connected()) {
+    if (stop_requested()) {
       return false;
+    }
+
+    const std::scoped_lock lock(_pipe_mutex);
+    if (!_initialized) {
+      return true;
     }
 
     const activity_admission_data_t update {
       .magic = WGC_ACTIVITY_ADMISSION_MESSAGE_MAGIC,
       .admission_fps = fps,
     };
-    _pipe->send(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&update), sizeof(update)));
+    if (!_pipe || !_pipe->send(std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(&update), sizeof(update)))) {
+      _force_reinit = true;
+      return false;
+    }
     return true;
   }
 
@@ -655,6 +712,8 @@ namespace platf::dxgi {
   capture_e ipc_session_t::lock_frame(winrt::com_ptr<ID3D11Texture2D> &gpu_tex_out, uint64_t &frame_qpc_out) {
     // Additional validation: ensure required resources are available
     if (!_shared_texture || !_keyed_mutex) {
+      BOOST_LOG(debug) << "Capture restart request: source=wgc-ipc reason=missing-frame-resources texture="
+                       << static_cast<bool>(_shared_texture) << " mutex=" << static_cast<bool>(_keyed_mutex);
       _force_reinit = true;
       _initialized = false;
       return capture_e::reinit;

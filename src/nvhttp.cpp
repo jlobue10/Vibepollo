@@ -841,6 +841,18 @@ namespace nvhttp {
 
 #ifdef _WIN32
   namespace {
+    bool display_helper_session_available() {
+      if (platf::is_running_as_system()) {
+        return true;
+      }
+      HANDLE user_token = platf::retrieve_users_token(false);
+      const bool available = (user_token != nullptr);
+      if (user_token) {
+        CloseHandle(user_token);
+      }
+      return available;
+    }
+
     bool has_active_virtual_display() {
       const auto virtual_displays = VDISPLAY::enumerateVirtualDisplays();
       return std::any_of(
@@ -1604,7 +1616,7 @@ namespace nvhttp {
       }
 
       // Snapshot current display state BEFORE any display enumeration.
-      // queryDisplayConfig(QueryType::All) in output_exists() and other calls can activate
+      // queryDisplayConfig(QueryType::All) calls during display discovery can activate
       // external dummy plugs, which would pollute the snapshot used for session restore.
       if (no_active_sessions) {
         if (!display_helper_integration::snapshot_current_display_state(
@@ -1633,15 +1645,46 @@ namespace nvhttp {
         disable_virtual_display_request();
       }
 
-      if (!request_virtual_display && !requested_output_name.empty()) {
-        if (!display_device::output_exists(requested_output_name)) {
+      bool preserve_requested_output = false;
+      if (!request_virtual_display) {
+        const auto output_state = display_device::get_output_state(requested_output_name);
+        preserve_requested_output = output_state == display_device::output_state_e::active ||
+                                    output_state == display_device::output_state_e::unknown;
+        if (!requested_output_name.empty() && output_state == display_device::output_state_e::missing) {
           BOOST_LOG(warning) << "Requested display '" << requested_output_name
                              << "' not found; initializing virtual display instead.";
           if (!has_app_output_override) {
             request_virtual_display = true;
           }
+        } else if (output_state == display_device::output_state_e::inactive) {
+          // The output exists but is currently inactive (no \\\\.\\DISPLAY# assigned). If we cannot
+          // run the display helper to activate it (no signed-in user session), fall back to a
+          // virtual display so capture can still start.
+          if (no_active_sessions && !display_helper_session_available()) {
+            BOOST_LOG(warning) << "Requested display '" << requested_output_name
+                               << "' is present but inactive and cannot be activated without a signed-in user; initializing virtual display instead.";
+            if (!has_app_output_override) {
+              request_virtual_display = true;
+            }
+          } else {
+            const auto preparation = launch_session->dd_config_option_override.value_or(config::video.dd.configuration_option);
+            using preparation_e = config::video_t::dd_t::config_option_e;
+            // A helper session alone does not activate an output: VerifyOnly
+            // preserves its inactive topology, and disabled sends no APPLY.
+            preserve_requested_output = preparation == preparation_e::ensure_active ||
+                                        preparation == preparation_e::ensure_primary ||
+                                        preparation == preparation_e::ensure_only_display;
+            if (preserve_requested_output) {
+              BOOST_LOG(info) << "Requested display '" << requested_output_name
+                              << "' is present but inactive; attempting activation via display helper.";
+            } else {
+              BOOST_LOG(info) << "Requested display '" << requested_output_name
+                              << "' is present but inactive; display preparation policy does not activate it.";
+            }
+          }
         }
       }
+
       if (is_input_only) {
         disable_virtual_display_request();
       } else {
@@ -1861,11 +1904,10 @@ namespace nvhttp {
           }
         };
 
-        // A per-app physical output override must never suppress this fallback:
-        // should_auto_enable_virtual_display() only returns true when no capturable
-        // physical display is active at all, so the pinned output cannot exist and the
-        // session would otherwise land on the generic temporary probe display.
-        if (!request_virtual_display && VDISPLAY::should_auto_enable_virtual_display()) {
+        // Preserve a usable selected output, including an existing VDD. Only
+        // release an unsatisfiable app pin when the existing headless fallback
+        // is actually needed; keep Apollo's input-only and resume ownership.
+        if (!request_virtual_display && !preserve_requested_output && VDISPLAY::should_auto_enable_virtual_display()) {
           BOOST_LOG(info) << "No physical monitors detected. Automatically enabling virtual display.";
           request_virtual_display = true;
           if (has_app_output_override) {
@@ -2353,7 +2395,14 @@ namespace nvhttp {
       };
       const auto parse_state = [](nlohmann::json &tree) -> std::optional<parsed_state_t> {
         try {
-          if (!state_policy::normalize_snapshot(tree)) return std::nullopt;
+          // Named records retain their UUID, permission mask and client commands;
+          // a matching legacy alias must never create another authorized client.
+          if (!state_policy::normalize_snapshot(tree, [](const std::string &pem) {
+                return exact_certificate_identity(crypto::x509(pem));
+              })) {
+            BOOST_LOG(error) << "Vibepollo pairing state contains invalid or duplicate client certificates.";
+            return std::nullopt;
+          }
           const auto &root = tree["root"];
           client_t client;
           client.remote_display_layout_json = root.value("remote_display_layout", client.remote_display_layout_json);
@@ -6295,6 +6344,12 @@ namespace nvhttp {
     }
 
     const int updated = stream::set_bitrate_for_sessions(verified_client->uuid, applied);
+    if (updated < 0) {
+      tree.put("root.bitrate", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Requested bitrate cannot fit the configured video pacing ceiling with FEC and packet headers");
+      return;
+    }
     if (updated <= 0) {
       BOOST_LOG(warning) << "Bitrate change requested by ["sv << verified_client->name << "] but no matching active session was found"sv;
       tree.put("root.bitrate", 0);
@@ -6898,7 +6953,7 @@ namespace nvhttp {
     const auto monitor_generation = config::video.remote_monitor_disconnect_on_client_disconnect ?
                                       remote_owner_generation(uuid, remote_session::role_e::monitor) :
                                       std::nullopt;
-    const auto disconnect = rtsp_stream::disconnect_client_sessions_with_result(uuid);
+    const auto disconnect = rtsp_stream::disconnect_client_sessions_with_result(uuid, true);
     // The result is the pending-registry removal linearization point. Never
     // look up the current Input owner here: a newer generation may have been
     // admitted after the RTSP critical section and must survive.

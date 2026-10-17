@@ -50,6 +50,7 @@
   #include "src/platform/windows/display_helper_v2/win_virtual_display_driver.h"
   #include "src/platform/windows/ipc/pipes.h"
   #include "tools/display_helper_paths.h"
+  #include "src/platform/windows/display_restore_policy.h"
 
   #include <display_device/json.h>
   #include <display_device/logging.h>
@@ -371,6 +372,12 @@ namespace {
           out_request.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::clamp<std::int64_t>(ms, 0, 15000));
           j.erase("sunshine_apply_budget_ms");
         }
+        if (j.contains("sunshine_refresh_settings_baseline")) {
+          out_request.refresh_settings_baseline =
+            j["sunshine_refresh_settings_baseline"].is_boolean() &&
+            j["sunshine_refresh_settings_baseline"].get<bool>();
+          j.erase("sunshine_refresh_settings_baseline");
+        }
         if (j.contains("wa_hdr_toggle")) {
           out_request.hdr_blank = j["wa_hdr_toggle"].get<bool>();
           j.erase("wa_hdr_toggle");
@@ -672,6 +679,7 @@ int run_v2_helper(int argc, char *argv[]) {
   display_helper::v2::AtomicFileTextStorage golden_status_storage;
   display_helper::v2::GoldenHealth golden_health(golden_status_storage, active_snapshots.golden_status.string());
   display_helper::v2::RestoreState restore_state;
+  restore_state.preserve_active_physical_primary.store(restore_mode);
   display_helper::v2::ApplyPolicy apply_policy(clock);
   display_helper::v2::WinVirtualDisplayDriver virtual_display;
   display_helper::v2::WinPlatformWorkarounds workarounds;
@@ -909,6 +917,9 @@ int run_v2_helper(int argc, char *argv[]) {
     BOOST_LOG(info) << "Display helper v2 running in restore mode.";
     display_helper::v2::RevertCommand revert {cancellation.current_generation()};
     revert.immediate = true;
+    revert.always_restore_from_golden = display_helper::load_boot_restore_prefer_golden(
+      display_helper_paths::executable_config_search_roots(), search_roots,
+      display_helper_paths::restore_state_file_from_command_line());
     queue.push(revert);
     while (running.load(std::memory_order_acquire)) {
       process_queue();

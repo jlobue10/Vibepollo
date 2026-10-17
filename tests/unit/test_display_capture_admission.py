@@ -233,6 +233,10 @@ monitor_header = monitor_header.replace("#pragma once\n", "")
 monitor_header = monitor_header.replace("#include <windows.h>\n", "").replace("#include <dxgi1_6.h>\n", "")
 monitor_source = (root / "src/platform/windows/display_output_monitor.cpp").read_text()
 monitor_methods = monitor_source[monitor_source.index("  display_output_monitor_t::display_output_monitor_t"):]
+# Advance only the monitor's observation clock; keep the actual worker, waits,
+# stop token and reinit flag so transient faults exercise production behavior.
+monitor_methods = monitor_methods.replace("std::chrono::steady_clock::now()", "MonitorClock::now()")
+monitor_methods = monitor_methods.replace("bool subscribed = false;", "bool subscribed = fake::event_subscription;")
 monitor_program = r'''
 #include <atomic>
 #include <cassert>
@@ -254,12 +258,20 @@ struct DXGI_OUTPUT_DESC {
 };
 enum { SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN };
 namespace fake {
-  std::atomic_bool hdr {false}, available {true};
-  std::atomic_int revision {0}, samples {0}, width {1920};
+  std::atomic_bool hdr {false}, hdr_valid {true}, available {true}, fail_next {false}, event_subscription {false};
+  std::atomic_int revision {0}, samples {0}, width {1920}, clock_offset_ms {0}, monitor_id {1}, rotation {0}, right {1920};
+  std::atomic_bool attached {true};
   void reset(bool initial_hdr) {
-    hdr = initial_hdr; available = true; revision = samples = 0; width = 1920;
+    hdr = initial_hdr; hdr_valid = available = true; revision = samples = 0; width = 1920;
+    fail_next = false; event_subscription = false; clock_offset_ms = 0;
+    monitor_id = 1; rotation = 0; right = 1920; attached = true;
   }
 }
+struct MonitorClock {
+  static auto now() {
+    return std::chrono::steady_clock::now() + std::chrono::milliseconds(fake::clock_offset_ms.load());
+  }
+};
 int GetSystemMetrics(int metric) {
   if (metric == SM_CXVIRTUALSCREEN) return fake::width;
   if (metric == SM_CYVIRTUALSCREEN) return 1080;
@@ -268,6 +280,7 @@ int GetSystemMetrics(int metric) {
 '''
 monitor_program += monitor_header + r'''
 namespace platf::dxgi {
+  std::atomic_uint64_t next_monitor_id {1};
   struct Factory {
     int revision;
     bool IsCurrent() const { return revision == fake::revision; }
@@ -278,9 +291,16 @@ namespace platf::dxgi {
     bool hdr_valid = true, hdr = false;
   };
   std::optional<output_sample_t> sample_output(LUID, const wchar_t *) {
-    ++fake::samples;
-    if (!fake::available) return std::nullopt;
-    return output_sample_t {std::make_shared<Factory>(Factory {fake::revision}), {}, true, fake::hdr};
+    std::optional<output_sample_t> result;
+    if (fake::available && !fake::fail_next.exchange(false)) {
+      result = output_sample_t {std::make_shared<Factory>(Factory {fake::revision}), {}, fake::hdr_valid, fake::hdr};
+      result->desc.Monitor = fake::monitor_id;
+      result->desc.Rotation = fake::rotation;
+      result->desc.DesktopCoordinates.right = fake::right;
+      result->desc.AttachedToDesktop = fake::attached;
+    }
+    ++fake::samples; // Publish after sampling the boundaries, before returning the immutable result.
+    return result;
   }
 '''
 monitor_program += monitor_methods + r'''
@@ -308,7 +328,45 @@ int main() {
     ++fake::revision;
     await([] { return fake::samples > 1; });
     assert(!monitor.reinit_requested());
+    const auto previous_samples = fake::samples.load();
     fake::available = false; ++fake::revision;
+    await([&] { return fake::samples >= previous_samples + 2; });
+    assert(!monitor.reinit_requested()); // A brief unknown interval is not a state change.
+    fake::clock_offset_ms += 2100; // Persistent loss still exhausts the real retry budget.
+    await([&] { return monitor.reinit_requested(); });
+  }
+  // Repeated 30-second notifications with one failed observation each must not
+  // restart an otherwise unchanged capture. Each recovery resets the budget.
+  fake::reset(true); fake::event_subscription = true;
+  {
+    display_output_monitor_t monitor({}, {}, true, true, 0, 0, 1920, 1080);
+    await([] { return fake::samples > 0; });
+    for (int event = 0; event < 10; ++event) {
+      const auto previous_samples = fake::samples.load();
+      fake::fail_next = true;
+      fake::clock_offset_ms += 30000;
+      ++fake::revision;
+      await([&] { return fake::samples >= previous_samples + 2; });
+      assert(!monitor.reinit_requested());
+    }
+  }
+  // A failed initial observation must also be retried without an existing
+  // factory. Real HDR changes remain immediate after observation recovers.
+  fake::reset(false); fake::fail_next = true; fake::event_subscription = true;
+  {
+    display_output_monitor_t monitor({}, {}, true, false, 0, 0, 1920, 1080);
+    await([] { return fake::samples >= 2; });
+    assert(!monitor.reinit_requested());
+    fake::hdr = true; ++fake::revision;
+    await([&] { return monitor.reinit_requested(); });
+  }
+  // Populated capability changes keep their original immediate-reinit behavior;
+  // only a nullopt observation receives the retry window.
+  fake::reset(true);
+  {
+    display_output_monitor_t monitor({}, {}, true, true, 0, 0, 1920, 1080);
+    await([] { return fake::samples > 0; });
+    fake::hdr_valid = false; ++fake::revision;
     await([&] { return monitor.reinit_requested(); });
   }
   // Neighbouring output changes still refresh absolute-input coordinates.
@@ -319,6 +377,19 @@ int main() {
     fake::width = 2560;
     await([&] { return monitor.reinit_requested(); });
   }
+  // Each observed structural difference still ends capture immediately; the
+  // added diagnostics must not filter a handle, rotation, rectangle or detach.
+  for (int change = 0; change < 4; ++change) {
+    fake::reset(false);
+    display_output_monitor_t monitor({}, {}, true, false, 0, 0, 1920, 1080);
+    await([] { return fake::samples > 0; });
+    if (change == 0) fake::monitor_id = 2;
+    if (change == 1) fake::rotation = 1;
+    if (change == 2) fake::right = 2560;
+    if (change == 3) fake::attached = false;
+    ++fake::revision;
+    await([&] { return monitor.reinit_requested(); });
+  }
 }
 '''
 with tempfile.TemporaryDirectory(prefix="vibeshine-color-monitor-") as temp:
@@ -327,5 +398,9 @@ with tempfile.TemporaryDirectory(prefix="vibeshine-color-monitor-") as temp:
     binary = path / "monitor"
     fixture.write_text(monitor_program)
     subprocess.run([compiler, "-std=c++23", "-pthread", "-I", str(root), str(fixture), "-o", str(binary)], check=True)
-    subprocess.run([str(binary)], check=True)
+    result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+    for diagnostic in ("reason=observation-timeout", "reason=input-geometry", "reason=output-state",
+                       "monitor_changed=1", "rotation=0->1", "attached=0", "hdr_valid=1->0", "hdr=0->1"):
+        assert diagnostic in result.stderr, diagnostic
+    print(result.stderr, end="")
 print("Display monitor HDR/SDR reinitialization scenarios passed")

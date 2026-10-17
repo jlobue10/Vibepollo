@@ -266,14 +266,19 @@ namespace platf::dxgi {
 
     // We return capture::reinit for most scenarios because the logic in picking which mode to capture is all handled in the factory function.
     if (_ipc_session->should_swap_to_dxgi()) {
+      BOOST_LOG(debug) << "Capture restart request: source=wgc-vram reason=dxgi-fallback";
       return capture_e::reinit;
     }
 
     // Generally this only becomes true if the helper process has crashed or is otherwise not responding.
     if (_ipc_session->should_reinit()) {
+      BOOST_LOG(debug) << "Capture restart request: source=wgc-vram reason=ipc-reinit-flag";
       return capture_e::reinit;
     }
 
+    if (!_ipc_session->set_cursor_visible(cursor_visible)) {
+      return _ipc_session->stop_requested() ? capture_e::interrupted : capture_e::reinit;
+    }
     _ipc_session->initialize_if_needed();
     if (_ipc_session->stop_requested()) {
       return capture_e::interrupted;
@@ -307,6 +312,7 @@ namespace platf::dxgi {
     // before we ever touch the shared IPC mutex.
     D3D11_TEXTURE2D_DESC desc;
     if (!_ipc_session->peek_shared_texture_desc(desc)) {
+      BOOST_LOG(debug) << "Capture restart request: source=wgc-vram reason=missing-texture-descriptor";
       return capture_e::reinit;
     }
 
@@ -429,6 +435,9 @@ namespace platf::dxgi {
     if (!_ipc_session) {
       return capture_e::error;
     }
+    if (!_ipc_session->set_cursor_visible(cursor_visible)) {
+      return _ipc_session->stop_requested() ? capture_e::interrupted : capture_e::reinit;
+    }
 
     winrt::com_ptr<ID3D11Texture2D> gpu_tex;
     auto status = _ipc_session->acquire(effective_wgc_timeout(timeout, _config.framerate), gpu_tex, frame_qpc);
@@ -547,14 +556,19 @@ namespace platf::dxgi {
     }
 
     if (_ipc_session->should_swap_to_dxgi()) {
+      BOOST_LOG(debug) << "Capture restart request: source=wgc-ram reason=dxgi-fallback";
       return capture_e::reinit;
     }
 
     // If the helper process crashed or was terminated forcefully by the user, we will re-initialize it.
     if (_ipc_session->should_reinit()) {
+      BOOST_LOG(debug) << "Capture restart request: source=wgc-ram reason=ipc-reinit-flag";
       return capture_e::reinit;
     }
 
+    if (!_ipc_session->set_cursor_visible(cursor_visible)) {
+      return _ipc_session->stop_requested() ? capture_e::interrupted : capture_e::reinit;
+    }
     _ipc_session->initialize_if_needed();
     if (_ipc_session->stop_requested()) {
       return capture_e::interrupted;

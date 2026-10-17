@@ -23,8 +23,9 @@ struct controller_packet {
 using PNV_MULTI_CONTROLLER_PACKET = controller_packet *;
 namespace platf {
   struct gamepad_id_t { int globalIndex; uint8_t clientRelativeIndex; };
-  struct gamepad_arrival_t {};
-  int alloc_gamepad(int, gamepad_id_t, gamepad_arrival_t, int) { return 0; }
+  struct gamepad_arrival_t { std::uint8_t type; std::uint16_t capabilities; std::uint32_t supportedButtons; bool persist_after_disconnect = false; };
+  int alloc_result = 0, alloc_calls = 0;
+  int alloc_gamepad(int, gamepad_id_t, gamepad_arrival_t, int) { ++alloc_calls; return alloc_result; }
 }
 int alloc_id(std::bitset<16> &mask) {
   for (int i = 0; i < 16; ++i) if (!mask[i]) { mask[i] = true; return i; }
@@ -43,7 +44,7 @@ constexpr int MULTI_CONTROLLER_MAGIC_GEN5 = 0x0c;
 constexpr int SS_HSCROLL_MAGIC = 0x55000001, SS_TOUCH_MAGIC = 0x55000002;
 constexpr int SS_PEN_MAGIC = 0x55000003, SS_CONTROLLER_ARRIVAL_MAGIC = 0x55000004;
 constexpr int SS_CONTROLLER_TOUCH_MAGIC = 0x55000005, SS_CONTROLLER_MOTION_MAGIC = 0x55000006;
-constexpr int SS_CONTROLLER_BATTERY_MAGIC = 0x55000007;
+constexpr int SS_CONTROLLER_BATTERY_MAGIC = 0x55000007, SS_STEAM_CONTROLLER_ATTRIBUTES_MAGIC = 0x55000008;
 // Models validation success; this suite tests enqueue permissions/lifetime, not wire parsing.
 struct validated_input_packet_t { uint32_t magic; };
 std::optional<validated_input_packet_t> validate_packet(const std::vector<uint8_t> &data) {
@@ -250,6 +251,39 @@ int main(int argc, char **argv) {
     passthrough(a, packet_bytes(KEY_DOWN_EVENT_MAGIC), crypto::PERM::_all_inputs);
     assert(a->input_queue.empty() && task_pool.tasks.empty());
     expect({{0x41, false, 0}, {0x41, true, 0}});
+  } else if (test == "pending_attributes_removed_with_mask") {
+    // Attributes may precede arrival, so a removed slot can have no platform ID
+    // and no failure flag yet. Another controller's inventory still retires it.
+    a->gamepads[1].pending_steam_attributes = 111;
+    a->gamepads[2].pending_steam_attributes = 222;
+    controller_packet p {0, 5}; passthrough(a, &p);
+    assert(!a->gamepads[1].pending_steam_attributes);
+    assert(a->gamepads[2].pending_steam_attributes == 222);
+    assert(platf::freed_gamepads.empty());
+    p.activeGamepadMask = 1; passthrough(a, &p);
+    assert(!a->gamepads[2].pending_steam_attributes);
+  } else if (test == "legacy_exhausted_ids_retire_attributes") {
+    a->gamepads[0].pending_steam_attributes = 123;
+    gamepadMask.set();
+    controller_packet p {0, 1}; passthrough(a, &p);
+    assert(a->gamepads[0].alloc_failed && !a->gamepads[0].pending_steam_attributes);
+    gamepadMask.reset(9); passthrough(a, &p);
+    assert(platf::alloc_calls == 0 && a->gamepads[0].id < 0);
+    p.activeGamepadMask = 0; passthrough(a, &p);
+    assert(!a->gamepads[0].alloc_failed);
+    p.activeGamepadMask = 1; passthrough(a, &p);
+    assert(platf::alloc_calls == 1 && a->gamepads[0].id == 9);
+  } else if (test == "failed_allocation_not_retried_per_packet") {
+    a->gamepads[0].pending_steam_attributes = 123;
+    platf::alloc_result = -1;
+    controller_packet p {0, 1}; passthrough(a, &p); passthrough(a, &p); passthrough(a, &p);
+    assert(platf::alloc_calls == 1 && a->gamepads[0].id == -1 && a->gamepads[0].alloc_failed);
+    assert(!a->gamepads[0].pending_steam_attributes);
+    p.activeGamepadMask = 0; passthrough(a, &p);
+    assert(!a->gamepads[0].alloc_failed && platf::alloc_calls == 1);
+    platf::alloc_result = 0; p.activeGamepadMask = 1; passthrough(a, &p);
+    assert(platf::alloc_calls == 2 && a->gamepads[0].id >= 0 && !a->gamepads[0].alloc_failed);
+    disconnect(a); assert(!a->gamepads[0].alloc_failed);
   } else if (test == "controller_hold_disconnect") {
     controller_packet p {0, 1, platf::BACK, 0, 255, 255, 32767, -32768, 123, -456};
     passthrough(a, &p);
@@ -296,7 +330,7 @@ def main():
     parser.add_argument('--source', type=Path, default=ROOT / 'src/input.cpp')
     args = parser.parse_args()
     source = args.source.read_text()
-    prelude = production_prelude(source).replace('std::list<int> input_queue;', 'std::list<std::vector<uint8_t>> input_queue;\n  std::atomic_bool input_queue_task_scheduled {false};\n  int feedback_queue = 0;')
+    prelude = production_prelude(source).replace('std::list<int> input_queue;', 'std::list<std::vector<uint8_t>> input_queue;\n  std::atomic_bool input_queue_task_scheduled {false};\n  int feedback_queue = 0;\n  bool persist_gamepads = false;')
     prelude = prelude.replace('void push(std::function<void()> f) { tasks.push_back(std::move(f)); }',
                               'template<class F, class... A> void push(F f, A... a) { tasks.push_back([=] { f(a...); }); }')
     prelude = prelude.replace('constexpr int KEY_UP_EVENT_MAGIC = 2;', 'constexpr int KEY_UP_EVENT_MAGIC = 0x04;')

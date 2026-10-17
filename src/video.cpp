@@ -1365,6 +1365,10 @@ namespace video {
       }
     }
 
+    bool has_fresh_conversion() const {
+      return fresh_conversion_pending;
+    }
+
     amf::amf_encode_result encode_frames(uint64_t frame_index) {
       if (!device || !device->amf) {
         return {};
@@ -1796,6 +1800,7 @@ namespace video {
   void end_capture_async(capture_thread_async_ctx_t &ctx);
 
   // Keep a reference counter to ensure the capture thread only runs when other threads have a reference to the capture thread
+  auto capture_thread_async = safe::make_shared<capture_thread_async_ctx_t>(start_capture_async, end_capture_async);
   auto capture_thread_sync = safe::make_shared<capture_thread_sync_ctx_t>(start_capture_sync, end_capture_sync);
 
 #ifdef _WIN32
@@ -3039,9 +3044,30 @@ namespace video {
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
     std::size_t display_retry_failures = 0;
+    config_t producer_config {};
+
+    auto capture_pacing_for_display = [&]() {
+      capture_pacing_context_t pacing;
+#ifdef _WIN32
+      pacing.adjust_to_display = true;
+      if (auto *windows_display = dynamic_cast<platf::dxgi::display_base_t *>(disp.get())) {
+        pacing.display_refresh = {
+          static_cast<int>(windows_display->display_refresh_rate.Numerator),
+          static_cast<int>(windows_display->display_refresh_rate.Denominator)
+        };
+        pacing.rounded_refresh = windows_display->display_refresh_rate_rounded;
+      }
+#endif
+      return pacing;
+    };
 
     while (capture_ctx_queue->running()) {
-      const auto &capture_config = capture_ctxs.front().config;
+      const auto demand = await_capture_config(capture_ctxs, *capture_ctx_queue, capture_pacing_for_display());
+      if (!demand) {
+        return;
+      }
+      producer_config = *demand;
+      const auto &capture_config = producer_config;
       if (capture_config.capture_source == capture_source_e::synthetic_black) {
         disp = make_black_display(capture_config);
         if (disp) break;
@@ -3082,7 +3108,7 @@ namespace video {
         BOOST_LOG(info) << "Capture worker selecting source=" << static_cast<int>(capture_config.capture_source)
                         << " output='" << display_names[display_p] << "'.";
       }
-      disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+      disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_config);
       if (disp) {
         break;
       }
@@ -3296,7 +3322,15 @@ namespace video {
           while (auto pending_context = capture_ctx_queue->pop(0ms)) {
             capture_ctxs.emplace_back(std::move(*pending_context));
           }
-        } else if (capture_ctxs.empty()) {
+        }
+
+        const auto pacing = capture_pacing_for_display();
+        if (const auto demand = capture_config_for_consumers(capture_ctxs, pacing);
+            demand && !same_capture_pacing(producer_config, *demand, pacing)) {
+          // Reuse the existing serialized teardown: all encoders release the
+          // old display before its single replacement is created. This also
+          // refreshes WGC admission and the capture loop's pacing state.
+          artificial_reinit = true;
           return false;
         }
 
@@ -3318,6 +3352,7 @@ namespace video {
       auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
 
       if (artificial_reinit && status != platf::capture_e::error) {
+        BOOST_LOG(debug) << "Capture restart: source=explicit-display-switch";
         status = platf::capture_e::reinit;
 
         artificial_reinit = false;
@@ -3402,12 +3437,14 @@ namespace video {
                 capture_ctxs.emplace_back(std::move(*pending_context));
               }
             }
-            if (capture_ctxs.empty()) {
-              return;
-            }
-
             std::size_t display_retry_failures = 0;
             while (capture_ctx_queue->running()) {
+              const auto demand = await_capture_config(capture_ctxs, *capture_ctx_queue, capture_pacing_for_display());
+              if (!demand) {
+                return;
+              }
+              producer_config = *demand;
+
               // Release the display before reenumerating displays, since some capture backends
               // only support a single display session per device/application.
               disp.reset();
@@ -3444,7 +3481,7 @@ namespace video {
               }
 
               // reset_display() will sleep between retries
-              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+              reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], producer_config);
               if (disp) {
                 if (!exact_output) {
                   proc::proc.display_name = display_names[display_p];
@@ -3642,26 +3679,35 @@ namespace video {
     std::optional<std::chrono::steady_clock::time_point> capture_timestamp,
     std::optional<std::chrono::steady_clock::time_point> host_processing_timestamp
   ) {
-    // Stash this frame's timestamps before submitting; the encoder is pipelined and
-    // emits an earlier frame, so the packet is stamped from this map by emitted index.
-    session.store_frame_timestamps((uint64_t) frame_nr, {frame_timestamp, capture_timestamp, host_processing_timestamp});
+    // A completion can race the pre-conversion output drain. Deliver the older
+    // packet first, then give the retained fresh capture one submission attempt
+    // before the outer loop consumes another image/index. Never retry accepted
+    // input or loop through persistent backpressure; ordinary drops stay visible.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      // Stash this frame's timestamps before submitting; the encoder is pipelined and
+      // emits an earlier frame, so the packet is stamped from this map by emitted index.
+      session.store_frame_timestamps((uint64_t) frame_nr, {frame_timestamp, capture_timestamp, host_processing_timestamp});
 
-    auto encode_result = session.encode_frames(frame_nr);
-    auto &encoded_frames = encode_result.frames;
-    if (!encode_result.input_accepted) {
-      session.discard_frame_timestamps((uint64_t) frame_nr);
-    }
-    if (encode_result.fatal || std::any_of(encoded_frames.begin(), encoded_frames.end(), [](const auto &frame) { return frame.fatal; })) {
-      BOOST_LOG(error) << "AMF encoder entered an unrecoverable state, requesting reinit";
-      return -1;
-    }
-    if (encoded_frames.empty()) {
-      // No output this call (pipeline still filling or transient stall); not fatal.
-      // The stashed timestamps stay until this frame is actually emitted.
-      return 0;
-    }
+      auto encode_result = session.encode_frames(frame_nr);
+      auto &encoded_frames = encode_result.frames;
+      if (!encode_result.input_accepted) {
+        session.discard_frame_timestamps((uint64_t) frame_nr);
+      }
+      if (encode_result.fatal || std::any_of(encoded_frames.begin(), encoded_frames.end(), [](const auto &frame) { return frame.fatal; })) {
+        BOOST_LOG(error) << "AMF encoder entered an unrecoverable state, requesting reinit";
+        return -1;
+      }
+      if (encoded_frames.empty()) {
+        // No output this call (pipeline still filling or transient stall); not fatal.
+        // The stashed timestamps stay until this frame is actually emitted.
+        return 0;
+      }
 
-    deliver_amf_frames(frame_nr, session, encoded_frames, packets, channel_data);
+      deliver_amf_frames(frame_nr, session, encoded_frames, packets, channel_data);
+      if (encode_result.input_accepted || !session.has_fresh_conversion()) {
+        return 0;
+      }
+    }
 
     return 0;
   }
@@ -5562,6 +5608,9 @@ namespace video {
         display->offset_y,
         config.width,
         config.height,
+        0,
+        0,
+        display->input_output_name,
       },
       display->env_width,
       display->env_height,
@@ -6285,22 +6334,28 @@ namespace video {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
     auto images = std::make_shared<img_event_t::element_type>();
-    // A capture worker belongs to the session's source key. The former shared
-    // worker selected its first context's display for every later context,
-    // which made a second Remote Monitor silently capture the wrong output.
-    capture_thread_async_ctx_t source_ctx {};
-    if (start_capture_async(source_ctx) != 0) {
+    // DXGI allows only one duplication per process/output. Normal mirror
+    // clients must share that producer, including WGC's secure-desktop fallback.
+    // Exact Remote Monitor outputs and synthetic Input stay session-local.
+    capture_source_lease_t source {
+      config.capture_source,
+      capture_thread_async,
+      start_capture_async,
+      end_capture_async
+    };
+    if (!source.get()) {
       return;
     }
-    auto stop_source = util::fail_guard([&]() {
-      end_capture_async(source_ctx);
-    });
+    auto &source_ctx = *source.get();
     auto lg = util::fail_guard([&]() {
       images->stop();
       shutdown_event->raise(true);
     });
 
-    source_ctx.capture_ctx_queue->raise(capture_ctx_t {images, config});
+    if (!source_ctx.capture_ctx_queue->try_raise(capture_ctx_t {images, config})) {
+      BOOST_LOG(error) << "Shared capture session queue is full or stopped; rejecting the session."sv;
+      return;
+    }
 
     if (!source_ctx.capture_ctx_queue->running()) {
       return;

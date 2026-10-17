@@ -572,6 +572,21 @@ stop_session_generation_apps desktop 1000 1000 /run/user/1000 42 "$((SECONDS + 4
 mock_list_count=$(<"$mock_app_list_counter")
 ((mock_list_count >= 13)) || fail_test 'cleanup returned without ten consecutive clean enumerations'
 
+# Steam direct-launch retries append a numeric attempt to the broker-owned
+# PID. They remain part of the same trusted generation and must be drained.
+mock_reset_app_state
+mock_app_default_output=''
+mock_stopped_units=()
+mock_app_list_outputs=(
+  $'vibepollo-app-42-707-1.service loaded active running retry-one\n'
+  $'vibepollo-app-42-707-2.service loaded activating start retry-two\n'
+  '' '' '' '' '' '' '' '' '' '' '' ''
+)
+stop_session_generation_apps desktop 1000 1000 /run/user/1000 42 "$((SECONDS + 4))" ||
+  fail_test 'generation-scoped Steam retry cleanup failed'
+[[ "${mock_stopped_units[*]}" == 'vibepollo-app-42-707-1.service vibepollo-app-42-707-2.service' ]] ||
+  fail_test "unexpected Steam retry units stopped: ${mock_stopped_units[*]}"
+
 # A failed unit counts as stopped only with MainPID zero and an empty/absent
 # cgroup; a contradictory failed state remains unsafe.
 mock_set_app_state vibepollo-app-42-303.service failed
@@ -587,6 +602,9 @@ fi
 # before any stop request is issued.
 for unsafe_output in \
   $'vibepollo-app-41-303.service loaded active running stale\n' \
+  $'vibepollo-app-41-303-1.service loaded active running stale-retry\n' \
+  $'vibepollo-app-42-303-zero.service loaded active running bad-retry\n' \
+  $'vibepollo-app-42-303-0.service loaded active running zero-retry\n' \
   $'vibepollo-app-42-404.service loaded active running first\nvibepollo-app-42-404.service loaded active running duplicate\n' \
   $'vibepollo-app-42-505.service malformed\n' \
   $'--all loaded active running option\n'; do
@@ -601,18 +619,32 @@ for unsafe_output in \
 done
 
 # A manager that acknowledges stop but keeps the exact unit active cannot make
-# cleanup succeed; the overall deadline still bounds retries.
-mock_reset_app_state
-mock_app_default_output=$'vibepollo-app-42-606.service loaded active running wedged\n'
-mock_app_list_outputs=()
-mock_stopped_units=()
-mock_stop_effective=0
-cleanup_started=$SECONDS
-if stop_session_generation_apps desktop 1000 1000 /run/user/1000 42 "$((SECONDS + 1))"; then
-  fail_test 'cleanup accepted a unit that remained active after stop'
-fi
-((SECONDS - cleanup_started <= 2)) || fail_test 'wedged application cleanup exceeded its total deadline'
-((${#mock_stopped_units[@]} == 1)) || fail_test 'wedged application stop was retried instead of polled'
+# cleanup succeed. Advance a virtual clock at each polling sleep so scheduler
+# delays cannot consume the entire budget before the first stop request. Real
+# command deadlines remain covered by test_session_command_timeout.sh below.
+(
+  mock_reset_app_state
+  mock_app_default_output=$'vibepollo-app-42-606.service loaded active running wedged\n'
+  mock_app_list_outputs=()
+  mock_stopped_units=()
+  mock_stop_effective=0
+  polling_definition=$(declare -f stop_session_generation_apps)
+  [[ "$polling_definition" == *'/usr/bin/sleep 0.1'* ]] || fail_test 'cleanup polling sleep not found'
+  polling_definition=${polling_definition/\/usr\/bin\/sleep 0.1/advance_cleanup_clock}
+  [[ "$polling_definition" != *'/usr/bin/sleep 0.1'* ]] || fail_test 'multiple cleanup polling sleeps found'
+  eval "$polling_definition"
+  # Unsetting SECONDS removes Bash's wall-clock behavior in this subshell only.
+  unset SECONDS
+  SECONDS=0
+  advance_cleanup_clock() { ((SECONDS += 1)); }
+  if stop_session_generation_apps desktop 1000 1000 /run/user/1000 42 3; then
+    fail_test 'cleanup accepted a unit that remained active after stop'
+  fi
+  ((SECONDS == 3)) || fail_test 'wedged application cleanup did not honor its deadline'
+  ((${#mock_stopped_units[@]} == 1)) || fail_test 'wedged application stop was retried instead of polled'
+  mock_list_count=$(<"$mock_app_list_counter")
+  ((mock_list_count == 3)) || fail_test 'wedged application was not polled until the deadline'
+) || fail_test 'wedged application cleanup regression'
 
 for supported in plasmalogin plasmalogin-autologin sddm sddm-autologin; do
   desktop_service_supported "$supported" || fail_test "desktop login service $supported was rejected"

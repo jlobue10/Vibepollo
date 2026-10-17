@@ -30,6 +30,7 @@
 #include "nvhttp.h"
 #include "process.h"
 #include "rtsp.h"
+#include "shutdown_signal.h"
 #include "system_tray.h"
 #include "update.h"
 #include "upnp.h"
@@ -98,8 +99,6 @@ void on_signal(int sig, FN &&fn) {
 #endif
 
 namespace {
-  static_assert(std::atomic_bool::is_always_lock_free, "shutdown signal flag must be lock-free in a signal handler");
-
   class shutdown_deadline_t {
   public:
     explicit shutdown_deadline_t(std::atomic_bool *signal_requested, bool supervised_machine_host):
@@ -361,6 +360,15 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(error) << "Logging failed to initialize"sv;
   }
 
+#ifdef WIN32
+  // Own cleanup even for maintenance commands and early startup returns.
+  // shutdown() is terminal and contains exceptions before logger teardown.
+  auto restore_nvprefs = []() noexcept {
+    nvprefs_instance.shutdown();
+  };
+  auto nvprefs_shutdown_guard = util::fail_guard(restore_nvprefs);
+#endif
+
 #ifdef _WIN32
   const auto app_user_model_id_status =
     SetCurrentProcessExplicitAppUserModelID(WIDEN_STRING_LITERAL(PROJECT_APP_USER_MODEL_ID));
@@ -436,7 +444,7 @@ int main(int argc, char *argv[]) {
   // Its cleanup guard also runs on early startup returns, so it must be able
   // to bound that join as well as the ordinary shutdown path below.
   auto shutdown_event = mail::man->event<bool>(mail::shutdown);
-  std::atomic_bool shutdown_signal_requested {false};
+  auto &shutdown_signal_requested = lifetime::shutdown_signal_requested;
   shutdown_deadline_t shutdown_deadline {&shutdown_signal_requested, supervised_machine_host};
 
 #ifdef __linux__
@@ -641,10 +649,16 @@ int main(int argc, char *argv[]) {
   task_pool.start(1);
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
-  // create tray thread and detach it if enabled in config
+  // Keep tray shutdown inside main's lifetime, including early startup returns.
   if (config::sunshine.system_tray) {
     system_tray::run_tray();
   }
+#ifdef _WIN32
+  auto tray_shutdown_guard = util::fail_guard([&shutdown_deadline]() {
+    shutdown_deadline.arm();
+    system_tray::end_tray();
+  });
+#endif
   // Schedule periodic update checks if configured
   if (config::sunshine.update_check_interval_seconds > 0) {
     // Trigger an immediate update check on startup so users don't wait
@@ -669,8 +683,8 @@ int main(int argc, char *argv[]) {
     shutdown_signal_requested.store(true, std::memory_order_relaxed);
     BOOST_LOG(info) << "Interrupt handler called"sv;
 
-    // Preserve Vibepollo's eager application cleanup; the owned deadline above
-    // replaces the detached task-pool watchdog that used to follow it.
+    // Undo waits also observe the signal flag above. Keep eager cleanup before
+    // waking main so its teardown cannot overlap this callback's termination.
     proc::proc.terminate();
     // Break out of the main loop
     shutdown_event->raise(true);
@@ -1086,14 +1100,15 @@ int main(int argc, char *argv[]) {
   // stop system tray
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
   system_tray::end_tray();
+#ifdef _WIN32
+  tray_shutdown_guard.disable();
+#endif
 #endif
 
 #ifdef WIN32
   // Restore global NVIDIA control panel settings
-  if (nvprefs_instance.owning_undo_file() && nvprefs_instance.load()) {
-    nvprefs_instance.restore_global_profile();
-    nvprefs_instance.unload();
-  }
+  restore_nvprefs();
+  nvprefs_shutdown_guard.disable();
 #endif
 
   session_history::shutdown();

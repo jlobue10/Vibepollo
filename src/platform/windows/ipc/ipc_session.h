@@ -11,6 +11,8 @@
 #include <winsock2.h>
 #include <d3d11.h>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -65,6 +67,11 @@ namespace platf::dxgi {
      * Performs a no-op if already initialized.
      */
     void initialize_if_needed();
+
+    // Called by the capture owner before initialization and each snapshot.
+    // The desired state survives helper restarts; a failed live write requires
+    // reinitialization rather than reusing a possibly partial byte-pipe frame.
+    bool set_cursor_visible(bool visible);
 
     // Published by session teardown; it never enters the helper or D3D driver.
     void request_stop() noexcept {
@@ -195,6 +202,9 @@ namespace platf::dxgi {
 
     // --- members ---
     std::unique_ptr<ProcessHandler> _process_helper;  ///< Helper process owner.
+    // The activity worker can publish cadence changes while the capture owner
+    // tears down or replaces the helper pipe.
+    mutable std::mutex _pipe_mutex;
     std::unique_ptr<AsyncNamedPipe> _pipe;  ///< Async control/message pipe.
     winrt::com_ptr<IDXGIKeyedMutex> _keyed_mutex;  ///< Keyed mutex for shared texture.
     winrt::com_ptr<ID3D11Texture2D> _shared_texture;  ///< Shared texture duplicated from helper.
@@ -216,6 +226,8 @@ namespace platf::dxgi {
     ::video::config_t _config;  ///< Cached video config.
     std::string _display_name;  ///< Display name copy.
     bool _advanced_color_capture = false;  ///< True when target display is already Advanced Color/HDR.
+    bool _cursor_visible = true;  ///< Desired WGC inclusion, owned by the capture thread.
+    std::optional<bool> _sent_cursor_visible;  ///< Last state sent to this helper generation.
     std::atomic<int> _activity_admission_fps {0};  ///< Latest desired helper admission rate, retained across helper restarts.
     std::chrono::steady_clock::time_point _last_helper_stop {};  ///< Last time we tore down the helper.
   };
