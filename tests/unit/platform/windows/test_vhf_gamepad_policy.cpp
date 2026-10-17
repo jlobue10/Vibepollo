@@ -134,8 +134,9 @@ namespace {
         SCOPED_TRACE(preferences);
         EXPECT_EQ(select_desired_profile(setting, LI_CTYPE_PS, 0, preferences, preferences), vhf_profile_e::dualsense);
         EXPECT_EQ(select_desired_profile(setting, LI_CTYPE_NINTENDO, LI_CCAP_GYRO | LI_CCAP_TOUCHPAD, preferences, preferences), vhf_profile_e::switch_pro);
-        // A client that identifies a Steam Controller gets the real thing, whatever the DS4 preferences say.
-        EXPECT_EQ(select_desired_profile(setting, LI_CTYPE_STEAM, LI_CCAP_GYRO | LI_CCAP_TOUCHPAD, preferences, preferences), vhf_profile_e::steam_controller);
+        // A client that identifies a Steam Controller (the Steam type with a Steam extension) gets
+        // the real thing, whatever the DS4 preferences say.
+        EXPECT_EQ(select_desired_profile(setting, LI_CTYPE_STEAM, LI_CCAP_GYRO | LI_CCAP_TOUCHPAD | LI_CCAP_GRIP_SENSE, preferences, preferences), vhf_profile_e::steam_controller);
       }
     }
   }
