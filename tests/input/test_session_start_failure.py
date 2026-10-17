@@ -60,13 +60,20 @@ struct Log { template<class T> Log &operator<<(const T &) { return *this; } };
 namespace mail {constexpr std::string_view shutdown = "shutdown";}
 namespace stream {
 namespace session {enum class state_e {STOPPED, STOPPING, STARTING, RUNNING};}
+enum class stop_reason_e {none, abrupt, graceful};
+constexpr int START_PACING_REJECTED = -2;
+struct config_t {};
 struct session_t;
 struct control_server_t {
   sync_util::sync_t<std::vector<session_t*>> _sessions;
   bool _exited = false;
   sync_util::sync_t<std::unordered_map<void*, session_t*>> _peer_to_session;
   void retire_session(session_t& session);
+  void flush() {}
 };
+// Video pacing admission runs under _sessions inside the publication block.
+bool pacing_admits = true;
+bool pacing_admits_locked(control_server_t&, const config_t*) {return pacing_admits;}
 struct broadcast_t {control_server_t control_server;};
 struct session_t {
   packet_channel_t packet_channel = std::make_shared<packet_channel_state_t>(this);
@@ -74,6 +81,8 @@ struct session_t {
   safe::mail_raw_t::event_t<bool> shutdown_event = mail->event<bool>(::mail::shutdown);
   safe::signal_t controlEnd;
   std::atomic<session::state_e> state {session::state_e::STOPPED};
+  std::atomic<stop_reason_e> stop_reason {stop_reason_e::none};
+  config_t config;
   bool control_registered = false;
   std::shared_ptr<broadcast_t> broadcast_ref;
   std::thread videoThread, audioThread;
@@ -83,6 +92,7 @@ struct session_t {
 RETIREMENT
 int publish(session_t& session) {PUBLICATION return 0;}
 void enet_peer_disconnect_now(void*, int) {}
+void send_termination(session_t*) {}
 void control_step(control_server_t* server) {
   auto lg = server->_sessions.lock();
   for (auto pos = server->_sessions->begin(); pos != server->_sessions->end();) {
@@ -111,14 +121,31 @@ int main(int argc, char** argv) {
     assert(retiring.wait_for(2s) == std::future_status::ready); retiring.get();
     std::cout << "PASS control-exited\n";return 0;
   }
+  if (mode == "pacing-rejected") {
+    // Admission against the video pacing ceiling runs under the same lock, after the
+    // endpoint init. A rejected start is never published or registered, so destroying
+    // it must not wait for a controlEnd nobody will raise.
+    pacing_admits = false;
+    const int rc = publish(*owner);
+    pacing_admits = true;
+    assert(rc == START_PACING_REJECTED && !owner->control_registered && server._sessions->empty());
+    auto retiring = std::async(std::launch::async, [s=std::move(owner)]() mutable {s.reset();});
+    assert(retiring.wait_for(2s) == std::future_status::ready); retiring.get();
+    std::cout << "PASS pacing-rejected\n";return 0;
+  }
   publish(*owner);
   if (mode == "peer-reused") {
-    owner->control.peer = reinterpret_cast<void*>(1);
+    // The control owner clears the peer when it retires a STOPPING session; only the
+    // shutdown tail leaves it set. ENet can hand the same peer to a new session before
+    // this destructor runs, and that mapping must survive retire_session either way.
+    void *const peer = owner->control.peer = reinterpret_cast<void*>(1);
     owner->state.store(session::state_e::STOPPING);control_step(&server);
+    assert(owner->control.peer == nullptr);
+    owner->control.peer = peer;  // as the shutdown tail leaves it: controlEnd raised, peer kept
     session_t next;
-    server._peer_to_session->emplace(owner->control.peer, &next);
+    server._peer_to_session->emplace(peer, &next);
     owner.reset();
-    assert(server._peer_to_session->at(reinterpret_cast<void*>(1)) == &next);
+    assert(server._peer_to_session->at(peer) == &next);
     server._peer_to_session->clear();
     std::cout << "PASS peer-reused\n";return 0;
   }
@@ -159,7 +186,8 @@ with tempfile.TemporaryDirectory(prefix='session-start-failure-') as directory:
                     str(work / 'test.cpp'), '-o', str(work / 'test')], check=True)
     failures = 0
     modes = ['first-thread-failure', 'audio-started', 'running-failure', 'connected',
-             'shutdown-tail', 'normal-joined', 'unregistered', 'peer-reused', 'control-exited']
+             'shutdown-tail', 'normal-joined', 'unregistered', 'peer-reused', 'control-exited',
+             'pacing-rejected']
     for mode in modes:
         result = subprocess.run([str(work / 'test'), mode],
                                 env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'), timeout=10)
