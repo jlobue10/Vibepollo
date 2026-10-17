@@ -623,7 +623,7 @@ sunshine_register_component(NAME test_component_process_policy TEST_SOURCE unit/
     LINK_LIBRARIES Boost::crc)
 sunshine_register_component(NAME test_component_builtin_virtual_display TEST_SOURCE unit/test_builtin_virtual_display.cpp
     INCLUDE_DIRECTORIES "${OPENSSL_INCLUDE_DIR}"
-    LINK_LIBRARIES nlohmann_json::nlohmann_json Boost::log Boost::format Boost::process sunshine_test_moonlight_headers)
+    LINK_LIBRARIES nlohmann_json::nlohmann_json Boost::process Boost::log Boost::format sunshine_test_moonlight_headers)
 sunshine_register_component(NAME test_component_process_framegen_json TEST_SOURCE unit/test_process_framegen_json.cpp
     PRODUCT_SOURCES "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/app_framegen_config.cpp"
     LINK_LIBRARIES nlohmann_json::nlohmann_json)
@@ -726,25 +726,45 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                 "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_capture_admission.py"
                 "${SUNSHINE_TEST_REPOSITORY_ROOT}" "${CMAKE_CXX_COMPILER}")
         set_tests_properties(test_component_display_capture_admission PROPERTIES LABELS "component")
+        add_test(NAME test_component_capture_restart_diagnostics
+            COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_capture_restart_diagnostics.py"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}" "${CMAKE_CXX_COMPILER}")
+        set_tests_properties(test_component_capture_restart_diagnostics PROPERTIES LABELS "component")
         add_test(NAME test_component_display_restore_task
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
                 "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_restore_task.py" "${CMAKE_CXX_COMPILER}")
         set_tests_properties(test_component_display_restore_task PROPERTIES LABELS "component")
-        # The Python fixture compiles state_storage_policy.cpp itself and the headers reach
-        # boost/property_tree; export the resolved Boost include closure like the wake
-        # observer test does instead of relying on global headers (a FetchContent Boost
-        # has none).
-        add_library(sunshine_test_display_restore_policy_dependencies INTERFACE)
-        target_link_libraries(sunshine_test_display_restore_policy_dependencies INTERFACE
-            Boost::property_tree Boost::format Boost::log)
-        set(_display_restore_policy_include_file
-            "${CMAKE_CURRENT_BINARY_DIR}/display-restore-policy-includes-$<CONFIG>.txt")
-        file(GENERATE OUTPUT "${_display_restore_policy_include_file}"
-            CONTENT "$<JOIN:$<TARGET_PROPERTY:sunshine_test_display_restore_policy_dependencies,INTERFACE_INCLUDE_DIRECTORIES>,\n>\n")
+        # Build the extracted production fixture with the same modular Boost
+        # usage requirements as other targets; CTest only runs the built binary.
+        set(_restore_policy_fixture "${CMAKE_CURRENT_BINARY_DIR}/display-restore-policy/test.cpp")
+        add_custom_command(
+            OUTPUT "${_restore_policy_fixture}"
+            COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_restore_policy.py"
+                --generate-only --output "${_restore_policy_fixture}"
+            DEPENDS unit/test_display_restore_policy.py
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/state_storage.cpp"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/tools/display_helper_paths.h"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/tools/display_settings_helper.cpp"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/tools/display_settings_helper_v2.cpp"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/config.cpp"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/display_helper_integration.cpp"
+                "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/platform/windows/display_helper_v2/win_scheduled_task_manager.cpp"
+            VERBATIM)
+        add_executable(test_component_display_restore_policy
+            "${_restore_policy_fixture}"
+            "${SUNSHINE_TEST_REPOSITORY_ROOT}/src/state_storage_policy.cpp")
+        target_include_directories(test_component_display_restore_policy PRIVATE "${SUNSHINE_TEST_REPOSITORY_ROOT}")
+        target_link_libraries(test_component_display_restore_policy PRIVATE Boost::property_tree)
+        # The previous direct compiler invocation kept every assert enabled.
+        target_compile_options(test_component_display_restore_policy PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+        set_target_properties(test_component_display_restore_policy PROPERTIES
+            CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF FOLDER "tests/component")
         add_test(NAME test_component_display_restore_policy
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
-                "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_restore_policy.py" "${CMAKE_CXX_COMPILER}"
-                "${_display_restore_policy_include_file}")
+                "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_restore_policy.py"
+                --binary "$<TARGET_FILE:test_component_display_restore_policy>")
         set_tests_properties(test_component_display_restore_policy PROPERTIES LABELS "component")
         add_test(NAME test_component_legacy_boot_primary_restore
             COMMAND "${SUNSHINE_TEST_PYTHON_EXECUTABLE}"
@@ -1335,6 +1355,8 @@ if(Python3_Interpreter_FOUND AND SUNSHINE_TEST_GXX)
     set_tests_properties(regression_stream_disconnect_lifecycle PROPERTIES LABELS "component" TIMEOUT 45)
     add_test(NAME regression_display_policy_adapter
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_display_policy_adapter.py")
+    add_test(NAME regression_selected_output_fallback
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_selected_output_fallback.py")
     add_test(NAME regression_virtual_display_refresh
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/unit/test_virtual_display_refresh.py")
     add_test(NAME regression_virtual_display_recovery_transport
