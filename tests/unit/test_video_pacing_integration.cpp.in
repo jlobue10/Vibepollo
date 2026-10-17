@@ -45,6 +45,7 @@ struct session_t {
   std::string device_uuid = "client";
   struct { std::shared_ptr<Event> bitrate_events = std::make_shared<Event>(); bool cipher = false; } video;
   std::shared_ptr<Broadcast> broadcast_ref;
+  bool control_registered = false;  // fork: set under the lock once published
 };
 struct Sessions {
   std::vector<session_t *> values;
@@ -54,7 +55,7 @@ struct Sessions {
   auto &operator*() { EXPECT_GT(locked, 0); return values; }
   auto *operator->() { EXPECT_GT(locked, 0); return &values; }
 };
-struct control_server_t { Sessions _sessions; };
+struct control_server_t { Sessions _sessions; bool _exited = false; };  // fork: shutdown tail refuses late publication
 struct Broadcast { control_server_t control_server; };
 struct { std::shared_ptr<Broadcast> value; auto ref() { return value; } } broadcast;
 namespace session { void stop(session_t &) {} }
@@ -264,6 +265,8 @@ TEST(VideoPacingIntegration, AdmissionFailureIsAClientErrorAndPreservesOtherStat
 }
 
 #if UPDATED_SOURCE
+constexpr size_t DATA_SHARDS_MAX = 255;  // rswrapper.h; the fork's shard-count slice bounds the percentage by it
+@VIDEO_FEC@
 size_t fec_packets(const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards) {
 @FEC_COUNT@
   return nr_shards;

@@ -4016,6 +4016,7 @@ namespace stream {
 
       session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
+      // Insert this session into the session list
       // Publish only after the endpoint and timeout fields read by control
       // are initialized. Remember publication even if thread creation throws.
       {

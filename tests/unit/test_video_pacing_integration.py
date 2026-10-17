@@ -40,7 +40,13 @@ fractional = 'video_pacing_delay_ns(' in read('src/stream_protocol.h')
 helpers = section('  static video_pacing_reservation_t pacing_reservation_for_config(', '  int set_bitrate_for_sessions(') if updated else ''
 abr = section('  int set_bitrate_for_sessions(', '\n  static const char *state_name')
 start_at = source.index('    int start(session_t &session,')
-publish = section('      // Insert this session into the session list', '\n      auto addr =', start_at)
+# The fork publishes only after the endpoint/timeout fields the control thread
+# reads are initialised (`auto addr =` and `session.pingTimeout =` precede the
+# block), so the slice runs from the marker comment to the end of its own brace
+# block instead of stopping at `auto addr =`. Upstream's early block closes the
+# same way, so a pinned --source-ref still resolves.
+publish_at = source.index('      // Insert this session into the session list', start_at)
+publish = source[publish_at:source.index('\n      }\n', publish_at) + len('\n      }\n')]
 if updated:
     assert 'constexpr int START_PACING_REJECTED = -2;' in read('src/stream.h')
     pacer = section('        const auto pacing_ceiling =', '        if (pyrowave_session) {')
@@ -60,6 +66,9 @@ if fractional:
 pacing_at = source.index('              // Do pacing within the frame.')
 condition = section('              if (', ') {', pacing_at).strip()[len('if ('):]
 fec_count = section('      auto payload_size = payload.size();', '\n      // If we need to store a zero-padded data shard', source.index('static fec_t encode('))
+# The fork's encode() derives the parity count through src/video_fec.h (shared
+# with the planner); splice that self-contained header so FEC_COUNT compiles.
+video_fec = read('src/video_fec.h').replace('#pragma once', '') if 'video_fec::' in source else ''
 splitter = section('        // The max number of data shards per block', '\n      }\n\n      decltype(fec_blocks)::iterator')
 detail_max = re.search(r'constexpr int MAX_DETAIL_FEC_PERCENTAGE = \d+;', read('src/pyrowave_policy.h')).group()
 http = read('src/nvhttp.cpp')
@@ -75,7 +84,7 @@ template = (Path(__file__).with_suffix('.cpp.in')).read_text()
 program = template
 for key, text in {'HELPERS': helpers, 'ABR': abr, 'PUBLISH': publish, 'PACER': pacer, 'CLAMP': clamp,
                   'BATCHES': batches, 'FRAME_DELAY': frame_delay, 'CONDITION': condition, 'FEC_COUNT': fec_count, 'SPLITTER': splitter,
-                  'DETAIL_MAX': detail_max, 'UPDATED': '1' if updated else '0',
+                  'DETAIL_MAX': detail_max, 'VIDEO_FEC': video_fec, 'UPDATED': '1' if updated else '0',
                   'RATE_HELPERS': ('using stream::video_pacing_batch_packets; using stream::video_pacing_delay_ns;' if fractional else 'using stream::video_pacing_packets_per_ms;'),
                   'HTTP_HANDLER': http_handler, 'RTSP_MAPPING': rtsp_mapping}.items():
     program = program.replace('@' + key + '@', text)
