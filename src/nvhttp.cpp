@@ -6729,6 +6729,12 @@ namespace nvhttp {
     }
 
     const int updated = stream::set_bitrate_for_sessions(verified_client->uuid, applied);
+    if (updated < 0) {
+      tree.put("root.bitrate", 0);
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Requested bitrate cannot fit the configured video pacing ceiling with FEC and packet headers");
+      return;
+    }
     if (updated <= 0) {
       BOOST_LOG(warning) << "Bitrate change requested by ["sv << verified_client->name << "] but no matching active session was found"sv;
       tree.put("root.bitrate", 0);
@@ -7427,7 +7433,7 @@ namespace nvhttp {
     const auto monitor_generation = config::video.remote_monitor_disconnect_on_client_disconnect ?
                                       remote_owner_generation(uuid, remote_session::role_e::monitor) :
                                       std::nullopt;
-    const auto disconnect = rtsp_stream::disconnect_client_sessions_with_result(uuid);
+    const auto disconnect = rtsp_stream::disconnect_client_sessions_with_result(uuid, true);
     // The result is the pending-registry removal linearization point. Never
     // look up the current Input owner here: a newer generation may have been
     // admitted after the RTSP critical section and must survive.
