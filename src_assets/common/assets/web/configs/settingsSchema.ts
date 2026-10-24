@@ -62,6 +62,8 @@ export const clientOverrideableKeys = new Set([
   'motion_as_ds4',
   'touchpad_as_ds4',
   'back_button_timeout',
+  'guide_button_key',
+  'guide_button_controller',
   'keyboard',
   'key_repeat_delay',
   'key_repeat_frequency',
@@ -280,6 +282,7 @@ const gamepadOptions = [
   option('vhf_ds5', 'config.gamepad_vhf_ds5'),
   option('usbip_ds5', 'config.gamepad_usbip_ds5'),
   option('vhf_switch', 'config.gamepad_vhf_switch'),
+  option('vhf_steam', 'config.gamepad_vhf_steam'),
 ];
 
 export function gamepadOptionsForPlatform(platform: string): SettingsOption[] {
@@ -296,6 +299,7 @@ export function gamepadOptionsForPlatform(platform: string): SettingsOption[] {
         'vhf_ds5',
         'usbip_ds5',
         'vhf_switch',
+        'vhf_steam',
       ])
     : normalized.includes('linux')
       ? new Set(['auto', 'xone', 'ds4', 'ds5', 'switch'])
@@ -790,6 +794,7 @@ export const settingsCategories: SettingsCategory[] = [
             stacked: true,
           },
           text('fallback_mode'),
+          boolean('dd_remove_virtual_display_after_restore', { platform: 'windows' }),
           boolean('dd_config_revert_on_disconnect', { platform: ['windows', 'linux'] }),
           number('dd_config_revert_delay', {
             min: 0,
@@ -806,6 +811,8 @@ export const settingsCategories: SettingsCategory[] = [
           }),
           text('dd_snapshot_restore_hotkey', { platform: 'windows' }),
           text('dd_snapshot_restore_hotkey_modifiers', { platform: 'windows' }),
+          text('end_stream_hotkey', { platform: 'windows' }),
+          text('end_stream_hotkey_modifiers', { platform: 'windows' }),
         ],
       },
     ],
@@ -818,6 +825,7 @@ export const settingsCategories: SettingsCategory[] = [
         fields: [
           select('capture', captureOptions, { warningKey: 'config.capture_virtual_warning' }),
           boolean('wgc_pacing_smoothing', { platform: 'windows' }),
+          boolean('wgc_direct_encoder_input', { platform: 'windows' }),
         ],
       },
       {
@@ -893,6 +901,8 @@ export const settingsCategories: SettingsCategory[] = [
         id: 'input_repeat',
         fields: [
           extendedField('back_button_timeout'),
+          extendedField('guide_button_key'),
+          extendedField('guide_button_controller'),
           extendedField('key_rightalt_to_key_win'),
           extendedField('ds5_inputtino_randomize_mac', { platform: 'linux' }),
           { key: 'keybindings', kind: 'textarea', stacked: true },
@@ -924,11 +934,11 @@ export const settingsCategories: SettingsCategory[] = [
     groups: [
       {
         id: 'video_rtx_hdr',
-        platform: 'windows',
+        platform: ['windows', 'linux'],
         collapsed: true,
         fields: Object.keys(extendedDefaults)
           .filter((key) => key.startsWith('rtx_hdr'))
-          .map((key) => extendedField(key, { platform: 'windows' })),
+          .map((key) => extendedField(key, { platform: ['windows', 'linux'], encoderFamily: 'nvidia' })),
       },
       {
         id: 'video_encoder',
@@ -936,6 +946,7 @@ export const settingsCategories: SettingsCategory[] = [
           select('encoder', [option('', '_common.auto')]),
           boolean('ignore_encoder_probe_failure'),
           boolean('wgc_pacing_smoothing', { platform: 'windows' }),
+          boolean('wgc_direct_encoder_input', { platform: 'windows' }),
         ],
       },
       {
@@ -1008,6 +1019,7 @@ export const settingsCategories: SettingsCategory[] = [
           text('bind_address', { monospace: true, stacked: true }),
           text('external_ip', { monospace: true, stacked: true }),
           number('ping_timeout', { min: 0, step: 1 }),
+          number('control_peer_timeout', { min: 0, max: 86399999, step: 1 }),
         ],
       },
       {
@@ -1095,6 +1107,13 @@ export const settingsCategories: SettingsCategory[] = [
             step: 1,
             visibleWhen: { key: 'session_history_enabled', equals: true },
           }),
+          boolean('hardware_metrics'),
+          number('hardware_metrics_interval', {
+            min: 500,
+            max: 10000,
+            step: 100,
+            visibleWhen: { key: 'hardware_metrics', equals: true },
+          }),
           boolean('realtime_stats_enabled'),
           number('realtime_stats_poll_interval_ms', {
             min: 250,
@@ -1174,10 +1193,13 @@ export const settingsDefaults: Record<string, unknown> = {
   vulkan_hdr_layer: true,
   dd_wa_dummy_plug_hdr10: false,
   wayland_hdr_compatibility: false,
+  dd_remove_virtual_display_after_restore: false,
   dd_config_revert_on_disconnect: false,
   dd_config_revert_delay: 3000,
   dd_always_restore_from_golden: true,
   dd_paused_virtual_display_timeout_secs: 7200,
+  end_stream_hotkey: '',
+  end_stream_hotkey_modifiers: 'ctrl+alt+shift',
   dd_snapshot_restore_hotkey: '',
   dd_snapshot_restore_hotkey_modifiers: 'ctrl+alt+shift',
   keyboard: true,
@@ -1213,6 +1235,7 @@ export const settingsDefaults: Record<string, unknown> = {
   qsv_preset: 'medium',
   amd_quality: 'speed',
   wgc_pacing_smoothing: true,
+  wgc_direct_encoder_input: true,
   hevc_mode: 0,
   av1_mode: 0,
   pyrowave: true,
@@ -1231,6 +1254,7 @@ export const settingsDefaults: Record<string, unknown> = {
   bind_address: '',
   external_ip: '',
   ping_timeout: 10000,
+  control_peer_timeout: 0,
   lan_encryption_mode: 0,
   wan_encryption_mode: 1,
   csrf_allowed_origins: '',
@@ -1241,6 +1265,8 @@ export const settingsDefaults: Record<string, unknown> = {
   session_history_enabled: true,
   session_history_ttl_days: 0,
   session_history_db_size_limit_mb: 0,
+  hardware_metrics: false,
+  hardware_metrics_interval: 1000,
   realtime_stats_enabled: true,
   realtime_stats_poll_interval_ms: 2000,
 };

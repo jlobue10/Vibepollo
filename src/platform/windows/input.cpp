@@ -10,7 +10,9 @@
 
 // standard includes
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -24,6 +26,7 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/steam_controller_protocol.h"
 #include "vhf_gamepad.h"
 #include "dualsense_usbip_gamepad.h"
 #include "dualsense_usbip_gamepad_policy.h"
@@ -225,6 +228,7 @@ namespace platf {
   class vigem_t {
   private:
     bool driver_available {false};
+    std::array<std::atomic_bool, MAX_GAMEPADS> first_rumble_callback_logged {};
 
   public:
     // Set before init() so the ViGEmBus diagnostics can tell "no gamepad support at all" from
@@ -269,6 +273,7 @@ namespace platf {
     int alloc_gamepad_internal(const gamepad_id_t &id, feedback_queue_t &feedback_queue, VIGEM_TARGET_TYPE gp_type) {
       auto &gamepad = gamepads[id.globalIndex];
       assert(!gamepad.gp);
+      first_rumble_callback_logged[id.globalIndex].store(false, std::memory_order_relaxed);
 
       gamepad.client_relative_index = id.clientRelativeIndex;
       gamepad.last_report_ts = std::chrono::steady_clock::now();
@@ -385,6 +390,10 @@ namespace platf {
         auto &gamepad = gamepads[x];
 
         if (gamepad.gp.get() == target) {
+          if (!first_rumble_callback_logged[x].exchange(true, std::memory_order_relaxed)) {
+            BOOST_LOG(info) << "ViGEm rumble output callback observed for gamepad slot "sv << x;
+          }
+
           // Convert from 8-bit to 16-bit values
           uint16_t normalizedLargeMotor = largeMotor << 8;
           uint16_t normalizedSmallMotor = smallMotor << 8;
@@ -398,6 +407,7 @@ namespace platf {
               normalizedLargeMotor,
               normalizedSmallMotor
             );
+            msg.from_vigem = true;
             gamepad.feedback_queue->raise(msg);
             gamepad.last_rumble = msg;
           }
@@ -528,25 +538,8 @@ namespace platf {
            config::input.gamepad == "vhf_xbox_one"sv ||
            config::input.gamepad == "vhf_ds4"sv ||
            config::input.gamepad == "vhf_ds5"sv ||
-           config::input.gamepad == "vhf_switch"sv;
-  }
-
-  /**
-   * @brief Reports whether the configured VHF controller has a touchpad.
-   * @return `true` when the selection always yields a PlayStation controller.
-   */
-  static bool vhf_gamepad_has_touchpad() {
-    return config::input.gamepad == "vhf_ds4"sv || config::input.gamepad == "vhf_ds5"sv;
-  }
-
-  /**
-   * @brief Reports whether the configured VHF controller definitely has no touchpad.
-   * @return `true` when the selection always yields an Xbox controller.
-   */
-  static bool vhf_gamepad_is_xbox() {
-    return config::input.gamepad == "vhf_xbox"sv ||
-           config::input.gamepad == "vhf_xbox_one"sv ||
-           config::input.gamepad == "vhf_switch"sv;
+           config::input.gamepad == "vhf_switch"sv ||
+           config::input.gamepad == "vhf_steam"sv;
   }
 
   /**
@@ -796,17 +789,42 @@ namespace platf {
     send_input(i);
   }
 
+  struct client_input_raw_t;
+
+  struct pointer_repeat_state_t {
+    std::mutex mutex;
+    std::uint64_t generation = 0;
+    bool enabled = false;
+    thread_pool_util::ThreadPool::task_id_t task {};
+    client_input_raw_t *owner = nullptr;
+  };
+
   struct client_input_raw_t: public client_input_t {
     client_input_raw_t(input_t &input) {
       global = (input_raw_t *) input.get();
+      penRepeatState->owner = this;
+      touchRepeatState->owner = this;
     }
 
     ~client_input_raw_t() override {
-      if (penRepeatTask) {
-        task_pool.cancel(penRepeatTask);
+      {
+        std::lock_guard lock {penRepeatState->mutex};
+        penRepeatState->enabled = false;
+        ++penRepeatState->generation;
+        if (penRepeatState->task) task_pool.cancel(penRepeatState->task);
+        penRepeatState->task = nullptr;
+        // A task already popped from the pool can still run after cancel().
+        // It retains the control block and sees a null owner before touching
+        // this object or its Windows pointer device.
+        penRepeatState->owner = nullptr;
       }
-      if (touchRepeatTask) {
-        task_pool.cancel(touchRepeatTask);
+      {
+        std::lock_guard lock {touchRepeatState->mutex};
+        touchRepeatState->enabled = false;
+        ++touchRepeatState->generation;
+        if (touchRepeatState->task) task_pool.cancel(touchRepeatState->task);
+        touchRepeatState->task = nullptr;
+        touchRepeatState->owner = nullptr;
       }
 
       if (pen) {
@@ -826,12 +844,12 @@ namespace platf {
 
     HSYNTHETICPOINTERDEVICE pen {};
     POINTER_TYPE_INFO penInfo {};
-    thread_pool_util::ThreadPool::task_id_t penRepeatTask {};
+    std::shared_ptr<pointer_repeat_state_t> penRepeatState {std::make_shared<pointer_repeat_state_t>()};
 
     HSYNTHETICPOINTERDEVICE touch {};
     POINTER_TYPE_INFO touchInfo[10] {};
     UINT32 activeTouchSlots {};
-    thread_pool_util::ThreadPool::task_id_t touchRepeatTask {};
+    std::shared_ptr<pointer_repeat_state_t> touchRepeatState {std::make_shared<pointer_repeat_state_t>()};
   };
 
   /**
@@ -975,30 +993,79 @@ namespace platf {
   // the injected input periodically.
   constexpr auto ISPI_REPEAT_INTERVAL = 50ms;
 
+  void repeat_touch(std::shared_ptr<pointer_repeat_state_t> state, std::uint64_t generation);
+  void repeat_pen(std::shared_ptr<pointer_repeat_state_t> state, std::uint64_t generation);
+
+  void schedule_touch_repeat_locked(const std::shared_ptr<pointer_repeat_state_t> &state, const std::uint64_t generation) {
+    state->enabled = true;
+    state->task = task_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, state, generation).task_id;
+  }
+
+  void schedule_touch_repeat(client_input_raw_t *raw) {
+    auto state = raw->touchRepeatState;
+    std::lock_guard lock {state->mutex};
+    if (state->owner) schedule_touch_repeat_locked(state, state->generation);
+  }
+
+  void stop_touch_repeat(client_input_raw_t *raw) {
+    auto state = raw->touchRepeatState;
+    std::lock_guard lock {state->mutex};
+    state->enabled = false;
+    ++state->generation;
+    if (state->task) task_pool.cancel(state->task);
+    state->task = nullptr;
+  }
+
+  void schedule_pen_repeat_locked(const std::shared_ptr<pointer_repeat_state_t> &state, const std::uint64_t generation) {
+    state->enabled = true;
+    state->task = task_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, state, generation).task_id;
+  }
+
+  void schedule_pen_repeat(client_input_raw_t *raw) {
+    auto state = raw->penRepeatState;
+    std::lock_guard lock {state->mutex};
+    if (state->owner) schedule_pen_repeat_locked(state, state->generation);
+  }
+
+  void stop_pen_repeat(client_input_raw_t *raw) {
+    auto state = raw->penRepeatState;
+    std::lock_guard lock {state->mutex};
+    state->enabled = false;
+    ++state->generation;
+    if (state->task) task_pool.cancel(state->task);
+    state->task = nullptr;
+  }
+
   /**
    * @brief Repeats the current touch state to avoid the interactions timing out.
    * @param raw The raw client-specific input context.
    */
-  void repeat_touch(client_input_raw_t *raw) {
+  void repeat_touch(std::shared_ptr<pointer_repeat_state_t> state, const std::uint64_t generation) {
+    std::lock_guard lock {state->mutex};
+    auto raw = state->owner;
+    if (!raw || !state->enabled || generation != state->generation) return;
     if (!inject_synthetic_pointer_input(raw->global, raw->touch, raw->touchInfo, raw->activeTouchSlots)) {
       auto err = GetLastError();
       BOOST_LOG(warning) << "Failed to refresh virtual touch input: "sv << err;
     }
 
-    raw->touchRepeatTask = task_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, raw).task_id;
+    schedule_touch_repeat_locked(state, generation);
   }
 
   /**
    * @brief Repeats the current pen state to avoid the interactions timing out.
    * @param raw The raw client-specific input context.
    */
-  void repeat_pen(client_input_raw_t *raw) {
+  void repeat_pen(std::shared_ptr<pointer_repeat_state_t> state, const std::uint64_t generation) {
+    std::lock_guard lock {state->mutex};
+    auto raw = state->owner;
+    if (!raw || !state->enabled || generation != state->generation) return;
     if (!inject_synthetic_pointer_input(raw->global, raw->pen, &raw->penInfo, 1)) {
       auto err = GetLastError();
       BOOST_LOG(warning) << "Failed to refresh virtual pen input: "sv << err;
     }
 
-    raw->penRepeatTask = task_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, raw).task_id;
+    schedule_pen_repeat_locked(state, generation);
   }
 
   /**
@@ -1006,12 +1073,6 @@ namespace platf {
    * @param raw The raw client-specific input context.
    */
   void cancel_all_active_touches(client_input_raw_t *raw) {
-    // Cancel touch repeat callbacks
-    if (raw->touchRepeatTask) {
-      task_pool.cancel(raw->touchRepeatTask);
-      raw->touchRepeatTask = nullptr;
-    }
-
     // Compact touches to update activeTouchSlots
     perform_touch_compaction(raw);
 
@@ -1068,11 +1129,7 @@ namespace platf {
       }
     }
 
-    // Cancel touch repeat callbacks
-    if (raw->touchRepeatTask) {
-      task_pool.cancel(raw->touchRepeatTask);
-      raw->touchRepeatTask = nullptr;
-    }
+    stop_touch_repeat(raw);
 
     // If this is a special request to cancel all touches, do that and return
     if (touch.eventType == LI_TOUCH_EVENT_CANCEL_ALL) {
@@ -1157,7 +1214,7 @@ namespace platf {
 
     // If we still have an active touch, refresh the touch state periodically
     if (raw->activeTouchSlots > 1 || touchInfo.pointerInfo.pointerFlags != POINTER_FLAG_NONE) {
-      raw->touchRepeatTask = task_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, raw).task_id;
+      schedule_touch_repeat(raw);
     }
   }
 
@@ -1194,11 +1251,7 @@ namespace platf {
       }
     }
 
-    // Cancel pen repeat callbacks
-    if (raw->penRepeatTask) {
-      task_pool.cancel(raw->penRepeatTask);
-      raw->penRepeatTask = nullptr;
-    }
+    stop_pen_repeat(raw);
 
     raw->penInfo.type = PT_PEN;
 
@@ -1276,7 +1329,7 @@ namespace platf {
 
     // If we still have an active pen interaction, refresh the pen state periodically
     if (penInfo.pointerInfo.pointerFlags != POINTER_FLAG_NONE) {
-      raw->penRepeatTask = task_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, raw).task_id;
+      schedule_pen_repeat(raw);
     }
   }
 
@@ -1336,20 +1389,49 @@ namespace platf {
     const bool automatic_vhf_fallback =
       config::input.gamepad == "auto"sv &&
       vhf_gamepad::select_automatic_backend(vigem_available, vhf_available) == vhf_gamepad::backend_e::vhf;
+    // Only the VHF driver can present a Steam Controller; under `auto` with ViGEmBus installed
+    // the client would otherwise silently become an Xbox 360 pad and lose both pads, grips,
+    // motion, battery and haptics. ViGEmBus remains the fallback if the allocation fails.
+    const bool steam_client_prefers_vhf =
+      config::input.gamepad == "auto"sv && vhf_available &&
+      vhf_gamepad::is_steam_controller_client(metadata.type, metadata.capabilities);
 
-    if (vhf_gamepad_selected() || automatic_vhf_fallback) {
+    if (vhf_gamepad_selected() || automatic_vhf_fallback || steam_client_prefers_vhf) {
       const auto desired = vhf_desired_profile(metadata);
+
+      if (config::input.gamepad == "vhf_steam"sv && desired != vhf_profile_e::steam_controller) {
+        BOOST_LOG(info) << "Gamepad " << id.globalIndex << " is not a Steam Controller (2026) client controller (type "sv
+                        << static_cast<int>(metadata.type) << ", capabilities "sv << metadata.capabilities
+                        << "); vhf_steam is kept for Steam Controllers and this one gets the automatic choice"sv;
+      }
 
       if (vhf_available) {
         BOOST_LOG(info) << "Gamepad " << id.globalIndex << " will use the Vibepollo virtual gamepad driver"sv
-                        << (automatic_vhf_fallback ? " (automatic fallback)"sv : ""sv);
+                        << (automatic_vhf_fallback ? " (automatic fallback)"sv :
+                            steam_client_prefers_vhf ? " (Steam Controller client)"sv : ""sv);
 
-        if (raw->vhf->alloc(id, feedback_queue, desired) == 0) {
+        if (raw->vhf->alloc(id, feedback_queue, desired, metadata.capabilities) == 0) {
           raw->gamepad_backend[id.globalIndex] = gamepad_backend_e::vhf;
           return 0;
         }
       }
 
+      // Only a vhf_* config value is an explicit choice. A profile inferred from the
+      // client's controller type (Steam Controller, Switch, PlayStation) under plain
+      // `vhf` is a preference: when the installed driver does not offer it, retry with
+      // the driver's automatic profile rather than leaving the client with no controller.
+      const bool explicit_profile = config::input.gamepad != "vhf"sv && config::input.gamepad != "auto"sv;
+      if (vhf_available && desired != vhf_profile_e::automatic && !explicit_profile) {
+        BOOST_LOG(warning) << "Gamepad " << id.globalIndex
+                           << " could not get the profile its controller type suggests; retrying with the driver's automatic profile"sv;
+        if (raw->vhf->alloc(id, feedback_queue, vhf_profile_e::automatic, metadata.capabilities) == 0) {
+          raw->gamepad_backend[id.globalIndex] = gamepad_backend_e::vhf;
+          return 0;
+        }
+      }
+
+      // With no ViGEm backend, exhaust the driver's automatic profile before
+      // failing. The client-derived profile above is only a preference under auto.
       if (automatic_vhf_fallback) {
         BOOST_LOG(error) << "Gamepad " << id.globalIndex << " could not be created on the Vibepollo virtual gamepad driver"sv;
         return -1;
@@ -1357,8 +1439,9 @@ namespace platf {
 
       // An explicit profile must not be replaced by an automatic/client-selected profile or by
       // ViGEmBus. Otherwise a failed Switch Pro allocation makes the client override appear to
-      // win even though the user selected a specific VHF profile.
-      if (desired != vhf_profile_e::automatic) {
+      // win even though the user selected a specific VHF profile. A Steam Controller client
+      // under `auto` chose nothing explicitly, so it may still fall back to ViGEmBus.
+      if (explicit_profile && desired != vhf_profile_e::automatic && !steam_client_prefers_vhf) {
         BOOST_LOG(error) << "Gamepad " << id.globalIndex << " could not create the requested Vibepollo controller profile; refusing to substitute another profile"sv;
         return -1;
       }
@@ -1936,6 +2019,21 @@ namespace platf {
   }
 
   /**
+   * @brief Hands the real Steam Controller's firmware attributes to the virtual controller.
+   * @details Only the VHF driver presents a Steam Controller; ViGEmBus and the DualSense USB/IP
+   *          backend have no device that answers Steam's attribute reads, so they get nothing.
+   * @param input The global input context.
+   * @param attributes The attributes.
+   */
+  void gamepad_attributes(input_t &input, const steam_controller_attributes_t &attributes) {
+    auto raw = (input_raw_t *) input.get();
+
+    if (vhf_owns_gamepad(raw, attributes.id.globalIndex)) {
+      raw->vhf->attributes(attributes.id.globalIndex, attributes);
+    }
+  }
+
+  /**
    * @brief Sends a gamepad battery event to the OS.
    * @param input The global input context.
    * @param battery The battery event.
@@ -2040,6 +2138,7 @@ namespace platf {
         supported_gamepad_t {"vhf_ds5", false, ""},
         supported_gamepad_t {"usbip_ds5", false, ""},
         supported_gamepad_t {"vhf_switch", false, ""},
+        supported_gamepad_t {"vhf_steam", false, ""},
       };
 
       return gps;
@@ -2066,7 +2165,8 @@ namespace platf {
       supported_gamepad_t {"vhf_ds4", vhf_enabled, vhf_reason},
       supported_gamepad_t {"vhf_ds5", vhf_enabled, vhf_reason},
       supported_gamepad_t {"usbip_ds5", usbip_enabled, usbip_reason},
-      supported_gamepad_t {"vhf_switch", vhf_enabled, vhf_reason}
+      supported_gamepad_t {"vhf_switch", vhf_enabled, vhf_reason},
+      supported_gamepad_t {"vhf_steam", vhf_enabled, vhf_reason}
     };
 
     // A gamepad type that is unavailable only because its backend is not installed is not
@@ -2094,16 +2194,14 @@ namespace platf {
   platform_caps::caps_t get_capabilities() {
     platform_caps::caps_t caps = 0;
 
-    // We support controller touchpad input as long as we're not emulating X360, which has no
-    // touchpad. On the VHF driver it depends on the controller: the PlayStation profiles have
-    // one, and plain `vhf` may still select one for a PlayStation client, so advertise it unless
-    // the selection rules out a touchpad entirely.
-    const bool vhf_without_touchpad =
-      vhf_gamepad_selected() && !vhf_gamepad_has_touchpad() &&
-      (vhf_gamepad_is_xbox() ||
-       (!config::input.motion_as_ds4 && !config::input.touchpad_as_ds4));
+    // Controller touch depends on which controller the client will get (see
+    // vhf_gamepad::supports_controller_touch): plain `vhf` selects a pad-bearing profile
+    // from the client's controller type (Steam Controller, PlayStation) whatever
+    // motion_as_ds4/touchpad_as_ds4 say, so only x360 and the explicit Xbox and Switch
+    // selections rule a touchpad out. Withholding the flag silences both Steam Controller
+    // trackpads: the client never sends a touch packet without it.
     const bool composite_dualsense = config::input.gamepad == "usbip_ds5"sv || dualsense_usbip_gamepad::enabled();
-    if (composite_dualsense || (config::input.gamepad != "x360"sv && !vhf_without_touchpad)) {
+    if (vhf_gamepad::supports_controller_touch(config::input.gamepad, composite_dualsense)) {
       caps |= platform_caps::controller_touch;
     }
 

@@ -15,6 +15,47 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# DRIVER_INTEROP_COMPILER_BEGIN
+# Windows PowerShell 5's Add-Type uses CodeDOM's ANSI environment block and
+# rejects otherwise valid environments above 65535 bytes (#610). Invoke the
+# same framework compiler directly so Windows inherits the full environment.
+# Keep this helper inline: the driver scripts also ship as standalone files.
+function Add-DriverInteropType {
+    param(
+        [Parameter(Mandatory = $true)][string]$TypeDefinition,
+        [string[]]$ReferencedAssemblies = @('System', 'System.Core')
+    )
+    # PowerShell Core compiles in-process and has no Framework csc.exe.
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        Add-Type @PSBoundParameters
+        return
+    }
+    $runtime = [Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+    $compiler = Join-Path $runtime 'csc.exe'
+    $temporary = Join-Path ([IO.Path]::GetTempPath()) ('driver-interop-' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $temporary -ErrorAction Stop
+    try {
+        $source = Join-Path $temporary 'interop.cs'
+        $assembly = Join-Path $temporary 'interop.dll'
+        [IO.File]::WriteAllText($source, $TypeDefinition, [Text.UTF8Encoding]::new($true))
+        $compilerArguments = @('/nologo', '/noconfig', '/target:library', "/out:$assembly")
+        foreach ($reference in $ReferencedAssemblies) {
+            $compilerArguments += '/reference:' + (Join-Path $runtime ($reference + '.dll'))
+        }
+        $compilerArguments += $source
+        $diagnostics = & $compiler @compilerArguments 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Driver interop compilation failed (exit $LASTEXITCODE): $($diagnostics -join [Environment]::NewLine)"
+        }
+        # Load bytes so no assembly file remains locked when the scratch is removed.
+        $null = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($assembly))
+    } finally {
+        Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction Stop
+    }
+}
+# DRIVER_INTEROP_COMPILER_END
+
+
 $packageFiles = @(
     'driver/VibeshineVhfGamepad.inf',
     'driver/VibeshineVhfGamepad.dll',
@@ -30,18 +71,18 @@ $manifestPayload = @(
     'tools/VibeshineVhfGamepadDeviceSetup.exe'
 )
 $localTestCertificate = 'driver/VibeshineVhfGamepad.cer'
-$expectedProducerRepository = 'Nonary/libvirtualgamepad'
-$expectedProducerTag = 'v0.1.0-beta.7'
-$expectedProducerAsset = 'libvirtualgamepad-0.1.0-beta.7-windows-x64.zip'
-$expectedProducerArchiveSha256 = '56e57fc70b9c3fdc5dfd0f44f01255275c114711b46521224204a385cde3a6e2'
-$expectedProducerSourceRevision = '9edbce11ad71e9455867c356c8368a6b39fa2242'
-$expectedDriverVer = '10/04/2026,0.1.0.48'
+$expectedProducerRepository = 'jlobue10/libvirtualgamepad'
+$expectedProducerTag = 'v0.1.0-beta.154'
+$expectedProducerAsset = 'libvirtualgamepad-0.1.0-beta.154-windows-x64.zip'
+$expectedProducerArchiveSha256 = 'f6de993dc8ea8406190432fa83d6ee2f0f56ff28f4154a273302e5948bf228f4'
+$expectedProducerSourceRevision = '57de074169e5d65d06775edc6cff7ab4ec9305f1'
+$expectedDriverVer = '10/17/2026,0.1.0.230'
 $expectedProtocolVersion = 2
 $expectedSignPathFoundationSignerSubject = 'CN=SignPath Foundation, O=SignPath Foundation, L=Lewes, S=Delaware, C=US'
 
 # Signing channel for a package that ships unsigned and is signed by the
 # consumer MSI signing request instead. SignPath is not available on
-# Nonary/libvirtualgamepad, so its releases cannot carry a production
+# jlobue10/libvirtualgamepad, so its releases cannot carry a production
 # signature; the catalogue is signed downstream, inside the MSI.
 $msiRequestChannel = 'msi-request-signing'
 
@@ -430,7 +471,7 @@ function Assert-LocalTestCertificateIdentity {
 
 function Initialize-LocalGamepadTrustValidation {
     if ('VhfLocalTrustValidation' -as [type]) { return }
-    Add-Type -ReferencedAssemblies @('System', 'System.Core', 'System.Security') -TypeDefinition @"
+    Add-DriverInteropType -ReferencedAssemblies @('System', 'System.Core', 'System.Security') -TypeDefinition @"
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
